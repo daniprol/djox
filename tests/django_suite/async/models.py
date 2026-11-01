@@ -10,11 +10,9 @@ class RelatedModel(models.Model):
     objects = djox.Manager()  # djox: Django's models use the default manager.
 
 
-class SimpleModel(models.Model):
+class SimpleModel(djox.Model):  # djox: Django's model is a models.Model, with the default manager.
     field = models.IntegerField()
     created = models.DateTimeField(default=timezone.now)
-
-    objects = djox.Manager()  # djox: Django's models use the default manager.
 
 
 class ManyToManyModel(models.Model):

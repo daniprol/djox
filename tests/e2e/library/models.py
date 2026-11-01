@@ -1,14 +1,12 @@
-"""A small Django app for the tests: authors and their books, with `djox.Manager`."""
+"""A small Django app for the tests: authors (a `djox.Model`) and their books (with `djox.Manager`)."""
 
 from django.db import models
 
 import djox
 
 
-class Author(models.Model):
+class Author(djox.Model):
     name = models.CharField(max_length=100)
-
-    objects = djox.Manager()
 
 
 class Book(models.Model):

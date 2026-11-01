@@ -79,10 +79,14 @@ them, and it should teach them both along the way.
   runs it). Rows are turned into results by Django's own iterable classes
   (`_results.py`); single-statement methods are replayed with the answer
   (`backends/sqlite3/compiler.py`); `_running.py` decides where the SQL runs.
+- **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
+  djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
+  `djox.Model`...) run unchanged on a small pool of djox's threads, not on
+  Django's single sync thread. Writers on one SQLite file take turns in
+  asyncio.
 - **`djox.atomic()`** (`src/djox/transaction.py`): Django's own `atomic()`,
   run on a pooled thread that the block owns (asgiref's
   `ThreadSensitiveContext` sends the block's `sync_to_async()` calls there).
-  Blocks on one SQLite file take turns in asyncio.
 - **Rust does the heavy, repetitive work** (running SQL, converting rows,
   later compiling common queries). Python keeps the Django-facing API small
   and readable.
@@ -128,8 +132,8 @@ them, and it should teach them both along the way.
    breaks. A query inside a sync `atomic()` block (like Django's `TestCase`)
    runs on that block's connection, or it couldn't see the block's writes.
 4. `djox.atomic()` and `djox.on_commit()`: async transactions and savepoints
-   (done). Next: `aget_or_create`, `abulk_create`, cascading `adelete` and
-   model `asave` run on djox too, inside a `djox.atomic()` block.
+   (done). The methods that need a transaction, and `djox.Model`'s
+   `asave()`, run Django's sync code on djox's own threads (done).
 5. Hooks, in the style of pyox-agents: plain functions (sync or async) called
    at fixed points (`before_query`, `after_query`...), returning `None` to
    change nothing or a new value to replace it. Django's signals keep working

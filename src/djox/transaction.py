@@ -46,31 +46,23 @@ must finish before the block ends, and only one of them at a time should open
 a nested block (a savepoint is a stack: two at once would mix).
 """
 
-import asyncio
 import functools
-import threading
-import weakref
+from asyncio import Lock
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack
-from contextvars import ContextVar
 from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
 
 from asgiref.sync import ThreadSensitiveContext, sync_to_async
-from django.db import DEFAULT_DB_ALIAS, OperationalError, transaction
+from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db import connections as django_connections
 
 from djox import _running
-from djox.backends.sqlite3.base import DatabaseWrapper
+from djox._threads import give_back_idle_thread, take_idle_thread, transaction_thread, wait_for_write_turn
 
 Parameters = ParamSpec("Parameters")
 Result = TypeVar("Result")
-
-# Idle threads kept for the next transaction. More can run at once; the
-# extra ones are closed when their transaction ends. (SQLite runs one write
-# transaction at a time anyway, so a few threads are plenty.)
-MAX_IDLE_THREADS = 8
 
 
 class Atomic:
@@ -92,7 +84,7 @@ class Atomic:
         # Set while the block is open (between `__aenter__` and `__aexit__`):
         self.django_atomic: Any = None
         self.thread: ThreadPoolExecutor | None = None
-        self.write_turn: asyncio.Lock | None = None
+        self.write_turn: Lock | None = None
         # Leaves the `ThreadSensitiveContext` when the block ends. An
         # `AsyncExitStack` is an `async with` block that can be entered in
         # one method and left in another.
@@ -204,87 +196,3 @@ async def on_commit(function: Callable[[], object], using: str | None = None, ro
     exceptions instead of raising them.
     """
     await sync_to_async(transaction.on_commit, thread_sensitive=True)(function, using, robust)
-
-
-async def wait_for_write_turn(alias: str) -> asyncio.Lock | None:
-    """Wait until no other `djox.atomic()` block of this event loop writes to
-    `alias`'s SQLite file, and return the lock to release when done (or `None`
-    if blocks needn't wait).
-
-    SQLite runs one write transaction at a time. djox's `ENGINE` starts
-    transactions with `BEGIN IMMEDIATE`, which takes the write lock at once,
-    so two blocks can't both be open. Without this turn, the second block's
-    `BEGIN` would wait inside SQLite, which retries with growing sleeps (up to
-    100 ms each): with many blocks at once, most of the time would be spent
-    asleep. Waiting here instead, each block starts the moment the previous
-    one ends.
-
-    Like SQLite, it gives up after the alias's `timeout` option, with
-    "database is locked".
-    """
-    wrapper = django_connections[alias]
-    if not isinstance(wrapper, DatabaseWrapper):
-        return None  # not djox's SQLite: the database itself decides who waits
-    options = wrapper.options()
-    if options.transaction_mode not in ("IMMEDIATE", "EXCLUSIVE"):
-        return None  # a deferred transaction takes the write lock only when it writes
-    lock = write_turns_of_this_loop().setdefault(alias, asyncio.Lock())
-    try:
-        async with asyncio.timeout(options.timeout):
-            await lock.acquire()
-    except TimeoutError:
-        raise OperationalError(
-            f"database is locked: another djox.atomic() block on {alias!r} lasted more than "
-            f"{options.timeout} seconds (the 'timeout' option)"
-        ) from None
-    return lock
-
-
-def write_turns_of_this_loop() -> dict[str, asyncio.Lock]:
-    """The write-turn locks of the running event loop, by alias.
-
-    An `asyncio.Lock` belongs to one event loop, and a program may run
-    several loops (one per thread). A `WeakKeyDictionary` forgets a loop's
-    locks once the loop is gone.
-    """
-    loop = asyncio.get_running_loop()
-    with write_turns_lock:
-        if loop not in write_turns:
-            write_turns[loop] = {}
-        return write_turns[loop]
-
-
-write_turns: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]" = (
-    weakref.WeakKeyDictionary()
-)
-write_turns_lock = threading.Lock()
-
-# The thread of the djox.atomic() block this code runs in, or `None`.
-transaction_thread: ContextVar[ThreadPoolExecutor | None] = ContextVar("djox_transaction_thread", default=None)
-
-# Threads with no transaction, ready for the next one. Each keeps its own
-# Django connections open. The lock is like `threading.Lock` in any Python
-# code: several event loops (in several threads) may use the pool.
-idle_threads: list[ThreadPoolExecutor] = []
-idle_threads_lock = threading.Lock()
-
-
-def take_idle_thread() -> ThreadPoolExecutor:
-    """An idle thread from the pool, or a new one."""
-    with idle_threads_lock:
-        if idle_threads:
-            return idle_threads.pop()
-    # `max_workers=1`: an executor with exactly one thread, so the whole
-    # transaction runs on one thread and one connection.
-    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="djox-atomic")
-
-
-def give_back_idle_thread(thread: ThreadPoolExecutor) -> None:
-    """Put a thread back in the pool, or close it if the pool is full."""
-    with idle_threads_lock:
-        if len(idle_threads) < MAX_IDLE_THREADS:
-            idle_threads.append(thread)
-            return
-    # Close the thread's Django connections on the thread itself (they belong to it), then the thread.
-    thread.submit(django_connections.close_all)
-    thread.shutdown(wait=False)

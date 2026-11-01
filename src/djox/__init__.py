@@ -9,7 +9,8 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
 - `"ENGINE": "djox.backends.sqlite3"` makes Django use djox's SQLite too, and
   `djox.connections["default"]` gives the async database for a Django alias.
 - `djox.Manager` (with `djox.QuerySet`) runs Django's async QuerySet methods
-  (`aget()`, `acount()`, `async for`...) on djox.
+  (`aget()`, `acount()`, `async for`...) on djox, and `djox.Model` adds the
+  model's own `asave()`, `adelete()` and `arefresh_from_db()`.
 - `djox.atomic()` and `djox.on_commit()` are Django's transactions, for
   async code (`async with djox.atomic(): ...`).
 
@@ -48,6 +49,7 @@ from djox._core import (
 
 if TYPE_CHECKING:
     from djox.manager import Manager
+    from djox.models import Model
     from djox.query import QuerySet
     from djox.transaction import atomic, on_commit
 
@@ -63,6 +65,10 @@ def __getattr__(name: str) -> Any:
         from djox.manager import Manager
 
         return Manager
+    if name == "Model":
+        from djox.models import Model
+
+        return Model
     if name == "QuerySet":
         from djox.query import QuerySet
 
@@ -91,6 +97,7 @@ __all__ = [
     "InterfaceError",
     "InternalError",
     "Manager",
+    "Model",
     "NotSupportedError",
     "OperationalError",
     "ProgrammingError",

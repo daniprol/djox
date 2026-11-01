@@ -4,8 +4,11 @@ The same queries through Django's ORM, plain `sqlite3` and djox, on a SQLite
 file with 10,000 books.
 
 ```bash
-cd benchmarks && uv run python run.py   # prints the table, writes results/latest.json
+cd benchmarks && uv run --reinstall-package djox python run.py   # prints the table, writes results/latest.json
 ```
+
+`--reinstall-package djox` rebuilds djox from this checkout: the benchmarks
+install it as a normal package, and uv doesn't notice changes to its Python files.
 
 ## Contenders
 
@@ -28,13 +31,18 @@ Python 3.13, Django 6.1.
 
 | | django sync | djox sync | sqlite3 | django async | djox.Manager | djox |
 |---|---|---|---|---|---|---|
-| get one book by id | 164 | 157 | 3 | 537 | 325 | 70 |
-| fetch 20 books | 488 | 380 | 20 | 1,062 | 725 | 99 |
-| fetch 1,000 books | 6,163 | 6,009 | 481 | 8,462 | 8,163 | 892 |
-| count | 247 | 164 | 56 | 774 | 398 | 118 |
-| insert one book | 139 | 154 | 41 | 335 | 346 | 122 |
-| two inserts in a transaction | 268 | 341 | 42 | 619 | 1,262 | n/a |
-| 100 gets at once | n/a | n/a | n/a | 466 | 262 | 75 |
+| get one book by id | 160 | 150 | 3 | 498 | 276 | 66 |
+| fetch 20 books | 451 | 441 | 24 | 1,031 | 613 | 97 |
+| fetch 1,000 books | 6,926 | 7,201 | 425 | 8,577 | 7,414 | 795 |
+| count | 222 | 197 | 63 | 811 | 347 | 108 |
+| insert one book | 141 | 136 | 41 | 338 | 271 | 103 |
+| two inserts in a transaction | 284 | 299 | 38 | 624 | 1,349 | n/a |
+| get or create (exists) | 158 | 175 | n/a | 606 | 300 | n/a |
+| 100 gets at once | n/a | n/a | n/a | 413 | 248 | 67 |
+| 100 get or create at once | n/a | n/a | n/a | 404 | 268 | n/a |
+
+This VM's speed changes by about 20% from one run to the next (every column
+moves together), so compare numbers within one table, not across runs.
 
 "Two inserts in a transaction" is `atomic()` around two `create()`s. Django
 has no async `atomic()`, so "django async" runs that sync function with
@@ -46,11 +54,13 @@ has no async `atomic()`, so "django async" runs that sync function with
 - **djox's `ENGINE` costs nothing for sync code.** "djox sync" is as fast as
   Django's own SQLite backend, often a little faster.
 - **`djox.Manager` is the fastest way to run Django's async methods here.**
-  One query at a time it takes 30 to 50% less time than Django's async
-  methods for gets, small fetches and counts (325 µs against 537 µs for a
-  get), and the same for inserts. With 100 lookups at once it takes 262 µs
-  each against 466 µs: Django's async methods all queue for one shared worker
-  thread, djox's queries don't.
+  One query at a time it takes 20 to 57% less time than Django's async
+  methods (276 µs against 498 µs for a get, 300 µs against 606 µs for an
+  `aget_or_create()` that finds its row). With 100 lookups at once it takes
+  248 µs each against 413 µs, and 100 `aget_or_create()` calls take 268 µs
+  each against 404 µs. Django's async methods all queue for one shared
+  worker thread; djox's queries don't, and `aget_or_create()` looks up on
+  djox before it takes a writer's turn.
 - **A short transaction is faster as one sync function.** `djox.atomic()`
   pays a thread round trip to start the transaction, one per query, and one
   to commit: four for two inserts, against one for `sync_to_async()` around
@@ -63,14 +73,14 @@ has no async `atomic()`, so "django async" runs that sync function with
   the floor of waking a thread and waking the event loop again on this VM (a
   bare Python thread and `call_soon_threadsafe` take about 50 µs).
 - **The rest is Django's Python.** `sqlite3` runs a lookup in 3 µs; Django
-  spends about 160 µs building the query, writing the SQL and creating the
+  spends about 200 µs building the query, writing the SQL and creating the
   instance. `djox.Manager` keeps Django's code for all of that on purpose (the
   "safe lane": results are exactly Django's). Roadmap step 6 (the fast lane)
   moves that work to Rust for common queries.
 
 ### What made the round trip faster
 
-A get on `djox.Database` took 120 µs before, and 70 µs now (same VM):
+A get on `djox.Database` took 120 µs before, and 66 µs now (same VM):
 
 - **Worker threads stay registered with Python.** A Rust thread must be
   registered with Python (given a "thread state") before it can take the GIL.
