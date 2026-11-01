@@ -1,10 +1,14 @@
-"""A small Django app for the tests: authors and their books."""
+"""A small Django app for the tests: authors and their books, with `djox.Manager`."""
 
 from django.db import models
+
+import djox
 
 
 class Author(models.Model):
     name = models.CharField(max_length=100)
+
+    objects = djox.Manager()
 
 
 class Book(models.Model):
@@ -14,3 +18,5 @@ class Book(models.Model):
     published = models.DateTimeField()
     in_print = models.BooleanField(default=True)
     author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="books")
+
+    objects = djox.Manager()

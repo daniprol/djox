@@ -25,6 +25,7 @@ INSTALLED_APPS = [
     "backends",
     "transactions",
     "db_functions",
+    "async",
 ]
 DATABASES = {
     "default": {

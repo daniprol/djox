@@ -8,6 +8,10 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
   `sqlite3.Connection`.
 - `"ENGINE": "djox.backends.sqlite3"` makes Django use djox's SQLite too, and
   `djox.connections["default"]` gives the async database for a Django alias.
+- `djox.Manager` (with `djox.QuerySet`) runs Django's async QuerySet methods
+  (`aget()`, `acount()`, `async for`...) on djox.
+- `djox.atomic()` and `djox.on_commit()` are Django's transactions, for
+  async code (`async with djox.atomic(): ...`).
 
 ```python
 import djox
@@ -20,6 +24,8 @@ Use djox's `ENGINE` whenever djox and Django share a database file: Python's
 `sqlite3` bundles a second copy of SQLite, and two copies in one process
 can't see each other's locks, so writes can get lost.
 """
+
+from typing import TYPE_CHECKING, Any
 
 from djox._connections import connections
 from djox._core import (
@@ -40,6 +46,38 @@ from djox._core import (
     sqlite_version,
 )
 
+if TYPE_CHECKING:
+    from djox.manager import Manager
+    from djox.query import QuerySet
+    from djox.transaction import atomic, on_commit
+
+
+def __getattr__(name: str) -> Any:
+    """Import the parts of djox that need Django the first time they are used.
+
+    Python calls a module's `__getattr__` for names the module doesn't have.
+    Importing them lazily keeps `import djox` working without Django, or
+    before Django's settings are ready (in `settings.py` itself).
+    """
+    if name == "Manager":
+        from djox.manager import Manager
+
+        return Manager
+    if name == "QuerySet":
+        from djox.query import QuerySet
+
+        return QuerySet
+    if name == "atomic":
+        from djox.transaction import atomic
+
+        return atomic
+    if name == "on_commit":
+        from djox.transaction import on_commit
+
+        return on_commit
+    raise AttributeError(f"module 'djox' has no attribute {name!r}")
+
+
 __all__ = [
     "Connection",
     "Cursor",
@@ -52,9 +90,13 @@ __all__ = [
     "IntegrityError",
     "InterfaceError",
     "InternalError",
+    "Manager",
     "NotSupportedError",
     "OperationalError",
     "ProgrammingError",
+    "QuerySet",
+    "atomic",
     "connections",
+    "on_commit",
     "sqlite_version",
 ]

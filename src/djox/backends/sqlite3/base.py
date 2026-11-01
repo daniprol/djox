@@ -20,9 +20,11 @@ from django.db.backends.sqlite3 import base
 from django.utils.asyncio import async_unsafe
 
 import djox
+from djox import _running
 from djox.backends.sqlite3 import dbapi
 from djox.backends.sqlite3.creation import DatabaseCreation
 from djox.backends.sqlite3.features import DatabaseFeatures
+from djox.backends.sqlite3.operations import DatabaseOperations
 from djox.backends.sqlite3.options import SqliteOptions, read_options
 
 
@@ -32,6 +34,7 @@ class DatabaseWrapper(base.DatabaseWrapper):
     Database = dbapi
     creation_class = DatabaseCreation
     features_class = DatabaseFeatures
+    ops_class = DatabaseOperations
 
     # `connection` is the open `djox.Connection` (or `None`); Django's stubs call it `Any`.
     connection: djox.Connection | None
@@ -64,6 +67,14 @@ class DatabaseWrapper(base.DatabaseWrapper):
         assert self.connection is not None, "Django opens the connection before changing autocommit"
         with self.wrap_database_errors:
             self.connection.autocommit = autocommit
+
+    def set_autocommit(self, autocommit: bool, force_begin_transaction_with_broken_autocommit: bool = False) -> None:
+        """Django's `set_autocommit()`, which `atomic()` calls when the
+        outermost block starts (`False`) and ends (`True`). djox also notes the
+        open transaction, so async queries started inside it run in it (see
+        `djox._running`)."""
+        super().set_autocommit(autocommit, force_begin_transaction_with_broken_autocommit)
+        _running.note_sync_transaction(self.alias, self, is_open=not autocommit)
 
     def get_database_version(self) -> tuple[int, ...]:
         """The version of the SQLite that runs the queries: djox's own."""

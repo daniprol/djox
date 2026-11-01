@@ -9,6 +9,11 @@ and run against djox.
 | `backends/`     | `backends/tests.py`, `backends/sqlite/tests.py`     | Cursors, placeholders, constraints, threads, the SQLite backend |
 | `transactions/` | `transactions/tests.py`                             | `atomic()`, savepoints, autocommit           |
 | `db_functions/` | `db_functions/{datetime,math,text,comparison}/`     | Django's SQL functions (`django_date_extract`, `MD5`...) on djox's SQLite |
+| `async/`        | `async/test_async_{queryset,model_methods,related_managers}.py` | The `a`-methods on `djox.Manager`, inside `TestCase`'s transaction |
+
+In `async/models.py` each model has `objects = djox.Manager()` (marked with a
+`# djox:` comment), so Django's async tests run on djox. That is the only
+change to that app.
 
 ## How a test is ported
 

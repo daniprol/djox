@@ -193,8 +193,9 @@ impl PythonConnection {
 
     /// Whether `close()` was called.
     #[getter]
-    fn closed(&self) -> bool {
-        self.sqlite.lock().unwrap().is_none()
+    fn closed(&self, py: Python<'_>) -> bool {
+        // The one locking rule: let go of the GIL before taking the connection.
+        py.detach(|| self.sqlite.lock().unwrap().is_none())
     }
 
     /// Whether a transaction is open.
@@ -261,8 +262,8 @@ impl PythonConnection {
         self.with_connection(py, |sqlite| sqlite.set_limit(category, limit))
     }
 
-    fn __repr__(&self) -> String {
-        let closed = if self.closed() { ", closed" } else { "" };
+    fn __repr__(&self, py: Python<'_>) -> String {
+        let closed = if self.closed(py) { ", closed" } else { "" };
         format!("Connection.sqlite('{}'{closed})", self.location)
     }
 }

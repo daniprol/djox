@@ -51,7 +51,7 @@ line-length = 120
 target-version = "py311"
 src = ["src", "tests"]
 # Django's own tests, copied as they are (tests/django_suite/README.md), keep Django's style.
-extend-exclude = ["tests/django_suite/backends", "tests/django_suite/db_functions", "tests/django_suite/transactions"]
+extend-exclude = ["tests/django_suite/backends", "tests/django_suite/db_functions", "tests/django_suite/transactions", "tests/django_suite/async"]
 force-exclude = true  # also when prek passes those files by name
 
 [tool.ruff.lint]
@@ -107,7 +107,7 @@ files = ["src", "tests", "docs/examples"]
 mypy_path = "src"
 explicit_package_bases = true
 # Django's own tests, copied as they are, have no type hints.
-exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/"]
+exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/"]
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
@@ -116,5 +116,5 @@ django_settings_module = "tests.settings"
 
 [tool.pyrefly]
 project-includes = ["src", "tests", "docs/examples"]
-project-excludes = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/"]
+project-excludes = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/"]
 search-path = ["src", "."]

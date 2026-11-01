@@ -169,3 +169,27 @@ def test_other_threads_run_while_sqlite_works(connection: djox.Connection) -> No
     ticker.join()
 
     assert ticks > 5  # the ticker kept running: the query didn't hold the GIL
+
+
+def test_checking_closed_while_a_python_function_runs_never_deadlocks(connection: djox.Connection) -> None:
+    # Thread A runs a statement that calls a Python function (it holds the
+    # connection and needs the GIL); thread B asks `closed` over and over
+    # (it holds the GIL and needs the connection). `closed` must let go of
+    # the GIL first, or both wait for each other forever.
+    connection.create_function("double", 1, lambda value: value * 2)
+    finished = threading.Event()
+
+    def run_statement() -> None:
+        sql = (
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) "
+            "SELECT sum(double(i)) FROM n"
+        )
+        connection.execute(sql).fetchall()
+        finished.set()
+
+    worker = threading.Thread(target=run_statement, daemon=True)
+    worker.start()
+    while not finished.is_set() and worker.is_alive():
+        assert connection.closed is False
+    worker.join(timeout=10)
+    assert finished.is_set(), "the statement never finished: deadlock"

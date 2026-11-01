@@ -6,9 +6,9 @@ Django's async ORM methods (`aget`, `acreate`, `async for`...) run the sync ORM 
 djox runs queries on connections that Rust owns, each on its own thread, and wakes Python only when the answer is
 ready. Django keeps doing what it does well: models, migrations, admin and the QuerySet language.
 
-> **Status: early.** djox has its engine, `djox.Database`, and a Django `ENGINE` that runs Django's own queries on
-> the same SQLite. The Django-style API (`await Book.objects.aget(...)` running on djox) comes next. See the
-> [roadmap](docs/roadmap.md).
+> **Status: early.** djox has its engine, `djox.Database`, a Django `ENGINE` that runs Django's own queries on the
+> same SQLite, and `djox.Manager`, which runs Django's async QuerySet methods on djox. Async transactions come next.
+> See the [roadmap](docs/roadmap.md).
 
 ## Quickstart
 
@@ -45,22 +45,26 @@ asyncio.run(main())
 DATABASES = {"default": {"ENGINE": "djox.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 ```
 
-Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in djox. `djox.connections["default"]`
-gives the async `djox.Database` for the same file. One SQLite in the process matters: Python's `sqlite3` module has
+Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in djox. Give a model
+`objects = djox.Manager()` and its async methods (`aget`, `acount`, `async for`, `acreate`, `aupdate`...) run on djox
+instead of Django's worker thread: Django still writes the SQL and builds the objects. `djox.connections["default"]`
+gives the async `djox.Database` for the same file, and `async with djox.atomic():` is Django's `atomic()` for async
+code. One SQLite in the process matters: Python's `sqlite3` module has
 its own copy, and two copies can't see each other's locks. See [Use with Django](docs/django.md).
 
 ## Speed
 
 Microseconds per call on a 4-core cloud VM, lower is better ([method and all numbers](benchmarks/README.md)):
 
-| | Django sync | Django async | djox |
-|---|---:|---:|---:|
-| get one book by id | 378 | 854 | 207 |
-| fetch 20 books | 838 | 1,437 | 299 |
-| 100 gets at once (each) | | 686 | 144 |
+| | Django sync | Django async | `djox.Manager` | djox (raw SQL) |
+|---|---:|---:|---:|---:|
+| get one book by id | 204 | 588 | 454 | 166 |
+| fetch 20 books | 523 | 1,040 | 895 | 196 |
+| 100 gets at once (each) | | 555 | 348 | 113 |
 
-djox's numbers are raw SQL; Django's include building the query and the model instances. Those Python costs are what
-the next steps of the roadmap take on.
+`djox.Manager` runs Django's own query building and model instances, with the SQL on djox: it beats Django's async
+methods, most of all under load, because no query waits for Django's single worker thread. Raw djox shows what is left
+once Django's Python work moves to Rust (roadmap step 6).
 
 ## How it is built
 
