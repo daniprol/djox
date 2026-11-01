@@ -13,10 +13,15 @@ and run against djox.
 | `basic/`        | `basic/tests.py`                                    | Creating, saving, getting and refreshing objects through `djox.QuerySet` |
 | `lookup/`       | `lookup/tests.py`                                   | `filter()` lookups, `in_bulk()`, `values()`: the fast lane's notes, and Django's `Query` built from them |
 | `ordering/`     | `ordering/tests.py`                                 | `order_by()`, `reverse()`, `Meta.ordering`, `first()`/`last()` and slices on `djox.QuerySet` |
+| `select_related/`, `select_related_onetoone/`, `select_related_regress/` | `select_related*/tests.py` | `select_related()` on `djox.QuerySet`: the fast lane's joins, and the related objects Rust builds |
+| `prefetch_related/` | `prefetch_related/{tests,test_prefetch_related_objects,test_uuid}.py` | `prefetch_related()` on `djox.QuerySet`, after a main query on the fast lane |
 
-The models of `basic/`, `lookup/` and `ordering/` are left as Django wrote
-them: `DJOX_MODELS` (in `tests/settings.py`) switches them to djox, so their
-sync tests run on `djox.QuerySet`, with the fast lane's notes.
+The models of `basic/`, `lookup/`, `ordering/`, `select_related*/` and
+`prefetch_related/` are left as Django wrote them: `DJOX_MODELS` (in
+`tests/settings.py`) switches them to djox, so their sync tests run on
+`djox.QuerySet`, with the fast lane's notes. (The async paths of
+`select_related()` and `prefetch_related()` are tested in
+`tests/e2e/test_related_objects.py`.)
 
 In `async/models.py` each model has `objects = djox.Manager()`, and
 `SimpleModel` (the one `test_async_model_methods.py` saves and deletes) is a

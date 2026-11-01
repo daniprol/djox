@@ -32,19 +32,40 @@ INSTALLED_APPS = [
     "basic",
     "lookup",
     "ordering",
+    "select_related",
+    "select_related_onetoone",
+    "select_related_regress",
+    "prefetch_related",
 ]
 DATABASES = {
     "default": {
         "ENGINE": "djox.backends.sqlite3",
         "NAME": Path(tempfile.gettempdir()) / "djox-tests.sqlite3",
-    }
+    },
+    # A second database, like in Django's own test settings: some of Django's
+    # tests (`prefetch_related`'s `MultiDbTests`) use both.
+    "other": {
+        "ENGINE": "djox.backends.sqlite3",
+        "NAME": Path(tempfile.gettempdir()) / "djox-tests-other.sqlite3",
+    },
 }
 # The models djox switches over (`djox.install`): Django's `auth` app,
 # `shelf`, whose models are written as if djox didn't exist, and the models of
-# Django's own `basic`, `lookup` and `ordering` tests, so that they test
+# Django's own `basic`, `lookup`, `ordering`, `select_related*` and
+# `prefetch_related` tests, so that they test
 # `djox.QuerySet` (and the fast lane's notes). Not "__all__", so the other
 # ported tests keep testing what they were ported for.
-DJOX_MODELS = ["auth", "shelf", "basic", "lookup", "ordering"]
+DJOX_MODELS = [
+    "auth",
+    "shelf",
+    "basic",
+    "lookup",
+    "ordering",
+    "select_related",
+    "select_related_onetoone",
+    "select_related_regress",
+    "prefetch_related",
+]
 USE_TZ = True
 TIME_ZONE = "UTC"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
