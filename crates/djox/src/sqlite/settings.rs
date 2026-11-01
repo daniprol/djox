@@ -54,7 +54,7 @@ impl SqliteSettings {
 /// Whether `path` names an in-memory database: `:memory:`, an empty name
 /// (SQLite's private temporary database), or a `file:` URI with `mode=memory`
 /// (what Django's test runner uses by default).
-fn is_in_memory(path: &str) -> bool {
+pub(crate) fn is_in_memory(path: &str) -> bool {
     path.is_empty() || path == ":memory:" || (path.starts_with("file:") && path.contains("mode=memory"))
 }
 

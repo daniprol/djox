@@ -14,7 +14,10 @@ pub enum Error {
     /// The database could not run the statement: a syntax error, a missing
     /// table, a lock that did not free up in time... Python raises `djox.OperationalError`.
     Operational(String),
-    /// Any other database error, like a wrong number of parameters.
+    /// The caller's mistake: a wrong number of parameters, a statement that
+    /// returns rows sent to `execute()`... Python raises `djox.ProgrammingError`.
+    Programming(String),
+    /// Any other database error. Python raises `djox.DatabaseError`.
     Database(String),
     /// The settings can't work, like an in-memory SQLite database. Python raises `ValueError`.
     Settings(String),
@@ -32,7 +35,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Integrity(message) | Error::Operational(message) | Error::Database(message) => {
+            Error::Integrity(message)
+            | Error::Operational(message)
+            | Error::Programming(message)
+            | Error::Database(message) => {
                 write!(formatter, "{message}")
             }
             Error::Settings(message) => write!(formatter, "invalid database settings: {message}"),

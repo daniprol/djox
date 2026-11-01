@@ -41,6 +41,7 @@ dev = [
     "pyrefly>=1.0",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
+    "pytest-django>=4.14.0",  # Django's test database and TestCase classes under pytest
     "ruff>=0.14",
 ]
 docs = ["zensical>=0.0.72"]  # uv run --only-group docs zensical serve
@@ -49,6 +50,9 @@ docs = ["zensical>=0.0.72"]  # uv run --only-group docs zensical serve
 line-length = 120
 target-version = "py311"
 src = ["src", "tests"]
+# Django's own tests, copied as they are (tests/django_suite/README.md), keep Django's style.
+extend-exclude = ["tests/django_suite/backends", "tests/django_suite/db_functions", "tests/django_suite/transactions"]
+force-exclude = true  # also when prek passes those files by name
 
 [tool.ruff.lint]
 select = [
@@ -69,6 +73,9 @@ select = [
     "RUF",     # ruff-specific
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"**/migrations/*.py" = ["RUF012"]  # written by Django's makemigrations
+
 [tool.ruff.format]
 docstring-code-format = true
 
@@ -80,6 +87,8 @@ markers = [
     "django_adapted(reason): a ported Django test changed to fit djox; `reason` says what changed and why",
     "django_unsupported(reason): a ported Django test for a feature djox doesn't support yet; expected to fail",
 ]
+DJANGO_SETTINGS_MODULE = "tests.settings"
+pythonpath = ["."]  # so `tests.settings` can be imported
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
@@ -97,6 +106,8 @@ build-backend = "maturin"
 files = ["src", "tests", "docs/examples"]
 mypy_path = "src"
 explicit_package_bases = true
+# Django's own tests, copied as they are, have no type hints.
+exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/"]
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
@@ -105,4 +116,5 @@ django_settings_module = "tests.settings"
 
 [tool.pyrefly]
 project-includes = ["src", "tests", "docs/examples"]
+project-excludes = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/"]
 search-path = ["src", "."]

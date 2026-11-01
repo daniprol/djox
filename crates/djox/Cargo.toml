@@ -10,7 +10,8 @@ repository.workspace = true
 djox-core = { path = "../djox-core" }
 # SQLite backend
 crossbeam-channel = "0.5"
-rusqlite = { version = "0.41", features = ["bundled"] }
+# `functions`: SQL functions written in Rust or Python (Django needs ~40). `limits`: read SQLite's limits.
+rusqlite = { version = "0.41", features = ["bundled", "functions", "limits"] }
 
 [dev-dependencies]
 tempfile = "3"

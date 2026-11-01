@@ -1,49 +1,64 @@
 //! One SQLite connection: opening it with the right settings, running
 //! statements, and converting values and errors.
 //!
-//! A connection is used by one thread at a time (its worker), and every
-//! method here blocks until SQLite is done. That is fine: workers are threads
-//! made for waiting, and Python's event loop never calls these directly.
+//! A connection is used by one thread at a time, and every method here blocks
+//! until SQLite is done. The async [`super::SqliteDatabase`] keeps each of its
+//! connections on a worker thread made for waiting; the Python extension's
+//! `djox.Connection` (used by Django's sync ORM) calls these methods on the
+//! caller's thread, after letting other Python threads run.
 
 use djox_core::{Error, Executed, Result, Rows, Value};
+use rusqlite::limits::Limit;
 use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{ErrorCode, OpenFlags, TransactionBehavior, params_from_iter};
 
 use super::placeholders::to_question_marks;
-use super::settings::SqliteSettings;
+use super::settings::{SqliteSettings, is_in_memory};
 
 /// What a connection is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Access {
-    /// The one connection that writes.
+pub enum Access {
+    /// A connection that can write. The async database has exactly one; each
+    /// of Django's sync connections is one too.
     Writer,
     /// A connection opened read-only: SQLite itself refuses any write on it.
     Reader,
 }
 
 /// One open SQLite connection.
-///
-/// `pub(crate)` means "public inside this crate only": the rest of djox can
-/// use it, users of the crate can't (like a leading underscore in Python,
-/// but enforced by the compiler).
-pub(crate) struct SqliteConnection {
-    connection: rusqlite::Connection,
+pub struct SqliteConnection {
+    /// `pub(super)` means "visible to the other files of the `sqlite` folder"
+    /// (`functions.rs` registers SQL functions on it), but not outside it.
+    pub(super) connection: rusqlite::Connection,
+}
+
+/// What a statement run with [`SqliteConnection::run`] gave back.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StatementOutput {
+    /// The rows, if the statement returns any (`SELECT`, `PRAGMA`, `... RETURNING`).
+    pub rows: Rows,
+    /// How many rows an `INSERT`, `UPDATE`, `DELETE` or `REPLACE` changed, or
+    /// `None` for any other statement (Python's DB-API calls it `rowcount`, and uses -1 for "none").
+    pub rows_affected: Option<u64>,
+    /// The id of the last row this connection inserted (SQLite's `rowid`).
+    pub last_insert_id: i64,
 }
 
 impl SqliteConnection {
     /// Opens a connection to the settings' file.
     ///
-    /// The writer creates the file if needed and sets it up:
+    /// A writer creates the file if needed and sets it up:
     ///
     /// - `journal_mode = WAL`: readers and the writer don't block each other.
-    ///   It is stored in the file, so Django's own connections use it too.
+    ///   It is stored in the file, so every later connection uses it too.
+    ///   (In-memory databases can't use WAL; they keep SQLite's default.)
     /// - `synchronous = NORMAL`: safe with WAL and much faster than `FULL`. A
     ///   power cut can lose the last commits but never corrupts the file.
     /// - `foreign_keys = ON`: like Django, so foreign keys are checked.
     ///
     /// Every connection waits up to `busy_timeout` for a lock held by another
-    /// process before failing.
-    pub(crate) fn open(settings: &SqliteSettings, access: Access) -> Result<SqliteConnection> {
+    /// connection before failing.
+    pub fn open(settings: &SqliteSettings, access: Access) -> Result<SqliteConnection> {
         // `NO_MUTEX`: only one thread uses a connection at a time, so SQLite
         // can skip its own locking. `URI`: accept `file:...` paths.
         let shared_flags = OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX;
@@ -57,14 +72,16 @@ impl SqliteConnection {
         connection.set_prepared_statement_cache_capacity(256);
 
         if access == Access::Writer {
-            // This PRAGMA answers with the mode it ended up in, so we read it like a query.
-            let journal_mode: String = connection
-                .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-                .map_err(to_djox_error)?;
-            if !journal_mode.eq_ignore_ascii_case("wal") {
-                return Err(Error::Settings(format!(
-                    "could not turn on WAL mode (SQLite answered {journal_mode:?})"
-                )));
+            if !is_in_memory(&settings.path.to_string_lossy()) {
+                // This PRAGMA answers with the mode it ended up in, so we read it like a query.
+                let journal_mode: String = connection
+                    .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+                    .map_err(to_djox_error)?;
+                if !journal_mode.eq_ignore_ascii_case("wal") {
+                    return Err(Error::Settings(format!(
+                        "could not turn on WAL mode (SQLite answered {journal_mode:?})"
+                    )));
+                }
             }
             connection
                 .execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
@@ -73,20 +90,76 @@ impl SqliteConnection {
         Ok(SqliteConnection { connection })
     }
 
-    /// Whether the statement changes the database (SQLite tells us, without
-    /// running it). `SELECT` doesn't; `INSERT ... RETURNING` does.
-    pub(crate) fn statement_writes(&mut self, sql: &str) -> Result<bool> {
-        let sql = to_question_marks(sql);
-        let statement = self.connection.prepare_cached(&sql).map_err(to_djox_error)?;
-        Ok(!statement.readonly())
+    /// Runs any one statement and returns what it gave back: rows, the number
+    /// of rows it changed, the last inserted id. This is what a DB-API
+    /// `cursor.execute()` needs, since it can't know in advance whether a
+    /// statement returns rows.
+    ///
+    /// Unlike the other methods, `sql` must already use SQLite's own `?`
+    /// placeholders (see `placeholders.rs`): Django runs SQL without
+    /// parameters exactly as written, so the caller decides whether to convert.
+    pub fn run(&mut self, sql: &str, parameters: &[Value]) -> Result<StatementOutput> {
+        let rows = self.rows_of(sql, parameters)?;
+        Ok(StatementOutput {
+            rows,
+            rows_affected: self.rows_affected_by(sql),
+            last_insert_id: self.connection.last_insert_rowid(),
+        })
     }
 
-    /// Runs a statement and returns all its rows.
-    pub(crate) fn query(&mut self, sql: &str, parameters: &[Value]) -> Result<Rows> {
-        let sql = to_question_marks(sql);
+    /// Runs the same statement once per list of parameters, like a DB-API
+    /// `cursor.executemany()`. Unlike [`SqliteConnection::execute_many`], it
+    /// doesn't open a transaction of its own: Django's `atomic()` decides that.
+    ///
+    /// Only statements that change rows are allowed (like Python's `sqlite3`),
+    /// since there would be no way to return the rows of each run.
+    pub fn run_many(&mut self, sql: &str, parameter_lists: &[Vec<Value>]) -> Result<StatementOutput> {
+        if !is_data_change(sql) {
+            return Err(Error::Programming(
+                "executemany() can only run INSERT, UPDATE, DELETE or REPLACE statements".to_string(),
+            ));
+        }
+        let mut rows_affected = 0;
+        for parameters in parameter_lists {
+            self.rows_of(sql, parameters)?;
+            rows_affected += self.connection.changes();
+        }
+        Ok(StatementOutput {
+            rows: Rows::default(),
+            rows_affected: Some(rows_affected),
+            last_insert_id: self.connection.last_insert_rowid(),
+        })
+    }
+
+    /// Whether a transaction is open (a `BEGIN` without its `COMMIT` or `ROLLBACK` yet).
+    pub fn in_transaction(&self) -> bool {
+        // SQLite calls "no transaction open" *autocommit* mode: each statement commits on its own.
+        !self.connection.is_autocommit()
+    }
+
+    /// One of SQLite's limits, by its number (`SQLITE_LIMIT_VARIABLE_NUMBER`
+    /// is 9: the most `?` a statement may have). Django reads two of them.
+    pub fn limit(&self, category: i32) -> Result<i32> {
+        let Some(limit) = limit_from_number(category) else {
+            return Err(Error::Programming(format!("{category} is not a SQLite limit category")));
+        };
+        self.connection.limit(limit).map_err(to_djox_error)
+    }
+
+    /// Changes one of SQLite's limits for this connection, and returns its old
+    /// value. SQLite won't raise a limit above the maximum it was built with.
+    pub fn set_limit(&mut self, category: i32, value: i32) -> Result<i32> {
+        let Some(limit) = limit_from_number(category) else {
+            return Err(Error::Programming(format!("{category} is not a SQLite limit category")));
+        };
+        self.connection.set_limit(limit, value).map_err(to_djox_error)
+    }
+
+    /// Runs a statement in SQLite's `?` style and collects its rows.
+    fn rows_of(&mut self, sql: &str, parameters: &[Value]) -> Result<Rows> {
         // `prepare_cached` compiles the SQL the first time and reuses it after.
         // Compiling is often slower than running a small query.
-        let mut statement = self.connection.prepare_cached(&sql).map_err(to_djox_error)?;
+        let mut statement = self.connection.prepare_cached(sql).map_err(to_djox_error)?;
         let columns: Vec<String> = statement.column_names().map(String::from).collect();
         let column_count = columns.len();
 
@@ -105,8 +178,32 @@ impl SqliteConnection {
         Ok(Rows { columns, rows })
     }
 
-    /// Runs a statement that changes data.
-    pub(crate) fn execute(&mut self, sql: &str, parameters: &[Value]) -> Result<Executed> {
+    /// How many rows the statement that just ran changed, if it is one that changes rows.
+    fn rows_affected_by(&self, sql: &str) -> Option<u64> {
+        if is_data_change(sql) {
+            // `changes()` keeps the count of the last INSERT, UPDATE or DELETE,
+            // even after other statements, so only ask after one of those.
+            Some(self.connection.changes())
+        } else {
+            None
+        }
+    }
+
+    /// Whether the statement changes the database (SQLite tells us, without
+    /// running it). `SELECT` doesn't; `INSERT ... RETURNING` does.
+    pub fn statement_writes(&mut self, sql: &str) -> Result<bool> {
+        let sql = to_question_marks(sql);
+        let statement = self.connection.prepare_cached(&sql).map_err(to_djox_error)?;
+        Ok(!statement.readonly())
+    }
+
+    /// Runs a statement written with Django's `%s` placeholders and returns all its rows.
+    pub fn query(&mut self, sql: &str, parameters: &[Value]) -> Result<Rows> {
+        self.rows_of(&to_question_marks(sql), parameters)
+    }
+
+    /// Runs a statement that changes data, written with Django's `%s` placeholders.
+    pub fn execute(&mut self, sql: &str, parameters: &[Value]) -> Result<Executed> {
         let sql = to_question_marks(sql);
         let rows_affected = {
             // The braces end the statement's borrow of the connection, so we
@@ -123,7 +220,7 @@ impl SqliteConnection {
     }
 
     /// Runs a statement once per list of parameters, in one transaction.
-    pub(crate) fn execute_many(&mut self, sql: &str, parameter_lists: &[Vec<Value>]) -> Result<Executed> {
+    pub fn execute_many(&mut self, sql: &str, parameter_lists: &[Vec<Value>]) -> Result<Executed> {
         let sql = to_question_marks(sql);
         // `BEGIN IMMEDIATE` takes the write lock right away, instead of
         // upgrading a read lock later (which can fail with "database is locked").
@@ -150,9 +247,43 @@ impl SqliteConnection {
     }
 }
 
+/// Whether `sql` is an `INSERT`, `UPDATE`, `DELETE` or `REPLACE`: the
+/// statements that change rows. Python's `sqlite3` uses the same test (the
+/// first word) to decide when to report a row count.
+pub fn is_data_change(sql: &str) -> bool {
+    let first_word: String = sql
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_alphabetic())
+        .collect();
+    let first_word = first_word.to_ascii_uppercase();
+    first_word == "INSERT" || first_word == "UPDATE" || first_word == "DELETE" || first_word == "REPLACE"
+}
+
+/// A SQLite limit category from its number (the `SQLITE_LIMIT_...` constants
+/// of SQLite's C API, also in Python's `sqlite3` module).
+fn limit_from_number(category: i32) -> Option<Limit> {
+    let limit = match category {
+        0 => Limit::SQLITE_LIMIT_LENGTH,
+        1 => Limit::SQLITE_LIMIT_SQL_LENGTH,
+        2 => Limit::SQLITE_LIMIT_COLUMN,
+        3 => Limit::SQLITE_LIMIT_EXPR_DEPTH,
+        4 => Limit::SQLITE_LIMIT_COMPOUND_SELECT,
+        5 => Limit::SQLITE_LIMIT_VDBE_OP,
+        6 => Limit::SQLITE_LIMIT_FUNCTION_ARG,
+        7 => Limit::SQLITE_LIMIT_ATTACHED,
+        8 => Limit::SQLITE_LIMIT_LIKE_PATTERN_LENGTH,
+        9 => Limit::SQLITE_LIMIT_VARIABLE_NUMBER,
+        10 => Limit::SQLITE_LIMIT_TRIGGER_DEPTH,
+        11 => Limit::SQLITE_LIMIT_WORKER_THREADS,
+        _ => return None,
+    };
+    Some(limit)
+}
+
 /// A djox value as a SQLite parameter. It borrows the text or bytes (`&`)
 /// instead of copying them.
-fn to_sqlite(value: &Value) -> ToSqlOutput<'_> {
+pub(super) fn to_sqlite(value: &Value) -> ToSqlOutput<'_> {
     let borrowed = match value {
         Value::Null => ValueRef::Null,
         // `*number` reads the number behind the reference (numbers are cheap to copy).
@@ -166,7 +297,7 @@ fn to_sqlite(value: &Value) -> ToSqlOutput<'_> {
 
 /// A SQLite value as a djox value (this one copies, since the row it comes
 /// from is gone after the next `cursor.next()`).
-fn from_sqlite(value: ValueRef<'_>) -> Value {
+pub(super) fn from_sqlite(value: ValueRef<'_>) -> Value {
     match value {
         ValueRef::Null => Value::Null,
         ValueRef::Integer(number) => Value::Integer(number),
@@ -190,7 +321,10 @@ pub(crate) fn to_djox_error(error: rusqlite::Error) -> Error {
             // A syntax error, found while compiling the statement.
             rusqlite::Error::SqlInputError { .. } => Error::Operational(message),
             rusqlite::Error::ExecuteReturnedResults => {
-                Error::Database("this statement returns rows: use fetch_all() instead of execute()".to_string())
+                Error::Programming("this statement returns rows: use fetch_all() instead of execute()".to_string())
+            }
+            rusqlite::Error::InvalidParameterCount(_, _) | rusqlite::Error::MultipleStatement => {
+                Error::Programming(message)
             }
             _ => Error::Database(message),
         },
@@ -293,6 +427,82 @@ mod tests {
         let syntax_error = writer.query("SELEKT 1", &[]);
         assert!(matches!(syntax_error, Err(Error::Operational(_))));
         let returns_rows = writer.execute("INSERT INTO book (title) VALUES ('X') RETURNING id", &[]);
-        assert!(matches!(returns_rows, Err(Error::Database(message)) if message.contains("fetch_all")));
+        assert!(matches!(returns_rows, Err(Error::Programming(message)) if message.contains("fetch_all")));
+    }
+
+    #[test]
+    fn run_returns_rows_counts_and_ids() {
+        let (_folder, mut writer) = new_writer();
+        let inserted = writer
+            .run(
+                "INSERT INTO book (title) VALUES (?), (?)",
+                &[Value::Text("A".into()), Value::Text("B".into())],
+            )
+            .unwrap();
+        assert_eq!(inserted.rows.columns.len(), 0);
+        assert_eq!(inserted.rows_affected, Some(2));
+        assert_eq!(inserted.last_insert_id, 2);
+
+        let selected = writer.run("SELECT title FROM book ORDER BY id", &[]).unwrap();
+        assert_eq!(
+            selected.rows.rows,
+            [[Value::Text("A".into())], [Value::Text("B".into())]]
+        );
+        assert_eq!(selected.rows_affected, None);
+
+        let created = writer.run("CREATE TABLE shelf (id INTEGER PRIMARY KEY)", &[]).unwrap();
+        assert_eq!(
+            created.rows_affected, None,
+            "DDL changes no rows, whatever the last INSERT did"
+        );
+    }
+
+    #[test]
+    fn run_many_counts_every_run_and_refuses_queries() {
+        let (_folder, mut writer) = new_writer();
+        let titles = [vec![Value::Text("A".into())], vec![Value::Text("B".into())]];
+        let output = writer.run_many("INSERT INTO book (title) VALUES (?)", &titles).unwrap();
+        assert_eq!(output.rows_affected, Some(2));
+        let refused = writer.run_many("SELECT ?", &[vec![Value::Integer(1)]]);
+        assert!(matches!(refused, Err(Error::Programming(_))));
+    }
+
+    #[test]
+    fn knows_when_a_transaction_is_open() {
+        let (_folder, mut writer) = new_writer();
+        assert!(!writer.in_transaction());
+        writer.run("BEGIN IMMEDIATE", &[]).unwrap();
+        assert!(writer.in_transaction());
+        writer.run("ROLLBACK", &[]).unwrap();
+        assert!(!writer.in_transaction());
+    }
+
+    #[test]
+    fn in_memory_databases_open_without_wal() {
+        let settings = SqliteSettings::new(":memory:");
+        let mut connection = SqliteConnection::open(&settings, Access::Writer).unwrap();
+        let journal_mode = connection.query("PRAGMA journal_mode", &[]).unwrap();
+        assert_eq!(journal_mode.rows[0][0], Value::Text("memory".to_string()));
+    }
+
+    #[test]
+    fn reads_limits_by_number() {
+        let (_folder, writer) = new_writer();
+        assert!(writer.limit(9).unwrap() > 900, "SQLITE_LIMIT_VARIABLE_NUMBER");
+        let mut writer = writer;
+        let old = writer.set_limit(9, 10).unwrap();
+        assert!(old > 900);
+        assert_eq!(writer.limit(9).unwrap(), 10);
+        assert!(matches!(writer.limit(99), Err(Error::Programming(_))));
+    }
+
+    #[test]
+    fn data_changes_are_found_by_their_first_word() {
+        assert!(is_data_change("INSERT INTO book VALUES (1)"));
+        assert!(is_data_change("  update book SET title = 'A'"));
+        assert!(is_data_change("REPLACE INTO book VALUES (1)"));
+        assert!(!is_data_change("SELECT 1"));
+        assert!(!is_data_change("CREATE TABLE shelf (id INTEGER)"));
+        assert!(!is_data_change("INSERTED"));
     }
 }

@@ -1,0 +1,6 @@
+# Settings for every cargo build of djox, including the ones maturin runs.
+
+[env]
+# Build the bundled SQLite with its math functions (ACOS, POWER, SQRT...).
+# Without them Django registers slower Python versions on every connection.
+LIBSQLITE3_FLAGS = "-DSQLITE_ENABLE_MATH_FUNCTIONS"

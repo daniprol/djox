@@ -100,7 +100,7 @@ fn rarer_value_from_python(value: &Bound<'_, PyAny>) -> PyResult<Value> {
 }
 
 /// One djox value as a Python object.
-fn value_to_python<'py>(py: Python<'py>, value: Value) -> PyResult<Bound<'py, PyAny>> {
+pub fn value_to_python<'py>(py: Python<'py>, value: Value) -> PyResult<Bound<'py, PyAny>> {
     let object = match value {
         Value::Null => py.None().into_bound(py),
         Value::Integer(number) => number.into_pyobject(py)?.into_any(),

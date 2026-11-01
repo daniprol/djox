@@ -49,8 +49,8 @@ them, and it should teach them both along the way.
 |---------------------|--------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types (`Value`, `Rows`, `Executed`, `Reply`, `Error`) and the `Database` trait. Small and stable |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later   |
-| `src/*.rs`          | The Python extension `djox._core` (PyO3): the `Database` class, value conversions, exceptions |
-| `src/djox`          | The Python package                                                  |
+| `src/*.rs`          | The Python extension `djox._core` (PyO3): `Database` (async), `Connection` and `Cursor` (sync, for Django), SQL functions, value conversions, exceptions |
+| `src/djox`          | The Python package, with Django's `ENGINE` in `backends/sqlite3/` and `djox.connections` |
 | `tests`             | Python tests: `unit/`, `integration/`, `e2e/`, `django_suite/` (see Testing) |
 | `benchmarks`        | Speed against Django's ORM and plain `sqlite3` (its own uv project)  |
 | `docs`              | The documentation site (Zensical, `zensical.toml`)                  |
@@ -69,6 +69,11 @@ them, and it should teach them both along the way.
   (`Database.sqlite(...)`, later `Database.postgres(...)`).
 - **SQLite** (`crates/djox/src/sqlite`): one writer thread with its own queue,
   a few reader threads sharing another queue, WAL mode. See the module docs.
+- **Django's `ENGINE`** (`src/djox/backends/sqlite3`): Django's own SQLite
+  backend classes, subclassed, changing only what touches SQLite. Each Django
+  thread gets a `djox.Connection` (sqlite3-shaped, runs on the caller's
+  thread); `djox.connections[alias]` is the async `Database` for the same
+  settings. Both are prepared by `prepare_connection()`.
 - **Rust does the heavy, repetitive work** (running SQL, converting rows,
   later compiling common queries). Python keeps the Django-facing API small
   and readable.
@@ -78,12 +83,16 @@ them, and it should teach them both along the way.
 - **One copy of SQLite per process.** djox bundles its own SQLite and Python's
   `sqlite3` module has another. Two copies can't see each other's locks, so
   they must never open the same file in one process (writes get lost). That
-  is why djox will ship a Django `ENGINE` for SQLite: Django's sync ORM then
-  uses djox's copy too.
+  is why Django must use djox's `ENGINE`: its sync ORM then uses djox's copy.
+  Never open a database file with Python's `sqlite3`, in code or in tests.
 - **Django's SQLite SQL calls Python functions** (`django_date_extract`,
   `django_format_dtdelta`, `REGEXP`...) that Django registers on each
-  connection. djox connections must register them before running SQL from
-  Django's compiler for those lookups.
+  connection. `prepare_connection()` calls Django's own `register()` on every
+  djox connection, sync and async, so they always match the installed Django.
+- **Release the GIL before taking a connection's lock.** A thread holding the
+  GIL and waiting for a connection, while the connection's thread runs a
+  Python SQL function (which needs the GIL), would wait forever. Every
+  `djox.Connection` method does `py.detach(...)` before `lock()`.
 - **Django's compiler internals change between releases** (Django 6.1 added a
   `fetch_mode` argument to `from_db()`). Test against every supported Django.
 
@@ -91,9 +100,11 @@ them, and it should teach them both along the way.
 
 0. Benchmarks (done: `benchmarks/`).
 1. The Rust SQLite engine and `djox.Database` (done).
-2. djox as Django's SQLite `ENGINE`, with Django's SQL functions registered.
+2. djox as Django's SQLite `ENGINE`, with Django's SQL functions registered (done).
 3. `djox.Manager`: Django's QuerySet `a`-methods running on djox. Anything not
-   supported yet falls back to Django's own method, so nothing breaks.
+   supported yet falls back to Django's own method, so nothing breaks. A query
+   inside a sync `atomic()` block (like Django's `TestCase`) must run on that
+   block's connection, or it can't see the block's writes.
 4. Async `atomic()`, savepoints, `on_commit`.
 5. Hooks, in the style of pyox-agents: plain functions (sync or async) called
    at fixed points (`before_query`, `after_query`...), returning `None` to
@@ -115,7 +126,7 @@ like an example of how to use djox.
 | Rust unit       | `#[cfg(test)]` next to the code | One function or type: placeholders, value mapping, error sorting, queues |
 | Python unit     | `tests/unit/`                 | One rule of the Python API: value conversions, exception classes |
 | Integration     | `tests/integration/`          | `djox.Database` on real SQLite files: statements, concurrency, closing, settings |
-| End to end      | `tests/e2e/`                  | Django models end to end (`tests/e2e/library` is a small Django app) |
+| End to end      | `tests/e2e/`                  | Django end to end on djox's `ENGINE` (`tests/e2e/library` is a small Django app) |
 | Django's own    | `tests/django_suite/`         | Django's ORM tests, ported (see below)                 |
 
 - **Real files, no mocks.** Tests use real SQLite files in temporary folders
@@ -130,7 +141,9 @@ like an example of how to use djox.
   `@pytest.mark.django_adapted("why")` if it had to change, or
   `@pytest.mark.django_unsupported("why")` if djox can't pass it yet (it then
   runs as a strict `xfail`, so we notice when it starts passing). pytest ends
-  with a count of unchanged, adapted and unsupported Django tests.
+  with a count of unchanged, adapted and unsupported Django tests. Ported
+  files stay as Django wrote them (no ruff, mypy or pyrefly on them), and run
+  only on the Django version they were copied from.
 - **Every supported Django version** runs in CI: Django's compiler internals
   change between releases.
 

@@ -40,11 +40,26 @@ impl SqliteDatabase {
     /// The writer opens first: it creates the file and turns on WAL mode
     /// before the readers open it.
     pub fn open(settings: SqliteSettings) -> Result<SqliteDatabase> {
+        // `Ok` itself is the `prepare` that changes nothing: it hands each connection straight back.
+        SqliteDatabase::open_with(settings, Ok)
+    }
+
+    /// Like [`SqliteDatabase::open`], and calls `prepare` once with each new
+    /// connection before it starts working: the place to register SQL
+    /// functions or run `PRAGMA`s, like Django does on every connection.
+    ///
+    /// `prepare` takes the connection and gives it back. Taking it (instead of
+    /// borrowing it) lets the Python extension wrap it in a Python object for
+    /// the duration of the call.
+    pub fn open_with(
+        settings: SqliteSettings,
+        prepare: impl Fn(SqliteConnection) -> Result<SqliteConnection>,
+    ) -> Result<SqliteDatabase> {
         settings.check()?;
-        let writer_connection = SqliteConnection::open(&settings, Access::Writer)?;
+        let writer_connection = prepare(SqliteConnection::open(&settings, Access::Writer)?)?;
         let mut reader_connections = Vec::new();
         for _ in 0..settings.reader_count {
-            reader_connections.push(SqliteConnection::open(&settings, Access::Reader)?);
+            reader_connections.push(prepare(SqliteConnection::open(&settings, Access::Reader)?)?);
         }
 
         // An unbounded channel is like Python's `queue.SimpleQueue`: sending never waits.
@@ -255,5 +270,24 @@ mod tests {
         assert_eq!(sent.wait_blocking().unwrap().rows_affected, 1);
         assert_eq!(fetch_all(&database, "SELECT 1", vec![]).unwrap_err(), Error::Closed);
         database.close(); // closing twice does nothing
+    }
+
+    #[test]
+    fn prepare_runs_on_every_connection() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut settings = SqliteSettings::new(folder.path().join("app.sqlite3"));
+        settings.reader_count = 2;
+        // `Mutex` (like `threading.Lock`) lets the closure count calls through a shared reference.
+        let prepared = Mutex::new(0);
+        let database = SqliteDatabase::open_with(settings, |mut connection| {
+            *prepared.lock().unwrap() += 1;
+            connection.create_scalar_function("answer", 0, true, |_| Ok(Value::Integer(42)))?;
+            Ok(connection)
+        })
+        .unwrap();
+
+        assert_eq!(*prepared.lock().unwrap(), 3, "the writer and two readers");
+        let rows = fetch_all(&database, "SELECT answer()", vec![]).unwrap();
+        assert_eq!(rows.rows, [[Value::Integer(42)]]);
     }
 }

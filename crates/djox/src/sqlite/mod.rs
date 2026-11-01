@@ -30,16 +30,25 @@
 //! |-------------------|-----------------------------------------------------------------|
 //! | `database.rs`     | [`SqliteDatabase`]: opens the connections, starts the workers, routes statements |
 //! | `worker.rs`       | A worker: a thread that owns one connection and runs its queue   |
-//! | `connection.rs`   | One SQLite connection: opening it, running statements, errors    |
+//! | `connection.rs`   | [`SqliteConnection`]: one connection, opening it, running statements, errors |
+//! | `functions.rs`    | SQL functions written outside SQLite (Django registers ~40)      |
 //! | `settings.rs`     | [`SqliteSettings`]: the file, the lock timeout, the number of readers |
 //! | `placeholders.rs` | Turns Django's `%s` placeholders into SQLite's `?`               |
 
 mod connection;
 mod database;
+mod functions;
 mod placeholders;
 mod settings;
 mod worker;
 
+pub use connection::{Access, SqliteConnection, StatementOutput, is_data_change};
 pub use database::SqliteDatabase;
-pub use placeholders::to_question_marks;
+pub use functions::{AggregateState, NewAggregateState};
+pub use placeholders::{named_to_question_marks, to_question_marks};
 pub use settings::SqliteSettings;
+
+/// The version of the SQLite bundled in djox, like `"3.54.1"`.
+pub fn sqlite_version() -> &'static str {
+    rusqlite::version()
+}

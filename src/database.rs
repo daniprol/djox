@@ -12,16 +12,17 @@
 //! it, so statements reach the database in the order the methods were called.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use djox::sqlite::{SqliteDatabase, SqliteSettings};
+use djox::sqlite::{SqliteConnection, SqliteDatabase, SqliteSettings};
 use djox::{Database, Rows, Value};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
 use crate::answers::future_for_answer;
+use crate::connection::PythonConnection;
 use crate::errors::to_python_error;
 use crate::values::{parameters_from_python, row_to_python, rows_to_python};
 
@@ -43,11 +44,22 @@ pub struct PythonDatabase {
 impl PythonDatabase {
     /// Opens a SQLite database file (it is created if it doesn't exist).
     ///
+    /// `prepare`, if given, is called with each new connection (as a
+    /// `djox.Connection`) before it starts working, to register SQL functions
+    /// or run `PRAGMA`s. The connection is only lent: it can't be used after
+    /// `prepare` returns.
+    ///
     /// `#[staticmethod]` is Python's `@staticmethod`. `#[pyo3(signature = ...)]`
     /// writes the Python signature, defaults and keyword-only `*` included.
     #[staticmethod]
-    #[pyo3(signature = (path, *, readers = None, timeout = 5.0))]
-    fn sqlite(py: Python<'_>, path: PathBuf, readers: Option<usize>, timeout: f64) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, readers = None, timeout = 5.0, prepare = None))]
+    fn sqlite(
+        py: Python<'_>,
+        path: PathBuf,
+        readers: Option<usize>,
+        timeout: f64,
+        prepare: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
         if !(timeout.is_finite() && timeout >= 0.0) {
             return Err(PyValueError::new_err("timeout must be a number of seconds, 0 or more"));
         }
@@ -56,11 +68,36 @@ impl PythonDatabase {
         if let Some(reader_count) = readers {
             settings.reader_count = reader_count;
         }
+        let location = path.display().to_string();
+
+        // An exception raised by `prepare` is kept here and raised as it is,
+        // instead of being turned into a djox error. `Mutex` lets the closure
+        // below store it (it may only borrow what it captures).
+        let prepare_error: Mutex<Option<PyErr>> = Mutex::new(None);
+        let prepare_connection = |sqlite: SqliteConnection| -> djox::Result<SqliteConnection> {
+            let Some(prepare) = &prepare else {
+                return Ok(sqlite);
+            };
+            Python::attach(|py| {
+                let lent = Py::new(py, PythonConnection::lend(sqlite, location.clone()))
+                    .map_err(|error| keep_error(&prepare_error, error))?;
+                let called = prepare.call1(py, (lent.clone_ref(py),));
+                // Take the connection back whatever happened, so it is closed properly.
+                let sqlite = lent.get().take_back();
+                called.map_err(|error| keep_error(&prepare_error, error))?;
+                sqlite.ok_or_else(|| djox::Error::Settings("prepare() closed the connection".to_string()))
+            })
+        };
+
         // Opening touches the disk: `detach` lets other Python threads run meanwhile.
-        let backend = py.detach(|| SqliteDatabase::open(settings)).map_err(to_python_error)?;
+        let opened = py.detach(|| SqliteDatabase::open_with(settings, prepare_connection));
+        if let Some(error) = prepare_error.lock().unwrap().take() {
+            return Err(error);
+        }
+        let backend = opened.map_err(to_python_error)?;
         Ok(PythonDatabase {
             backend: Arc::new(backend),
-            location: path.display().to_string(),
+            location,
         })
     }
 
@@ -194,4 +231,12 @@ impl From<djox::Executed> for Executed {
 
 fn executed_to_python(py: Python<'_>, executed: djox::Executed) -> PyResult<Bound<'_, PyAny>> {
     Ok(Bound::new(py, Executed::from(executed))?.into_any())
+}
+
+/// Stores a Python exception from `prepare` so `Database.sqlite` can raise it
+/// as it is, and gives the engine an error to stop opening.
+fn keep_error(kept: &Mutex<Option<PyErr>>, error: PyErr) -> djox::Error {
+    let message = error.to_string();
+    *kept.lock().unwrap() = Some(error);
+    djox::Error::Settings(format!("prepare() failed: {message}"))
 }

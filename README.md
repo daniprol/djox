@@ -6,8 +6,9 @@ Django's async ORM methods (`aget`, `acreate`, `async for`...) run the sync ORM 
 djox runs queries on connections that Rust owns, each on its own thread, and wakes Python only when the answer is
 ready. Django keeps doing what it does well: models, migrations, admin and the QuerySet language.
 
-> **Status: early.** This first release is the engine, `djox.Database`. The Django-style API
-> (`await Book.objects.aget(...)` running on djox) comes next. See the [roadmap](docs/roadmap.md).
+> **Status: early.** djox has its engine, `djox.Database`, and a Django `ENGINE` that runs Django's own queries on
+> the same SQLite. The Django-style API (`await Book.objects.aget(...)` running on djox) comes next. See the
+> [roadmap](docs/roadmap.md).
 
 ## Quickstart
 
@@ -37,6 +38,17 @@ asyncio.run(main())
   Django's own compiler runs unchanged (including `select_related` joins).
 - **Never blocks the event loop.** A slow query keeps running on its thread while your other tasks go on.
 
+## With Django
+
+```python
+# settings.py
+DATABASES = {"default": {"ENGINE": "djox.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+```
+
+Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in djox. `djox.connections["default"]`
+gives the async `djox.Database` for the same file. One SQLite in the process matters: Python's `sqlite3` module has
+its own copy, and two copies can't see each other's locks. See [Use with Django](docs/django.md).
+
 ## Speed
 
 Microseconds per call on a 4-core cloud VM, lower is better ([method and all numbers](benchmarks/README.md)):
@@ -57,7 +69,7 @@ the next steps of the roadmap take on.
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
 | `src/*.rs`          | The Python extension `djox._core` (PyO3)                             |
-| `src/djox`          | The Python package                                                   |
+| `src/djox`          | The Python package, and Django's `ENGINE` (`djox.backends.sqlite3`)  |
 
 The Rust code is written for Python developers who have never seen Rust: plain names, straight-line code, and
 comments that explain each Rust feature (and each database detail) where it appears. See
