@@ -1,4 +1,4 @@
-"""Which of Django's converters `djox.InstanceBuilder` can do in Rust.
+"""Which of Django's converters `ResultBuilder` can do in Rust.
 
 Reading a row, Django converts some columns with its SQLite backend's
 converters (text to `datetime`, a float to `Decimal`...). The fast lane hands

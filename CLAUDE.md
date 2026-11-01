@@ -49,7 +49,7 @@ them, and it should teach them both along the way.
 |---------------------|--------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types (`Value`, `Rows`, `Executed`, `Reply`, `Error`) and the `Database` trait. Small and stable |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later   |
-| `src/*.rs`          | The Python extension `djox._core` (PyO3): `Database` (async), `Connection` and `Cursor` (sync, for Django), SQL functions, value conversions, exceptions |
+| `src/*.rs`          | The Python extension `djox._core` (PyO3): `Database` and `RowStream` (async), `Connection` and `Cursor` (sync, for Django), SQL functions, value conversions, `ResultBuilder` (the fast lane's results), exceptions |
 | `src/djox`          | The Python package, with Django's `ENGINE` in `backends/sqlite3/` and `djox.connections` |
 | `tests`             | Python tests: `unit/`, `integration/`, `e2e/`, `django_suite/` (see Testing) |
 | `benchmarks`        | Speed against Django's ORM and plain `sqlite3` (its own uv project)  |
@@ -82,12 +82,22 @@ them, and it should teach them both along the way.
 - **The fast lane** (`src/djox/_fast_lane`): while a `djox.QuerySet` is only
   filtered with plain values (`exact`, `gt`, `in`, `isnull`...), ordered by
   columns and sliced, it keeps a note (`SimpleQuery`) instead of building
-  Django's `Query`. Its reading methods reuse the SQL Django wrote once for
-  the same query *shape*, and Rust builds the instances
-  (`src/instances.rs`, with Django's converters). Asking for
-  `queryset.query` builds Django's `Query` from the note, so everything
-  else falls back to Django. Django writes the SQL on purpose: it is written
-  once per shape, so a second SQL writer in Rust would buy no speed.
+  Django's `Query`. Its methods, sync and async, reads and simple writes
+  (`update()`, `delete()`), reuse the SQL Django wrote once for the same
+  query *shape*, and Rust builds the results (`src/results.rs`: instances,
+  dicts for `values()`, tuples for `values_list()`), converting dates,
+  decimals and booleans like Django's converters (`src/conversions.rs`).
+  Asking for `queryset.query` builds Django's `Query` from the note, so
+  everything else falls back to Django. Django writes the SQL on purpose: it
+  is written once per shape, so a second SQL writer in Rust would buy no
+  speed.
+- **Streams** (`aiterator()`): `Database.stream_rows()` reads a query on a
+  connection and thread of its own, a chunk at a time, as Python asks
+  (`crates/djox-core/src/stream.rs`).
+- **Hooks** (`src/djox/hooks.py`): `djox.add_hooks()` adds plain functions
+  run before and after every statement. Sync code is hooked through Django's
+  `execute_wrappers`, async code in `_running.py`. Hooks are sync functions
+  on purpose: they also run inside sync queries.
 - **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
   djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
   `djox.Model`...) run unchanged on a small pool of djox's threads, not on
@@ -123,6 +133,10 @@ them, and it should teach them both along the way.
   GIL and waiting for a connection, while the connection's thread runs a
   Python SQL function (which needs the GIL), would wait forever. Every
   `djox.Connection` method does `py.detach(...)` before `lock()`.
+- **Rust conversions must match Django's exactly.** A column gets one only
+  when its converter is Django's own, unchanged; any value Rust doesn't
+  handle goes to Django's converter. `tests/unit/test_conversions.py`
+  compares them value by value, errors included.
 - **The fast lane must give Django's answer, or step aside.** Each value is
   prepared by its field when `filter()` runs, so errors come at the same
   moment as in Django. A new shape's statement is kept only if the fast lane
@@ -157,14 +171,16 @@ them, and it should teach them both along the way.
 4. `djox.atomic()` and `djox.on_commit()`: async transactions and savepoints
    (done). The methods that need a transaction, and `djox.Model`'s
    `asave()`, run Django's sync code on djox's own threads (done).
-5. Hooks, in the style of pyox-agents: plain functions (sync or async) called
-   at fixed points (`before_query`, `after_query`...), returning `None` to
-   change nothing or a new value to replace it. Django's signals keep working
-   (sent with `Signal.asend()`).
-6. The fast lane (done): simple reads skip Django's query building and
+5. Hooks, in the style of pyox-agents (done): plain functions called before
+   and after every statement (`before_query`, `after_query`), returning
+   `None` to change nothing or a new value to replace it. Django's signals
+   keep working (sent with `Signal.asend()`).
+6. The fast lane (done): simple queries skip Django's query building and
    compiler, reusing Django's SQL per query shape, and Rust builds the
-   instances. Next: writes (`aupdate`, `adelete`), `values()`, and Rust
-   converters for dates and decimals.
+   results. It covers sync and async methods, `update()`, `delete()`,
+   `values()` and `values_list()`, with dates, decimals and booleans
+   converted in Rust. `aiterator()` streams its rows (done). Next: `F()` in
+   `update()`, joins, `annotate()`.
 
 Add features when someone needs them. If a change makes the core bigger, ask
 whether it could be a hook instead.
