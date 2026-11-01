@@ -210,7 +210,7 @@ async def test_acreate_sends_pre_save_and_post_save() -> None:
 
 
 async def test_a_failed_write_raises_djangos_integrity_error() -> None:
-    with pytest.raises(IntegrityError, match="NOT NULL"):
+    with pytest.raises(IntegrityError, match=r"(?i)not.null"):
         await Author.objects.acreate(name=None)  # type: ignore[misc]  # a missing name, on purpose
 
 

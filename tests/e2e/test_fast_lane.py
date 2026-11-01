@@ -483,7 +483,7 @@ def test_writes_keep_djangos_errors() -> None:
 @pytest.mark.usefixtures("library")
 def test_a_failed_update_marks_the_transaction_for_rollback() -> None:
     with transaction.atomic():
-        with pytest.raises(Exception, match="NOT NULL"):
+        with pytest.raises(Exception, match=r"(?i)not.null"):
             Book.objects.filter(title="Dune").update(published=None)
         assert transaction.get_rollback()
         transaction.set_rollback(False)

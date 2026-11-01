@@ -18,6 +18,8 @@ from django.db import connection
 import djox
 from tests.e2e.library.models import Author, Book
 
+pytestmark = pytest.mark.sqlite_only("one copy of SQLite in the process")
+
 WRITES_PER_SIDE = 200
 
 

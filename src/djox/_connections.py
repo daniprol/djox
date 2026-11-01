@@ -12,11 +12,13 @@ database = djox.connections["default"]
 rows = await database.fetch_all("SELECT id, title FROM library_book WHERE pages > %s", [300])
 ```
 
-It needs the alias's `ENGINE` to be `"djox.backends.sqlite3"`: then Django's
-sync connections and this async database share djox's single SQLite.
+It needs the alias's `ENGINE` to be one of djox's: `"djox.backends.sqlite3"`
+(then Django's sync connections and this async database share djox's single
+SQLite) or `"djox.backends.postgresql"` (a pool of connections to the same server).
 
 If the alias's `NAME` changes (Django's test runner switches to the test
-database), the next lookup closes the old database and opens the new one.
+database), or its connections' time zone does (a test changes `TIME_ZONE`),
+the next lookup closes the old database and opens a new one.
 """
 
 import threading
@@ -27,9 +29,10 @@ from djox._core import Database
 
 @dataclass
 class OpenDatabase:
-    """An async database, and the `NAME` it was opened for."""
+    """An async database, and the `NAME` and time zone it was opened for."""
 
     name: str
+    time_zone: str
     database: Database
 
 
@@ -46,23 +49,28 @@ class Connections:
         from django.core.exceptions import ImproperlyConfigured
         from django.db import connections as django_connections
 
-        from djox.backends.sqlite3.base import DatabaseWrapper
+        from djox.backends.engine import DjoxEngine
 
         wrapper = django_connections[alias]
-        if not isinstance(wrapper, DatabaseWrapper):
+        if not isinstance(wrapper, DjoxEngine):
             raise ImproperlyConfigured(
-                f"djox.connections[{alias!r}] needs settings.DATABASES[{alias!r}]['ENGINE'] "
-                f"to be 'djox.backends.sqlite3', not {wrapper.settings_dict['ENGINE']!r}."
+                f"djox.connections[{alias!r}] needs settings.DATABASES[{alias!r}]['ENGINE'] to be "
+                f"'djox.backends.sqlite3' or 'djox.backends.postgresql', not {wrapper.settings_dict['ENGINE']!r}."
             )
         name = str(wrapper.settings_dict["NAME"])
+        time_zone = wrapper.timezone_name
         with self._lock:
             opened = self._open.get(alias)
-            if opened is not None and opened.name == name and not opened.database.closed:
+            if (
+                opened is not None
+                and (opened.name, opened.time_zone) == (name, time_zone)
+                and not opened.database.closed
+            ):
                 return opened.database
             if opened is not None:
                 opened.database.close()
             database = wrapper.open_async_database()
-            self._open[alias] = OpenDatabase(name, database)
+            self._open[alias] = OpenDatabase(name, time_zone, database)
             return database
 
     def close(self, alias: str) -> None:

@@ -3,13 +3,17 @@
 The plugin imports this module to learn the installed apps and their models,
 so it must stay free of side effects: no files are created here.
 
-The database uses djox's ENGINE. Tests that touch it get a test database (a
-file, `test_djox-tests.sqlite3` in the temp folder) from pytest-django.
+The database uses djox's SQLite ENGINE, or its Postgres one with
+`DJOX_TEST_DATABASE=postgres`. Tests that touch it get a test database (a
+file, `test_djox-tests.sqlite3` in the temp folder, or `test_djox_tests` on
+the Postgres server) from pytest-django.
 """
 
+import os
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import django
 
@@ -61,6 +65,7 @@ INSTALLED_APPS = [
     "djox",
     "tests.e2e.library",
     "tests.e2e.shelf",
+    "tests.e2e.kinds",
     # Django's own tests, ported (see tests/django_suite/README.md)
     "backends",
     "transactions",
@@ -71,7 +76,7 @@ INSTALLED_APPS = [
     "ordering",
     *DJANGO_QUERY_APPS,
 ]
-DATABASES = {
+DATABASES: dict[str, dict[str, object]] = {
     "default": {
         "ENGINE": "djox.backends.sqlite3",
         "NAME": Path(tempfile.gettempdir()) / "djox-tests.sqlite3",
@@ -83,6 +88,25 @@ DATABASES = {
         "NAME": Path(tempfile.gettempdir()) / "djox-tests-other.sqlite3",
     },
 }
+# `DJOX_TEST_DATABASE=postgres uv run pytest` runs the tests on Postgres
+# instead, on the server `DJOX_POSTGRES_URL` names (the test database is
+# made and dropped there by Django, like any Django test run).
+if os.environ.get("DJOX_TEST_DATABASE") == "postgres":
+    postgres = urlsplit(os.environ.get("DJOX_POSTGRES_URL", "postgresql://postgres:postgres@localhost:5432/postgres"))
+    DATABASES["default"] = {
+        "ENGINE": "djox.backends.postgresql",
+        "NAME": "djox_tests",
+        "USER": postgres.username or "",
+        "PASSWORD": postgres.password or "",
+        "HOST": postgres.hostname or "",
+        "PORT": postgres.port or "",
+    }
+    # The ported `backends` tests have no migrations, and foreign keys to
+    # `contenttypes`, which has. Postgres checks that a foreign key's table
+    # exists, so, like Django's own test runner, the tables of
+    # `contenttypes` and `auth` (whose migrations need `contenttypes`'s) are
+    # made from their models, together with theirs.
+    MIGRATION_MODULES = {"auth": None, "contenttypes": None}
 # The models djox switches over (`djox.install`): Django's `auth` app,
 # `shelf`, whose models are written as if djox didn't exist, and the models of
 # Django's own `basic`, `lookup`, `ordering` and query tests, so that they test

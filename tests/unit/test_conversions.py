@@ -18,6 +18,8 @@ from django.test import override_settings
 from djox._core import ResultBuilder
 from djox._fast_lane.conversions import conversion_for
 
+pytestmark = pytest.mark.sqlite_only("Django's SQLite converters, done in Rust")
+
 
 def column_of(field: "models.Field[Any, Any]") -> Col:
     """The column Django's compiler would select for `field`, as in `SELECT "price"`."""

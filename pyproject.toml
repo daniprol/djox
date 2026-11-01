@@ -38,6 +38,7 @@ dev = [
     "maturin>=1.9",
     "mypy>=2.0",
     "prek>=0.5.7",
+    "psycopg[binary]>=3.2",  # Django's sync ORM on Postgres (djox.backends.postgresql)
     "pyrefly>=1.0",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
@@ -86,6 +87,7 @@ markers = [
     "django_ported(source): a test copied from Django's test suite; `source` is its id there (see tests/django_suite/README.md)",
     "django_adapted(reason): a ported Django test changed to fit djox; `reason` says what changed and why",
     "django_unsupported(reason): a ported Django test for a feature djox doesn't support yet; expected to fail",
+    "sqlite_only(reason): a test of something only djox's SQLite backend does; skipped on other databases",
 ]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 pythonpath = ["."]  # so `tests.settings` can be imported

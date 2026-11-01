@@ -21,6 +21,7 @@ from django.utils.asyncio import async_unsafe
 
 import djox
 from djox import _running, hooks
+from djox.backends.engine import DjoxEngine
 from djox.backends.sqlite3 import dbapi
 from djox.backends.sqlite3.creation import DatabaseCreation
 from djox.backends.sqlite3.features import DatabaseFeatures
@@ -28,7 +29,7 @@ from djox.backends.sqlite3.operations import DatabaseOperations
 from djox.backends.sqlite3.options import SqliteOptions, read_options
 
 
-class DatabaseWrapper(base.DatabaseWrapper):
+class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
     """Django's SQLite `DatabaseWrapper`, opening `djox.Connection`s."""
 
     Database = dbapi

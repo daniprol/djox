@@ -65,8 +65,8 @@ from djox._fast_lane.running import PreparedQuery
 from djox._fast_lane.simple_query import Condition, SimpleQuery, Update
 from djox._fast_lane.statements import Kind
 from djox._results import results_from_rows
+from djox.backends import engine
 from djox.backends.sqlite3 import compiler
-from djox.backends.sqlite3.base import DatabaseWrapper
 
 # The model class of a `QuerySet`, like `Book` in `QuerySet[Book]`.
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)
@@ -825,5 +825,5 @@ def is_slice_bound(bound: object) -> bool:
 
 
 def runs_on_djox(alias: str) -> bool:
-    """Whether the Django database `alias` uses djox's `ENGINE`."""
-    return isinstance(connections[alias], DatabaseWrapper)
+    """Whether the Django database `alias` uses one of djox's `ENGINE`s."""
+    return engine.runs_on_djox(connections[alias])

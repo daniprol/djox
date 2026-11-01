@@ -7,7 +7,7 @@
 //!
 //! 1. **Python** (Django's QuerySet, later djox's own) builds a SQL string and
 //!    a list of parameters, like `("SELECT ... WHERE pages > %s", [100])`.
-//! 2. **A backend** (this trait, implemented by `djox::sqlite`, later
+//! 2. **A backend** (this trait, implemented by `djox::sqlite` and
 //!    `djox::postgres`) runs the SQL on a real connection without blocking
 //!    Python's event loop, and returns plain rows.
 //! 3. **Python** turns the rows into model instances.

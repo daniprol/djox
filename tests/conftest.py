@@ -3,12 +3,17 @@
 | Folder          | What is tested                                                        |
 |-----------------|-----------------------------------------------------------------------|
 | `unit/`         | One rule at a time: value conversions, exception classes               |
-| `integration/`  | `djox.Database` on real SQLite files: statements, concurrency, closing |
+| `integration/`  | `djox.Database` on real SQLite files and a Postgres server: statements, concurrency, closing |
 | `e2e/`          | Django end to end on djox's ENGINE: migrations, the ORM, transactions, sync and async together |
 | `django_suite/` | Django's own ORM tests, ported, with markers (see its README)          |
 
 The Rust unit tests live next to the code (`scripts/cargo-test.sh --workspace`).
-Tests use real SQLite files in temporary folders. No mocks.
+Tests use real SQLite files in temporary folders, and a real Postgres
+server when one is set (`DJOX_POSTGRES_URL`). No mocks.
+
+`DJOX_TEST_DATABASE=postgres uv run pytest` runs the Django tests on
+Postgres; tests of what only the SQLite backend does are marked
+`sqlite_only` and skipped there.
 
 pytest-django sets Django up with `tests/settings.py` (see `pyproject.toml`)
 and creates the test database for tests marked `django_db` and for Django
@@ -38,6 +43,19 @@ async def books(database: djox.Database) -> djox.Database:
         "CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT UNIQUE NOT NULL, pages INTEGER, cover BLOB)"
     )
     return database
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skip the tests marked `sqlite_only` when the tests run on another database."""
+    from django.conf import settings
+
+    if settings.DATABASES["default"]["ENGINE"] == "djox.backends.sqlite3":
+        return
+    for item in items:
+        marker = item.get_closest_marker("sqlite_only")
+        if marker is not None:
+            reason = marker.args[0] if marker.args else "SQLite only"
+            item.add_marker(pytest.mark.skip(reason=f"SQLite only: {reason}"))
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:

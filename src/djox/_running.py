@@ -14,7 +14,8 @@ for the transaction's lock (and the transaction may be waiting for us). The
 classic case is Django's `TestCase`: each test runs inside a sync `atomic()`
 block, and an async test must see the rows its `setUpTestData()` wrote.
 
-In that case the SQL runs on the transaction's own `djox.Connection`, on a
+In that case the SQL runs on the transaction's own connection (a `djox.Connection`
+on SQLite, psycopg's on Postgres), on a
 worker thread (`asyncio.to_thread()`), so the event loop still doesn't block.
 
 Both ways do what Django's cursors do: turn djox's exceptions into Django's
@@ -33,6 +34,7 @@ from django.db import connections as django_connections
 
 import djox
 from djox import hooks
+from djox.backends.engine import DjoxEngine
 
 if TYPE_CHECKING:
     # `Row` exists only in the type hints of `djox._core` (`_core.pyi`).
@@ -68,6 +70,7 @@ async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any
                     rows = await djox.connections[alias].fetch_all(sql, parameters)
             else:
                 rows = await djox.connections[alias].fetch_all(sql, parameters)
+        rows = as_sync_connections_return_them(wrapper, rows)
         log_query(wrapper, sql, parameters, started)
     return rows
 
@@ -102,11 +105,19 @@ async def stream_rows(alias: str, sql: str, parameters: Sequence[Any], chunk_siz
     log_query(wrapper, query.sql, query.parameters, started)
     # A chunk shorter than `chunk_size` is the last one.
     while len(rows) == chunk_size:
-        yield rows
+        yield as_sync_connections_return_them(wrapper, rows)
         with wrapper.wrap_database_errors:
             rows = await stream.next_chunk()
     if rows:
-        yield rows
+        yield as_sync_connections_return_them(wrapper, rows)
+
+
+def as_sync_connections_return_them(wrapper: Any, rows: "list[Row]") -> "list[Row]":
+    """The async database's rows, as this alias's sync connections would
+    return them (on Postgres, dates and times in the connection's time zone)."""
+    # Every alias djox runs has a djox `ENGINE`, whose `DatabaseWrapper` is a `DjoxEngine`.
+    engine: DjoxEngine = wrapper
+    return engine.rows_from_async_database(rows)
 
 
 def fetch_all_now(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]":
@@ -197,8 +208,9 @@ def noted_sync_transaction(alias: str) -> Any:
     if wrapper is None:
         return None
     connection = wrapper.connection
-    # The note may be stale: the connection was closed, or the transaction ended.
-    if connection is None or connection.closed or not (wrapper.in_atomic_block or connection.in_transaction):
+    # The note may be stale: the connection was closed, or the transaction
+    # ended. (`autocommit` is Django's own record of `set_autocommit()`.)
+    if connection is None or connection.closed or not (wrapper.in_atomic_block or not wrapper.autocommit):
         return None
     return wrapper
 
@@ -249,20 +261,27 @@ def note_sync_transaction(alias: str, wrapper: Any, is_open: bool) -> None:
     sync_transactions.set(transactions)
 
 
-def fetch_all_on(connection: djox.Connection, sql: str, parameters: Sequence[Any]) -> "list[Row]":
-    """Run a statement on a sync connection and return its rows (on a worker thread)."""
+def fetch_all_on(connection: Any, sql: str, parameters: Sequence[Any]) -> "list[Row]":
+    """Run a statement on a sync connection and return its rows (on a worker thread).
+
+    `connection` is the driver's connection under Django's `DatabaseWrapper`:
+    a `djox.Connection` on SQLite, a psycopg connection on Postgres. Both
+    have the same `cursor()`, `execute()` and `fetchall()` (PEP 249).
+    """
     cursor = connection.cursor()
     try:
-        return cursor.execute(sql, parameters).fetchall()
+        cursor.execute(sql, parameters)
+        return cursor.fetchall()  # type: ignore[no-any-return]  # the driver's cursor is untyped here
     finally:
         cursor.close()
 
 
-def execute_on(connection: djox.Connection, sql: str, parameters: Sequence[Any]) -> int:
+def execute_on(connection: Any, sql: str, parameters: Sequence[Any]) -> int:
     """Run a statement on a sync connection and return how many rows it changed."""
     cursor = connection.cursor()
     try:
-        return cursor.execute(sql, parameters).rowcount
+        cursor.execute(sql, parameters)
+        return cursor.rowcount  # type: ignore[no-any-return]  # the driver's cursor is untyped here
     finally:
         cursor.close()
 
