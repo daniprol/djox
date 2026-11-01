@@ -22,7 +22,8 @@ Both ways do what Django's cursors do: turn djox's exceptions into Django's
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -81,6 +82,16 @@ def open_sync_transaction(alias: str) -> Any:
     in `async_to_sync()`, which copies the context) sees the note; unrelated
     async code, like another request, has its own context and doesn't.
     """
+    wrapper = noted_sync_transaction(alias)
+    if wrapper is not None:
+        # Like Django's cursors: after an error inside `atomic()`, nothing runs
+        # until the block is rolled back (raises `TransactionManagementError`).
+        wrapper.validate_no_broken_transaction()
+    return wrapper
+
+
+def noted_sync_transaction(alias: str) -> Any:
+    """Like `open_sync_transaction()`, without checking that the transaction can still run SQL."""
     wrapper = sync_transactions.get().get(alias)
     if wrapper is None:
         return None
@@ -88,10 +99,31 @@ def open_sync_transaction(alias: str) -> Any:
     # The note may be stale: the connection was closed, or the transaction ended.
     if connection is None or connection.closed or not (wrapper.in_atomic_block or connection.in_transaction):
         return None
-    # Like Django's cursors: after an error inside `atomic()`, nothing runs
-    # until the block is rolled back (raises `TransactionManagementError`).
-    wrapper.validate_no_broken_transaction()
     return wrapper
+
+
+@contextmanager
+def mark_for_rollback_on_error(alias: str) -> Iterator[None]:
+    """If a write fails inside an `atomic()` block, mark the block for rollback.
+
+    Like Django's `transaction.mark_for_rollback_on_error()`, which `save()`
+    and `update()` use: the caller may catch the error and go on, but the
+    transaction must not commit half of its work. It marks the right
+    connection: the one of the transaction this code runs in.
+
+    (`@contextmanager` turns this generator into a `with` block: the code
+    inside the `with` runs at the `yield`.)
+    """
+    try:
+        yield
+    except Exception as error:
+        # `Any`: django-stubs doesn't know `rollback_exc`.
+        wrapper: Any = noted_sync_transaction(alias) or django_connections[alias]
+        if wrapper.in_atomic_block:
+            wrapper.needs_rollback = True
+            # Recent Django versions name this error when they refuse the next query.
+            wrapper.rollback_exc = error
+        raise
 
 
 # The sync connections (Django `DatabaseWrapper`s) with a transaction open in

@@ -42,7 +42,6 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from django.core.exceptions import EmptyResultSet
-from django.db import transaction
 from django.db.models.sql import compiler
 from django.db.models.sql.constants import CURSOR, GET_ITERATOR_CHUNK_SIZE, MULTI, NO_RESULTS, ROW_COUNT, SINGLE
 
@@ -152,9 +151,9 @@ async def run_statement(alias: str, sql_compiler: "compiler.SQLCompiler", result
     if result_type == CURSOR:
         raise NotImplementedError("djox can't hand out a cursor to async code")
     if result_type in (ROW_COUNT, NO_RESULTS):
-        # A write: if it fails inside a sync `atomic()` block, the block must
+        # A write: if it fails inside an `atomic()` block, the block must
         # roll back, like when Django runs it.
-        with transaction.mark_for_rollback_on_error(using=alias):
+        with _running.mark_for_rollback_on_error(alias):
             rows_affected = await _running.execute(alias, sql, parameters)
         return rows_affected if result_type == ROW_COUNT else None
 
@@ -178,7 +177,7 @@ async def run_insert(alias: str, insert_compiler: "SQLInsertCompiler", returning
     """
     insert_compiler.returning_fields = returning_fields
     rows: list[Any] = []
-    with transaction.mark_for_rollback_on_error(using=alias):
+    with _running.mark_for_rollback_on_error(alias):
         for sql, parameters in insert_compiler.as_sql():
             if returning_fields:
                 rows.extend(await _running.fetch_all(alias, sql, parameters))

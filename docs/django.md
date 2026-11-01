@@ -66,7 +66,8 @@ and the event loop never waits for a thread.
 | model instance methods: `asave()`, `adelete()`, `arefresh_from_db()` | Django's (they don't go through the manager) |
 
 "Django's worker thread" means the method behaves exactly as without djox:
-nothing breaks, it is only not faster yet. The same happens on a database
+nothing breaks, it is only not faster yet. Inside a `djox.atomic()` block,
+these run on the block's own thread instead, in its transaction. The same happens on a database
 whose `ENGINE` isn't djox's. A custom `QuerySet` can subclass `djox.QuerySet`
 and use `MyQuerySet.as_manager()`.
 
@@ -79,6 +80,57 @@ the block's writes, and its own writes must belong to the block. So when
 the SQL on that transaction's connection, on a worker thread. Unrelated async
 code, like another request, doesn't see it and keeps using djox's async
 database.
+
+## Async transactions: `djox.atomic()`
+
+`djox.atomic()` is Django's `transaction.atomic()` for async code. Everything
+inside the block is committed together when it ends, or rolled back if it
+raises:
+
+```python
+import djox
+
+async with djox.atomic():
+    author = await Author.objects.acreate(name="Frank Herbert")
+    await Book.objects.acreate(title="Dune", author=author)
+```
+
+It takes Django's arguments (`using`, `savepoint`, `durable`) and also works
+as a decorator, `@djox.atomic` or `@djox.atomic(using="other")`, on an
+`async def`. A nested block is a savepoint: if it raises, only its own work
+is undone.
+
+`await djox.on_commit(send_welcome_email)` runs a (sync) function once the
+transaction commits, like Django's `transaction.on_commit()`: never if it
+rolls back, and right away outside a transaction.
+
+Everything inside the block joins the transaction:
+
+- `djox.Manager` queries run on the transaction's connection;
+- Django's own async methods (`aget_or_create()`...) and your own
+  `sync_to_async()` functions run on the transaction's thread, so Django's
+  sync code there (`transaction.set_rollback(True)`, `Model.save()`...) is in
+  the transaction too;
+- tasks started inside the block (`asyncio.gather()`) share it. They must
+  finish before the block ends.
+
+How it works: the outermost block takes a thread from a small pool (each
+keeps its Django connection open) and runs Django's own `atomic()` there.
+asgiref's `ThreadSensitiveContext` sends the block's thread-sensitive work to
+that thread, so blocks don't queue for Django's single worker thread. Inside
+a sync transaction (Django's `TestCase`), the block joins it as a savepoint.
+
+SQLite runs one write transaction at a time, and `BEGIN IMMEDIATE` (djox's
+default `transaction_mode`) takes the write lock when the block starts. So
+blocks on the same database take turns: each waits in asyncio for the
+previous one to end, and gives up with "database is locked" after the
+`timeout` option. Keep blocks short, and don't wait for slow things (an HTTP
+call) inside one.
+
+A block costs two thread round trips (start and end), plus one per query
+inside. For a short transaction, wrapping a sync function in `sync_to_async()`
+is still faster ([benchmarks](https://github.com/daniprol/djox/tree/main/benchmarks)); `djox.atomic()` lets the code
+inside stay async, and keeps Django's worker thread free for everything else.
 
 ### Errors and the query log
 
@@ -150,5 +202,8 @@ raises `ImproperlyConfigured`.
   Django's sync connection (like the one Django's `TestCase` wraps each test
   in); `djox.Manager` does. For raw SQL in such tests, use
   `TransactionTestCase` (or `@pytest.mark.django_db(transaction=True)`).
-- Async transactions (`async with atomic()`) are the next step of the
-  [roadmap](roadmap.md).
+- Inside a sync `atomic()` block run by the event loop's own thread (an
+  `asyncio.run()` inside `atomic()`, or a pytest-asyncio test without
+  `transaction=True`), nothing else can use the transaction's connection:
+  `djox.atomic()` raises `TransactionManagementError`. Django's `TestCase`
+  works, because it runs async tests with `async_to_sync()`.

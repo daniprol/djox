@@ -48,7 +48,8 @@ DATABASES = {"default": {"ENGINE": "djox.backends.sqlite3", "NAME": BASE_DIR / "
 Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in djox. Give a model
 `objects = djox.Manager()` and its async methods (`aget`, `acount`, `async for`, `acreate`, `aupdate`...) run on djox
 instead of Django's worker thread: Django still writes the SQL and builds the objects. `djox.connections["default"]`
-gives the async `djox.Database` for the same file. One SQLite in the process matters: Python's `sqlite3` module has
+gives the async `djox.Database` for the same file, and `async with djox.atomic():` is Django's `atomic()` for async
+code. One SQLite in the process matters: Python's `sqlite3` module has
 its own copy, and two copies can't see each other's locks. See [Use with Django](docs/django.md).
 
 ## Speed
@@ -57,9 +58,9 @@ Microseconds per call on a 4-core cloud VM, lower is better ([method and all num
 
 | | Django sync | Django async | `djox.Manager` | djox (raw SQL) |
 |---|---:|---:|---:|---:|
-| get one book by id | 224 | 627 | 563 | 178 |
-| fetch 20 books | 550 | 1,138 | 952 | 224 |
-| 100 gets at once (each) | | 665 | 420 | 119 |
+| get one book by id | 204 | 588 | 454 | 166 |
+| fetch 20 books | 523 | 1,040 | 895 | 196 |
+| 100 gets at once (each) | | 555 | 348 | 113 |
 
 `djox.Manager` runs Django's own query building and model instances, with the SQL on djox: it beats Django's async
 methods, most of all under load, because no query waits for Django's single worker thread. Raw djox shows what is left

@@ -79,6 +79,10 @@ them, and it should teach them both along the way.
   runs it). Rows are turned into results by Django's own iterable classes
   (`_results.py`); single-statement methods are replayed with the answer
   (`backends/sqlite3/compiler.py`); `_running.py` decides where the SQL runs.
+- **`djox.atomic()`** (`src/djox/transaction.py`): Django's own `atomic()`,
+  run on a pooled thread that the block owns (asgiref's
+  `ThreadSensitiveContext` sends the block's `sync_to_async()` calls there).
+  Blocks on one SQLite file take turns in asyncio.
 - **Rust does the heavy, repetitive work** (running SQL, converting rows,
   later compiling common queries). Python keeps the Django-facing API small
   and readable.
@@ -106,6 +110,11 @@ them, and it should teach them both along the way.
   `DatabaseWrapper.set_autocommit()` notes the open transaction in a context
   variable; `async_to_sync()` copies it to the async code, which then runs its
   SQL on that connection (`_running.open_sync_transaction()`).
+- **A transaction lives on one thread.** Django keeps one connection per
+  thread, so `djox.atomic()` must run Django's `atomic()`, the queries and
+  the commit on the block's thread (or the transaction's connection). A task
+  started with a fresh context inside a block isn't in it: its own block on
+  the same file waits for the first one to end.
 - **Django's compiler internals change between releases** (Django 6.1 added a
   `fetch_mode` argument to `from_db()`). Test against every supported Django.
 
@@ -118,8 +127,9 @@ them, and it should teach them both along the way.
    Anything not supported yet falls back to Django's own method, so nothing
    breaks. A query inside a sync `atomic()` block (like Django's `TestCase`)
    runs on that block's connection, or it couldn't see the block's writes.
-4. Async `atomic()`, savepoints, `on_commit` (next). Then `aget_or_create`,
-   `abulk_create`, cascading `adelete` and model `asave` can run on djox too.
+4. `djox.atomic()` and `djox.on_commit()`: async transactions and savepoints
+   (done). Next: `aget_or_create`, `abulk_create`, cascading `adelete` and
+   model `asave` run on djox too, inside a `djox.atomic()` block.
 5. Hooks, in the style of pyox-agents: plain functions (sync or async) called
    at fixed points (`before_query`, `after_query`...), returning `None` to
    change nothing or a new value to replace it. Django's signals keep working

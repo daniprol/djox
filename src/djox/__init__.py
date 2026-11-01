@@ -10,6 +10,8 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
   `djox.connections["default"]` gives the async database for a Django alias.
 - `djox.Manager` (with `djox.QuerySet`) runs Django's async QuerySet methods
   (`aget()`, `acount()`, `async for`...) on djox.
+- `djox.atomic()` and `djox.on_commit()` are Django's transactions, for
+  async code (`async with djox.atomic(): ...`).
 
 ```python
 import djox
@@ -47,10 +49,11 @@ from djox._core import (
 if TYPE_CHECKING:
     from djox.manager import Manager
     from djox.query import QuerySet
+    from djox.transaction import atomic, on_commit
 
 
 def __getattr__(name: str) -> Any:
-    """Import `djox.Manager` and `djox.QuerySet` the first time they are used.
+    """Import the parts of djox that need Django the first time they are used.
 
     Python calls a module's `__getattr__` for names the module doesn't have.
     Importing them lazily keeps `import djox` working without Django, or
@@ -64,6 +67,14 @@ def __getattr__(name: str) -> Any:
         from djox.query import QuerySet
 
         return QuerySet
+    if name == "atomic":
+        from djox.transaction import atomic
+
+        return atomic
+    if name == "on_commit":
+        from djox.transaction import on_commit
+
+        return on_commit
     raise AttributeError(f"module 'djox' has no attribute {name!r}")
 
 
@@ -84,6 +95,8 @@ __all__ = [
     "OperationalError",
     "ProgrammingError",
     "QuerySet",
+    "atomic",
     "connections",
+    "on_commit",
     "sqlite_version",
 ]
