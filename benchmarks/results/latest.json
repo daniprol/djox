@@ -3,60 +3,60 @@
   "book_count": 10000,
   "microseconds_per_call": {
     "django sync": {
-      "get one book by id": 304.96531350013356,
-      "fetch 20 books": 692.7546310002981,
-      "fetch 1,000 books": 13489.459940001325,
-      "count": 456.6055680002137,
-      "insert one book": 235.65704000066034,
-      "two inserts in a transaction": 437.6751766661376,
-      "get or create (exists)": 358.1899259997954
+      "get one book by id": 159.9293214999875,
+      "fetch 20 books": 450.9298379999791,
+      "fetch 1,000 books": 6925.9866600009445,
+      "count": 221.76295899998877,
+      "insert one book": 141.00590599991847,
+      "two inserts in a transaction": 283.56153666663886,
+      "get or create (exists)": 157.67258799996853
     },
     "djox sync": {
-      "get one book by id": 316.3317865000863,
-      "fetch 20 books": 635.8096559997648,
-      "fetch 1,000 books": 10400.194260000717,
-      "count": 416.0144389998095,
-      "insert one book": 211.5979479995076,
-      "two inserts in a transaction": 422.64293999930186,
-      "get or create (exists)": 314.5044159991812
+      "get one book by id": 150.24263600000154,
+      "fetch 20 books": 440.8944880000263,
+      "fetch 1,000 books": 7201.363599999695,
+      "count": 197.21160199998167,
+      "insert one book": 135.5472139999847,
+      "two inserts in a transaction": 298.87713666653326,
+      "get or create (exists)": 174.78926000001138
     },
     "sqlite3": {
-      "get one book by id": 7.487434000040594,
-      "fetch 20 books": 49.15643100002853,
-      "fetch 1,000 books": 1162.7868400046282,
-      "count": 103.73799900025915,
-      "insert one book": 45.29051999998046,
-      "two inserts in a transaction": 51.14624333449077
+      "get one book by id": 2.636345000013307,
+      "fetch 20 books": 23.542824999992717,
+      "fetch 1,000 books": 424.68012000085764,
+      "count": 62.55098700000872,
+      "insert one book": 41.217877999997654,
+      "two inserts in a transaction": 37.784520000059274
     },
     "django async": {
-      "get one book by id": 659.5663274999879,
-      "fetch 20 books": 1179.5008529998086,
-      "fetch 1,000 books": 13521.666120004738,
-      "count": 791.0059440000623,
-      "insert one book": 593.2629000008092,
-      "two inserts in a transaction": 845.0746433330398,
-      "get or create (exists)": 737.1090300002834,
-      "100 gets at once": 585.9880899970449,
-      "100 get or create at once": 600.2282699955686
+      "get one book by id": 498.0218485000023,
+      "fetch 20 books": 1031.4146439999945,
+      "fetch 1,000 books": 8577.421560000857,
+      "count": 811.3613470000018,
+      "insert one book": 338.41290400005164,
+      "two inserts in a transaction": 624.3043833332724,
+      "get or create (exists)": 606.1596440000585,
+      "100 gets at once": 413.11777999965216,
+      "100 get or create at once": 403.5533499995836
     },
     "djox.Manager": {
-      "get one book by id": 575.0330459998167,
-      "fetch 20 books": 1163.5799810001117,
-      "fetch 1,000 books": 13434.581359997537,
-      "count": 771.1315220003598,
-      "insert one book": 634.9018840001008,
-      "two inserts in a transaction": 1661.8262266668655,
-      "get or create (exists)": 605.1100599997881,
-      "100 gets at once": 388.3048499983488,
-      "100 get or create at once": 457.6020600006814
+      "get one book by id": 276.43024599998967,
+      "fetch 20 books": 613.2165959999725,
+      "fetch 1,000 books": 7414.1746399993735,
+      "count": 346.5058040000031,
+      "insert one book": 270.50965800003723,
+      "two inserts in a transaction": 1348.7195333334512,
+      "get or create (exists)": 299.7217099999716,
+      "100 gets at once": 248.4582399995361,
+      "100 get or create at once": 268.4104700000489
     },
     "djox": {
-      "get one book by id": 189.9406929999259,
-      "fetch 20 books": 258.78496199993606,
-      "fetch 1,000 books": 1012.613800003237,
-      "count": 296.7448849999528,
-      "insert one book": 221.53443400020478,
-      "100 gets at once": 103.74784000305226
+      "get one book by id": 65.70503599999711,
+      "fetch 20 books": 96.93792100000564,
+      "fetch 1,000 books": 795.2162399999452,
+      "count": 107.70522499996105,
+      "insert one book": 103.068205999989,
+      "100 gets at once": 66.77403000026061
     }
   }
 }

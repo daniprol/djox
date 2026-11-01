@@ -10,6 +10,7 @@
 //! | `connection.rs` | `djox.Connection`: one SQLite connection for sync code (Django's ORM) |
 //! | `cursor.rs`     | `djox.Cursor`: runs statements on a `Connection`, hands back rows |
 //! | `functions.rs`  | Python functions and aggregates as SQL functions               |
+//! | `threads.rs`    | Taking the GIL from djox's worker threads, quickly             |
 //! | `values.rs`   | Python values to djox values and back; rows to lists of tuples  |
 //! | `errors.rs`   | The Python exception classes (`djox.DatabaseError`...)          |
 
@@ -21,6 +22,7 @@ mod cursor;
 mod database;
 mod errors;
 mod functions;
+mod threads;
 mod values;
 
 /// The module Python imports as `djox._core`.

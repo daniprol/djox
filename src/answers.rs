@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 
 use crate::errors::to_python_error;
+use crate::threads;
 
 /// `djox._futures.set_result` and `set_exception`, looked up once.
 ///
@@ -41,8 +42,10 @@ where
     let event_loop = event_loop.unbind();
     let unbound_future = future.clone().unbind();
     let sender = ReplySender::new(move |answer: Result<T>| {
-        // `Python::attach` takes the GIL for this thread, like a `with gil:` block.
-        Python::attach(|py| {
+        // Takes the GIL for this thread, like a `with gil:` block. `threads::attach`
+        // rather than `Python::attach`: it keeps the worker thread registered with
+        // Python between answers, which is much faster (see `threads.rs`).
+        threads::attach(|py| {
             let (finish, value) = match answer.map_err(to_python_error).and_then(|value| to_python(py, value)) {
                 Ok(value) => (SET_RESULT.import(py, "djox._futures", "set_result"), value),
                 Err(error) => (
