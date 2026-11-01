@@ -1,14 +1,24 @@
-"""Running a `SimpleQuery`: parameters, the statement of its shape, then results.
+"""Running a `SimpleQuery`: the statement of its shape, its parameters, then results.
 
-Each function returns `None` when the fast lane leaves the query to Django;
-`djox.QuerySet` then runs it the safe way, with the same result.
+`prepare()` does everything but running the SQL, and returns `None` when the
+fast lane leaves the query to Django; `djox.QuerySet` then runs it the way it
+would without the fast lane, with the same result. A `PreparedQuery` runs the
+same way from async code (`await prepared.fetch_rows()`) and from sync code
+(`prepared.fetch_rows_now()`), and turns the rows into the answer:
+
+```python
+prepared = prepare(queryset, "count")
+if prepared is not None:
+    return prepared.count(await prepared.fetch_rows())
+```
 
 The SQL runs through `djox._running`, like every query of the safe lane: in
-the open sync transaction if there is one, with Django's exceptions, and in
+the open transaction if there is one, with Django's exceptions, and in
 Django's query log.
 """
 
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from django.db import models
 from django.db.models.query import ModelIterable
@@ -17,61 +27,68 @@ from django.db.models.signals import post_init, pre_init
 from djox import _running
 from djox._fast_lane.statements import Kind, Statement, statement_for, values_fit_their_columns
 
+if TYPE_CHECKING:
+    from djox._core import Row
 
-async def fetch_results(queryset: "models.QuerySet[Any]") -> list[Any] | None:
-    """The model instances `queryset` returns, or `None`."""
-    if not can_build_instances(queryset):
+
+@dataclass(frozen=True)
+class PreparedQuery:
+    """A simple query, ready to run: its statement, its parameters, its database."""
+
+    statement: Statement | None
+    """`None` when Django knows without asking that nothing matches
+    (`id__in=[]`, `[5:5]`): then no SQL runs."""
+
+    parameters: list[Any]
+    alias: str
+
+    async def fetch_rows(self) -> "list[Row]":
+        """Run the statement on djox, from async code."""
+        if self.statement is None:
+            return []
+        return await _running.fetch_all(self.alias, self.statement.sql, self.parameters)
+
+    def fetch_rows_now(self) -> "list[Row]":
+        """Run the statement on this thread's Django connection, from sync code."""
+        if self.statement is None:
+            return []
+        return _running.fetch_all_now(self.alias, self.statement.sql, self.parameters)
+
+    def instances(self, rows: "list[Row]", queryset: "models.QuerySet[Any]") -> list[Any]:
+        """The model instances of `rows` (for a query prepared as `"rows"`)."""
+        if self.statement is None:
+            return []
+        assert self.statement.instance_builder is not None, "a statement for rows has one"
+        fetch_mode = getattr(queryset, "_fetch_mode", None)  # Django 6.1 and later
+        return self.statement.instance_builder.build(rows, self.alias, fetch_mode)
+
+    def count(self, rows: "list[Row]") -> int:
+        """The count of `rows` (for a query prepared as `"count"`): `COUNT(*)` is the only column."""
+        return int(rows[0][0]) if rows else 0  # type: ignore[arg-type]  # COUNT(*) is an integer
+
+    def exists(self, rows: "list[Row]") -> bool:
+        """Whether there is a row (for a query prepared as `"exists"`)."""
+        return bool(rows)
+
+
+def prepare(queryset: "models.QuerySet[Any]", kind: Kind) -> PreparedQuery | None:
+    """`queryset`'s simple query, ready to run as `kind`, or `None` to leave it to Django.
+
+    `queryset` must have a note (`queryset._simple_query`).
+    """
+    if kind == "rows" and not can_build_instances(queryset):
         return None
     simple_query = queryset._simple_query  # type: ignore[attr-defined]  # djox.QuerySet's
+    alias = queryset.db
     if simple_query.matches_nothing:
-        return []
-    alias = queryset.db
-    found = prepared_statement(queryset, "rows", alias)
-    if found is None:
-        return None
-    statement, parameters = found
-    assert statement.instance_builder is not None, "a statement for rows has one"
-    rows = await _running.fetch_all(alias, statement.sql, parameters)
-    fetch_mode = getattr(queryset, "_fetch_mode", None)  # Django 6.1 and later
-    return statement.instance_builder.build(rows, alias, fetch_mode)
-
-
-async def count(queryset: "models.QuerySet[Any]") -> int | None:
-    """How many rows `queryset` has, or `None`."""
-    if queryset._simple_query.matches_nothing:  # type: ignore[attr-defined]
-        return 0
-    alias = queryset.db
-    found = prepared_statement(queryset, "count", alias)
-    if found is None:
-        return None
-    statement, parameters = found
-    rows = await _running.fetch_all(alias, statement.sql, parameters)
-    return int(rows[0][0])  # type: ignore[arg-type]  # COUNT(*) is an integer
-
-
-async def exists(queryset: "models.QuerySet[Any]") -> bool | None:
-    """Whether `queryset` has any row, or `None`."""
-    if queryset._simple_query.matches_nothing:  # type: ignore[attr-defined]
-        return False
-    alias = queryset.db
-    found = prepared_statement(queryset, "exists", alias)
-    if found is None:
-        return None
-    statement, parameters = found
-    rows = await _running.fetch_all(alias, statement.sql, parameters)
-    return bool(rows)
-
-
-def prepared_statement(queryset: "models.QuerySet[Any]", kind: Kind, alias: str) -> tuple[Statement, list[Any]] | None:
-    """The statement for `queryset`'s shape and its parameters, or `None`."""
-    simple_query = queryset._simple_query  # type: ignore[attr-defined]
+        return PreparedQuery(None, [], alias)
     # Checked first: Django writes no SQL (or other SQL) for such values.
     if not values_fit_their_columns(simple_query, alias):
         return None
     statement = statement_for(queryset, simple_query, kind, alias)
     if statement is None:
         return None
-    return statement, statement.parameters(simple_query, alias)
+    return PreparedQuery(statement, statement.parameters(simple_query, alias), alias)
 
 
 def can_build_instances(queryset: "models.QuerySet[Any]") -> bool:

@@ -11,6 +11,8 @@ Contenders:
 
 - django sync:   Django's ORM, the normal sync methods (`get`, `list(...)`, `count`).
 - djox sync:     the same sync methods, with `"ENGINE": "djox.backends.sqlite3"`.
+- djox.Manager sync: the same sync methods on `djox.Manager()`: simple queries take
+                 the fast lane, like the async ones below.
 - sqlite3:       Python's `sqlite3` with SQL written by hand. The floor: no ORM at all.
 - django async:  Django's async methods (`aget`, `async for`, `acount`), which run
                  the sync code on a worker thread.
@@ -212,8 +214,8 @@ def make_djox() -> dict[str, Callable[[], Awaitable[object]]]:
     }
 
 
-def make_djox_sync() -> dict[str, Callable[[], object]]:
-    books = Book.objects.db_manager("djox")
+def make_djox_sync(manager: models.Manager) -> dict[str, Callable[[], object]]:
+    books = manager.db_manager("djox")
     return {
         "get one book by id": lambda: books.get(id=7),
         "fetch 20 books": lambda: list(books.filter(pages__gt=500).order_by("-pages", "id")[:20]),
@@ -316,7 +318,8 @@ def main() -> None:
     # Sync code must run outside the event loop (Django refuses sync queries inside it).
     for name, operations in [
         ("django sync", make_django_sync()),
-        ("djox sync", make_djox_sync()),
+        ("djox sync", make_djox_sync(Book.objects)),
+        ("djox.Manager sync", make_djox_sync(Book.djox_objects)),
         ("sqlite3", make_sqlite3()),
     ]:
         results[name] = {
@@ -353,7 +356,7 @@ def main() -> None:
 
 def report(name: str, timings: dict[str, float]) -> None:
     for scenario, microseconds in timings.items():
-        print(f"{name:>14} | {scenario:<20} | {microseconds:9.1f} us", file=sys.stderr)
+        print(f"{name:>17} | {scenario:<20} | {microseconds:9.1f} us", file=sys.stderr)
 
 
 def markdown_table(results: dict[str, dict[str, float]], machine: str) -> str:
