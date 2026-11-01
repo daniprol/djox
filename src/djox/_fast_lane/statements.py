@@ -5,7 +5,8 @@ with different parameters. So the first time the fast lane meets a shape, it
 lets Django build the query and write the SQL, exactly as Django's own
 methods would. It keeps the SQL, and for queries that return objects, an
 `InstanceBuilder` set up from Django's compiler (which columns go to which
-attribute, with which converters). Every later query of that shape skips
+attribute, with which converters, and which of those Rust can do).
+Every later query of that shape skips
 Django's query building and compiler entirely.
 
 Before keeping a statement, the fast lane checks that it computes the same
@@ -29,6 +30,7 @@ from django.db import connections, models
 from django.db.models.base import ModelState
 
 from djox._core import InstanceBuilder
+from djox._fast_lane.conversions import conversion_for
 from djox._fast_lane.simple_query import SimpleQuery
 from djox.backends.sqlite3 import compiler
 
@@ -159,8 +161,17 @@ def instance_builder_for(model: type[models.Model], sql_compiler: Any) -> Instan
     if len(attnames) != len(model._meta.concrete_fields):
         return None  # some fields are deferred (`only()`, `defer()`): Django's `from_db()` handles that
     found_converters = sql_compiler.get_converters(columns)
-    converters = [found_converters.get(index) for index in range(len(columns))]
-    return InstanceBuilder(model, attnames, converters, sql_compiler.connection, ModelState)
+    converters = []
+    conversions: list[tuple[Any, ...] | None] = []
+    for index in range(len(columns)):
+        column_converters = found_converters.get(index)  # `(functions, expression)`, or `None`
+        converters.append(column_converters)
+        if column_converters is None:
+            conversions.append(None)
+        else:
+            functions, expression = column_converters
+            conversions.append(conversion_for(functions, expression, sql_compiler.connection))
+    return InstanceBuilder(model, attnames, converters, conversions, sql_compiler.connection, ModelState)
 
 
 def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql: bool = False) -> list[Any]:

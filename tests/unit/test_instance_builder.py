@@ -13,7 +13,7 @@ ATTNAMES = ["id", "name"]
 
 
 def test_it_builds_what_from_db_builds() -> None:
-    builder = InstanceBuilder(Author, ATTNAMES, [None, None], connection, ModelState)
+    builder = InstanceBuilder(Author, ATTNAMES, [None, None], [None, None], connection, ModelState)
     [built] = builder.build([(1, "Frank Herbert")], "default")
     django = Author.from_db("default", ATTNAMES, [1, "Frank Herbert"])
     assert type(built) is Author
@@ -32,21 +32,22 @@ def test_each_column_goes_through_its_converters_in_order() -> None:
     def shout(value: Any, expression: Any, connection: Any) -> Any:
         return value.upper()
 
-    builder = InstanceBuilder(Author, ATTNAMES, [None, ([strip, shout], "the name column")], connection, ModelState)
+    converters = [None, ([strip, shout], "the name column")]
+    builder = InstanceBuilder(Author, ATTNAMES, converters, [None, None], connection, ModelState)
     [author] = builder.build([(1, "  emma  ")], "default")
     assert author.name == "EMMA"
     assert calls == [("  emma  ", "the name column", connection)]
 
 
 def test_fetch_mode_is_set_on_the_state() -> None:
-    builder = InstanceBuilder(Author, ATTNAMES, [None, None], connection, ModelState)
+    builder = InstanceBuilder(Author, ATTNAMES, [None, None], [None, None], connection, ModelState)
     marker = object()
     [author] = builder.build([(1, "x")], "default", marker)
     assert author._state.fetch_mode is marker
 
 
 def test_a_row_with_the_wrong_number_of_values_is_refused() -> None:
-    builder = InstanceBuilder(Author, ATTNAMES, [None, None], connection, ModelState)
+    builder = InstanceBuilder(Author, ATTNAMES, [None, None], [None, None], connection, ModelState)
     assert builder.column_count == 2
     with pytest.raises(ValueError, match="a row has 3 values, but the model has 2 columns"):
         builder.build([(1, "x", "extra")], "default")
@@ -56,6 +57,6 @@ def test_a_converter_error_reaches_the_caller() -> None:
     def broken(value: Any, expression: Any, connection: Any) -> Any:
         raise ZeroDivisionError("broken converter")
 
-    builder = InstanceBuilder(Author, ATTNAMES, [None, ([broken], None)], connection, ModelState)
+    builder = InstanceBuilder(Author, ATTNAMES, [None, ([broken], None)], [None, None], connection, ModelState)
     with pytest.raises(ZeroDivisionError, match="broken converter"):
         builder.build([(1, "x")], "default")

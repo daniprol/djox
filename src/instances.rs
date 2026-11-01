@@ -19,12 +19,15 @@
 //!
 //! Python decides when this is allowed (`djox._fast_lane`): no signal
 //! receivers, no custom `__init__` or `from_db()`. The converters (text to
-//! `datetime`, text to `Decimal`...) are Django's own functions, chosen by
-//! Django's compiler, so values come out exactly as Django makes them.
+//! `datetime`, a float to `Decimal`...) are the ones Django's compiler
+//! chooses. The most common ones run in Rust (`conversions.rs`), the same
+//! way Django's do; any other is Django's own Python function.
 
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyString, PyTuple};
+
+use crate::conversions::{Conversion, PythonClasses};
 
 /// Builds instances of one model from rows with the same columns.
 ///
@@ -43,6 +46,8 @@ pub struct InstanceBuilder {
     columns: Vec<Column>,
     /// Django's `DatabaseWrapper`, which every converter receives.
     connection: Py<PyAny>,
+    /// `datetime`, `Decimal`...: what the Rust conversions make.
+    classes: PythonClasses,
 }
 
 /// What Python passes for one column's converters: `None`, or
@@ -62,13 +67,19 @@ struct Column {
     converters: Vec<Py<PyAny>>,
     /// The expression Django passes to the converters (the column, a `Col`).
     expression: Py<PyAny>,
+    /// The same conversion as `converters`, done in Rust, when Python found
+    /// one (`Option`: a `Conversion`, or `None`). For a value it leaves to
+    /// Django, `converters` run instead.
+    conversion: Option<Conversion>,
 }
 
 #[pymethods]
 impl InstanceBuilder {
     /// `attnames` lists the attribute of each column. `converters` has one
     /// entry per column: `None`, or `(functions, expression)`, the way
-    /// Django's `SQLCompiler.get_converters()` describes them.
+    /// Django's `SQLCompiler.get_converters()` describes them. `conversions`
+    /// has one entry per column too: `None`, or the Rust conversion that does
+    /// the same as the column's converters (see `conversions.rs`).
     ///
     /// `#[new]` makes this the Python constructor, `InstanceBuilder(...)`.
     #[new]
@@ -77,27 +88,33 @@ impl InstanceBuilder {
         model: Py<PyAny>,
         attnames: Vec<String>,
         converters: Vec<ConvertersFromPython>,
+        conversions: Vec<Option<Bound<'_, PyTuple>>>,
         connection: Py<PyAny>,
         model_state: Py<PyAny>,
     ) -> PyResult<Self> {
-        if attnames.len() != converters.len() {
+        if attnames.len() != converters.len() || attnames.len() != conversions.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "attnames and converters must have one entry per column",
+                "attnames, converters and conversions must have one entry per column",
             ));
         }
         let new_object = py.import("builtins")?.getattr("object")?.getattr("__new__")?.unbind();
         let mut columns = Vec::with_capacity(attnames.len());
         // `zip` walks two lists side by side, like Python's `zip()`.
-        for (attname, column_converters) in attnames.iter().zip(converters) {
+        for ((attname, column_converters), description) in attnames.iter().zip(converters).zip(conversions) {
             // `match` on an `Option`: `Some(...)` when there are converters, `None` when not.
             let (functions, expression) = match column_converters {
                 Some((functions, expression)) => (functions, expression),
                 None => (Vec::new(), py.None()),
             };
+            let conversion = match description {
+                Some(description) => Some(Conversion::from_python(&description)?),
+                None => None,
+            };
             columns.push(Column {
                 attname: PyString::intern(py, attname).unbind(),
                 converters: functions,
                 expression,
+                conversion,
             });
         }
         Ok(InstanceBuilder {
@@ -106,6 +123,7 @@ impl InstanceBuilder {
             model_state,
             columns,
             connection,
+            classes: PythonClasses::import(py)?,
         })
     }
 
@@ -165,15 +183,28 @@ impl InstanceBuilder {
         instance.setattr(intern!(py, "_state"), state)?;
 
         for (column, value) in self.columns.iter().zip(row.iter()) {
-            let mut value = value;
-            for converter in &column.converters {
-                value = converter
-                    .bind(py)
-                    .call1((value, column.expression.bind(py), self.connection.bind(py)))?;
-            }
+            let value = self.convert(py, column, value)?;
             // `setattr`, like Django's `__init__`, so a field's descriptor (if it has one) sees the value.
             instance.setattr(column.attname.bind(py), value)?;
         }
         Ok(instance)
+    }
+
+    /// One value of `column`, converted: in Rust if it can, else with Django's converters.
+    fn convert<'py>(&self, py: Python<'py>, column: &Column, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        // `if let Some(x) = ...` runs the block only when there is a value, like
+        // `if (x := ...) is not None:`; `&&` chains a second one.
+        if let Some(conversion) = &column.conversion
+            && let Some(converted) = conversion.convert(py, &value, &self.classes)?
+        {
+            return Ok(converted);
+        }
+        let mut value = value;
+        for converter in &column.converters {
+            value = converter
+                .bind(py)
+                .call1((value, column.expression.bind(py), self.connection.bind(py)))?;
+        }
+        Ok(value)
     }
 }

@@ -11,6 +11,7 @@
 //! | `cursor.rs`     | `djox.Cursor`: runs statements on a `Connection`, hands back rows |
 //! | `functions.rs`  | Python functions and aggregates as SQL functions               |
 //! | `instances.rs`  | `djox.InstanceBuilder`: rows to model instances, for the fast lane |
+//! | `conversions.rs` | Django's date, time, decimal and boolean converters, in Rust |
 //! | `threads.rs`    | Taking the GIL from djox's worker threads, quickly             |
 //! | `values.rs`   | Python values to djox values and back; rows to lists of tuples  |
 //! | `errors.rs`   | The Python exception classes (`djox.DatabaseError`...)          |
@@ -19,6 +20,7 @@ use pyo3::prelude::*;
 
 mod answers;
 mod connection;
+mod conversions;
 mod cursor;
 mod database;
 mod errors;
