@@ -76,6 +76,7 @@ class Tests(TestCase):
     @pytest.mark.django_adapted("checks djox's DatabaseWrapper instead of Django's")
     def test_memory_db_test_name(self):
         """A named in-memory db should be allowed where supported."""
+        # djox: Django imports its own DatabaseWrapper here.
         from djox.backends.sqlite3.base import DatabaseWrapper
 
         settings_dict = {
@@ -110,6 +111,7 @@ class Tests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             settings_dict = {
                 "default": {
+                    # djox: Django uses "django.db.backends.sqlite3" here.
                     "ENGINE": "djox.backends.sqlite3",
                     "NAME": Path(tmp) / "test.db",
                 },
@@ -130,6 +132,7 @@ class Tests(TestCase):
     def test_init_command(self):
         settings_dict = {
             "default": {
+                # djox: Django uses "django.db.backends.sqlite3" here.
                 "ENGINE": "djox.backends.sqlite3",
                 "NAME": ":memory:",
                 "OPTIONS": {
@@ -286,6 +289,8 @@ class ThreadSharing(TransactionTestCase):
         "test closes the main thread's own connection along with the other thread's"
     )
     def test_database_sharing_in_threads(self):
+        # djox: this line is new. Without it, the main connection may not be open yet in
+        # this test order, and the test ends up closing it.
         connections[DEFAULT_DB_ALIAS].ensure_connection()
         thread_connections = []
 
@@ -320,6 +325,8 @@ class TestTransactionMode(SimpleTestCase):
                 pass
 
         begin_query, commit_query = captured_queries
+        # djox: Django expects "BEGIN" here. djox defaults to "BEGIN IMMEDIATE", so a
+        # transaction takes the write lock up front (see docs/django.md).
         self.assertEqual(begin_query["sql"], "BEGIN IMMEDIATE")
         self.assertEqual(commit_query["sql"], "COMMIT")
 
