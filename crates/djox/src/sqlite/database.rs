@@ -1,14 +1,15 @@
 //! [`SqliteDatabase`]: opens the connections, starts the workers and sends
 //! each statement to the right queue.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
 use djox_core::{Database, Error, Executed, ReplySender, Result, Rows, Value};
 
 use super::connection::{Access, SqliteConnection};
+use super::readers::ReaderQueue;
 use super::settings::SqliteSettings;
-use super::worker::{Job, start_worker};
+use super::worker::{Job, Jobs, start_worker};
 
 /// A SQLite database with one writer connection and a few reader
 /// connections, each on its own thread (see the module docs for why).
@@ -30,7 +31,8 @@ pub struct SqliteDatabase {
 /// The writer's queue, and the queue all readers share.
 struct Queues {
     writer: Sender<Job>,
-    readers: Sender<Job>,
+    /// `None` when there are no readers: the writer runs the reads too.
+    readers: Option<Arc<ReaderQueue>>,
 }
 
 impl SqliteDatabase {
@@ -64,21 +66,23 @@ impl SqliteDatabase {
 
         // An unbounded channel is like Python's `queue.SimpleQueue`: sending never waits.
         let (writer_queue, writer_jobs) = crossbeam_channel::unbounded();
+        let writer_jobs = Jobs::Writer(writer_jobs);
         start_worker("djox-sqlite-writer".to_string(), writer_connection, writer_jobs, None)
             .map_err(could_not_start_thread)?;
 
         let readers_queue = if settings.reader_count == 0 {
-            // No readers: the writer runs the reads too.
-            writer_queue.clone()
+            None
         } else {
-            let (readers_queue, reader_jobs) = crossbeam_channel::unbounded();
+            let readers_queue = Arc::new(ReaderQueue::new());
             // `enumerate()` is Python's `enumerate()`.
             for (number, connection) in reader_connections.into_iter().enumerate() {
                 let name = format!("djox-sqlite-reader-{number}");
-                start_worker(name, connection, reader_jobs.clone(), Some(writer_queue.clone()))
+                // `Arc::clone` hands out one more reference to the same queue.
+                let reader_jobs = Jobs::Readers(Arc::clone(&readers_queue));
+                start_worker(name, connection, reader_jobs, Some(writer_queue.clone()))
                     .map_err(could_not_start_thread)?;
             }
-            readers_queue
+            Some(readers_queue)
         };
 
         let queues = Queues {
@@ -105,15 +109,19 @@ impl SqliteDatabase {
         send(queue, job);
     }
 
-    /// Puts a job in the readers' queue.
+    /// Puts a job in the readers' queue (the writer's, if there are no readers).
     fn send_to_readers(&self, job: Job) {
-        let queue = self
-            .queues
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|queues| queues.readers.clone());
-        send(queue, job);
+        let queues = self.queues.lock().unwrap();
+        match queues.as_ref() {
+            // Closed: dropping the job answers its caller with `Error::Closed`.
+            None => {}
+            Some(Queues {
+                readers: Some(readers), ..
+            }) => readers.send(job),
+            Some(Queues { writer, readers: None }) => {
+                let _ = writer.send(job);
+            }
+        }
     }
 }
 
@@ -154,13 +162,27 @@ impl Database for SqliteDatabase {
     }
 
     fn close(&self) {
-        // Dropping the queue senders closes the queues. Each worker finishes
-        // what is already queued, then stops and closes its connection.
-        self.queues.lock().unwrap().take();
+        // Dropping the writer's queue sender and closing the readers' queue
+        // stops new statements. Each worker finishes what is already queued,
+        // then stops and closes its connection.
+        let queues = self.queues.lock().unwrap().take();
+        if let Some(Queues {
+            readers: Some(readers), ..
+        }) = queues
+        {
+            readers.close();
+        }
     }
 
     fn is_closed(&self) -> bool {
         self.queues.lock().unwrap().is_none()
+    }
+}
+
+/// Dropping the database (like `__del__`) closes it, so its threads stop.
+impl Drop for SqliteDatabase {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 

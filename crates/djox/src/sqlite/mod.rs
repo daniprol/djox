@@ -30,6 +30,7 @@
 //! |-------------------|-----------------------------------------------------------------|
 //! | `database.rs`     | [`SqliteDatabase`]: opens the connections, starts the workers, routes statements |
 //! | `worker.rs`       | A worker: a thread that owns one connection and runs its queue   |
+//! | `readers.rs`      | `ReaderQueue`: the queue readers share, waking the reader that slept last |
 //! | `connection.rs`   | [`SqliteConnection`]: one connection, opening it, running statements, errors |
 //! | `functions.rs`    | SQL functions written outside SQLite (Django registers ~40)      |
 //! | `settings.rs`     | [`SqliteSettings`]: the file, the lock timeout, the number of readers |
@@ -39,6 +40,7 @@ mod connection;
 mod database;
 mod functions;
 mod placeholders;
+mod readers;
 mod settings;
 mod worker;
 

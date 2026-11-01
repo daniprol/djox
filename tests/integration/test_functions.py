@@ -1,6 +1,7 @@
 """Python functions and aggregates that SQL can call, on a `djox.Connection`
 and on every connection of a `djox.Database`."""
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -77,6 +78,27 @@ async def test_prepare_runs_on_every_connection_of_a_database(tmp_path: Path) ->
     assert all(connection.closed for connection in prepared)
     with pytest.raises(djox.DatabaseClosedError):
         prepared[0].execute("SELECT 1")
+
+
+async def test_a_database_thread_keeps_its_python_thread_locals(tmp_path: Path) -> None:
+    # A function on a database's connection runs on djox's worker thread, which
+    # stays registered with Python between statements. So Python state that
+    # belongs to the thread (`threading.local()`, the `decimal` context) lasts
+    # from one statement to the next, like on any Python thread.
+    calls = threading.local()
+
+    def count_calls() -> int:
+        count: int = getattr(calls, "count", 0) + 1
+        calls.count = count
+        return count
+
+    def prepare(connection: djox.Connection) -> None:
+        connection.create_function("count_calls", 0, count_calls)
+
+    # With no readers, the writer's one thread runs every statement.
+    with djox.Database.sqlite(tmp_path / "app.sqlite3", readers=0, prepare=prepare) as database:
+        counts = [await database.fetch_one("SELECT count_calls()") for _ in range(3)]
+    assert counts == [(1,), (2,), (3,)]
 
 
 def test_an_exception_in_prepare_is_raised_as_it_is(tmp_path: Path) -> None:
