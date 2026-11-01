@@ -4,8 +4,9 @@ A truly async Django ORM with a Rust core. Fast and readable, with hooks for
 library authors. SQLite first.
 
 !!! warning "Status: early"
-    This first release is the engine: `djox.Database` runs SQL from async code
-    on connections that Rust owns. The Django-style API (`await
+    djox has its engine (`djox.Database` runs SQL from async code on
+    connections that Rust owns) and a Django `ENGINE` that puts Django's own
+    queries on the same SQLite. The Django-style API (`await
     Book.objects.aget(...)` running on djox) comes next; see the
     [roadmap](roadmap.md).
 
@@ -35,13 +36,15 @@ uv add djox  # or: pip install djox  (not on PyPI yet: build from source with `u
 - Rows are tuples of `None`, `int`, `float`, `str` and `bytes`, like Python's
   `sqlite3`. Parameters can also be `bool`, `datetime`, `date`, `time`,
   `Decimal` and `UUID`, stored the way Django's SQLite backend stores them.
-- Errors: `djox.IntegrityError` (a constraint failed), `djox.OperationalError`
-  (SQLite couldn't run the statement), `djox.DatabaseClosedError`, all
-  subclasses of `djox.DatabaseError`.
+- Errors follow PEP 249, like Python's `sqlite3`: `djox.IntegrityError` (a
+  constraint failed), `djox.OperationalError` (SQLite couldn't run the
+  statement), `djox.ProgrammingError` (a wrong number of parameters...), all
+  subclasses of `djox.DatabaseError`; `djox.DatabaseClosedError` after
+  `close()`.
 
-!!! danger "Don't share a file with Django's SQLite backend (yet)"
-    djox bundles its own copy of SQLite, and Python's `sqlite3` module (which
-    Django uses) has another. Two copies in one process can't see each
-    other's locks, so writes can be lost if both open the same file. The next
-    release ships djox as a Django `ENGINE`, so Django's sync ORM uses djox's
-    copy too.
+!!! danger "Using djox next to Django? Use djox's `ENGINE`"
+    djox bundles its own copy of SQLite, and Python's `sqlite3` module has
+    another. Two copies in one process can't see each other's locks, so
+    writes can be lost if both open the same file. Set
+    `"ENGINE": "djox.backends.sqlite3"` and Django uses djox's copy too: see
+    [Use with Django](django.md).

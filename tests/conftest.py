@@ -4,25 +4,23 @@
 |-----------------|-----------------------------------------------------------------------|
 | `unit/`         | One rule at a time: value conversions, exception classes               |
 | `integration/`  | `djox.Database` on real SQLite files: statements, concurrency, closing |
-| `e2e/`          | Django models end to end: Django writes SQL, djox runs it, Django builds instances |
+| `e2e/`          | Django end to end on djox's ENGINE: migrations, the ORM, transactions, sync and async together |
 | `django_suite/` | Django's own ORM tests, ported, with markers (see its README)          |
 
 The Rust unit tests live next to the code (`scripts/cargo-test.sh --workspace`).
 Tests use real SQLite files in temporary folders. No mocks.
+
+pytest-django sets Django up with `tests/settings.py` (see `pyproject.toml`)
+and creates the test database for tests marked `django_db` and for Django
+`TestCase` classes.
 """
 
-import os
 from collections.abc import Iterator
 from pathlib import Path
 
-import django
 import pytest
 
 import djox
-
-# Django reads its settings from the module named here (also used by mypy's Django plugin).
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
-django.setup()
 
 
 @pytest.fixture
@@ -43,13 +41,18 @@ async def books(database: djox.Database) -> djox.Database:
 
 
 def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
-    """After the run, count the tests ported from Django by status."""
+    """After the run, count the tests ported from Django by status (tests that
+    ran; Django's own list of SQLite skips is left out)."""
     counts = {"unchanged": 0, "adapted": 0, "unsupported": 0}
+    counted: set[str] = set()  # a test with subtests reports more than once
     for reports in terminalreporter.stats.values():
         for report in reports:
             keywords = getattr(report, "keywords", {})
             if getattr(report, "when", None) != "call" or "django_ported" not in keywords:
                 continue
+            if report.nodeid in counted:
+                continue
+            counted.add(report.nodeid)
             if "django_unsupported" in keywords:
                 counts["unsupported"] += 1
             elif "django_adapted" in keywords:

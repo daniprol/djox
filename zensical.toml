@@ -11,6 +11,7 @@ repo_name = "daniprol/djox"
 edit_uri = "edit/main/docs/"
 nav = [
   { "Get started" = "index.md" },
+  { "Use with Django" = "django.md" },
   { "How it works" = "how-it-works.md" },
   { "Benchmarks" = "benchmarks.md" },
   { "Roadmap" = "roadmap.md" },

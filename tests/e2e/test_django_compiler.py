@@ -4,8 +4,8 @@ This is the path the Django-style API will take: Django writes the SQL (pure
 Python, no database access), djox runs it, and Django's converters and
 `from_db()` turn the rows back into model instances.
 
-Django's own SQLite connection never opens these files: djox and Python's
-`sqlite3` bundle separate copies of SQLite, which can't see each other's locks.
+These tests open their own database files with `djox.Database`, separate from
+Django's test database.
 """
 
 import datetime
@@ -116,5 +116,6 @@ async def test_runs_aggregates_from_djangos_compiler(library: djox.Database) -> 
 
 
 def test_compiling_sql_never_opens_djangos_connection() -> None:
+    django_connection.close()  # an earlier test may have opened it
     Book.objects.filter(pages__gt=300).select_related("author").query.get_compiler(using="default").as_sql()
     assert django_connection.connection is None

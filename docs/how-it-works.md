@@ -41,14 +41,49 @@ The event loop never waits.
 - **`synchronous = NORMAL`**: safe with WAL and much faster than Django's
   default; a power cut can lose the last commits, never corrupt the file.
 
+## Django's own queries
+
+Django's sync ORM (and everything built on it: migrations, the admin, the
+test runner) talks to SQLite through a `DatabaseWrapper`, one per thread,
+which holds a connection shaped like Python's `sqlite3.Connection`. djox's
+`ENGINE` (`djox.backends.sqlite3`) is Django's own SQLite backend with one
+change: the connection is a `djox.Connection`, which runs on djox's SQLite.
+
+```text
+  Django sync ORM                          djox async (djox.connections)
+  ───────────────                          ─────────────────────────────
+  thread 1 ─► djox.Connection ─┐           writer queue ─► writer thread ─┐
+  thread 2 ─► djox.Connection ─┼─► djox's SQLite ◄─────────────────────────┤
+                               │           reader queue ─► reader threads ─┘
+                               └─► app.sqlite3 (one SQLite copy, one set of locks)
+```
+
+- **One SQLite in the process.** Python's `sqlite3` module has its own copy
+  of SQLite. Two copies can't see each other's file locks, so writes from
+  both at once can be lost. With djox's `ENGINE`, nothing opens the file
+  through Python's copy.
+- **Each Django thread keeps its own connection**, used on that thread, as in
+  Django. Transactions, savepoints and `TestCase` rollbacks mean exactly what
+  they mean in Django. While SQLite works, the GIL is released, so other
+  Python threads run.
+- **Django's SQL functions.** Django's SQL for date lookups, regular
+  expressions and some aggregates calls Python functions that Django
+  registers on each connection (`django_date_extract`, `REGEXP`,
+  `STDDEV_POP`...). djox calls Django's own `register()` on every connection,
+  sync and async; SQLite calls the functions back from Rust, which takes the
+  GIL for each call.
+- **Sync and async writers take turns** through SQLite's own write lock.
+  Transactions start with `BEGIN IMMEDIATE`, so a writer that finds the lock
+  taken waits (up to `timeout`) instead of failing.
+
 ## The code
 
 | Path                | What it is                                                          |
 |---------------------|---------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
-| `src/*.rs`          | The Python extension `djox._core`                                    |
-| `src/djox`          | The Python package                                                   |
+| `src/*.rs`          | The Python extension `djox._core`: `Database`, `Connection`, `Cursor` |
+| `src/djox`          | The Python package, with Django's `ENGINE` in `backends/sqlite3`      |
 
 Each backend owns everything about its database. Postgres will be a new
 folder with its own connection pool, behind the same `Database` trait, and

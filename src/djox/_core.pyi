@@ -4,10 +4,10 @@ import asyncio
 import datetime
 import decimal
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from os import PathLike
 from types import TracebackType
-from typing import Self, TypeAlias
+from typing import Any, Protocol, Self, TypeAlias
 
 # What a query parameter can be (see `src/values.rs`).
 Parameter: TypeAlias = (
@@ -27,6 +27,13 @@ Parameter: TypeAlias = (
 )
 # What a row value can be: SQLite's storage classes.
 RowValue: TypeAlias = int | float | str | bytes | None
+# A row, as `fetch_all()` and the cursors return it.
+Row: TypeAlias = tuple[RowValue, ...]
+# The parameters of one statement, for a `Cursor`: `%s` with a sequence, `%(name)s` with a mapping.
+Parameters: TypeAlias = Sequence[Parameter] | Mapping[str, Parameter]
+
+# The version of the SQLite bundled in djox, like "3.54.1".
+sqlite_version: str
 
 class Database:
     """A database used from async code. Make one with a backend's constructor,
@@ -43,25 +50,31 @@ class Database:
     """
 
     @staticmethod
-    def sqlite(path: str | PathLike[str], *, readers: int | None = None, timeout: float = 5.0) -> Database:
+    def sqlite(
+        path: str | PathLike[str],
+        *,
+        readers: int | None = None,
+        timeout: float = 5.0,
+        prepare: Callable[[Connection], object] | None = None,
+    ) -> Database:
         """Open a SQLite database file (created if missing) and put it in WAL mode.
 
         Writes run one at a time on one writer connection; reads run in
         parallel on `readers` reader connections (default: one per CPU core,
         at most 4; 0 means the writer runs everything). `timeout` is how many
-        seconds to wait for a lock held by another process. In-memory
+        seconds to wait for a lock held by another connection. In-memory
         databases raise `ValueError`: their connections can't share data.
+
+        `prepare`, if given, is called with each new connection before it
+        starts working, to register SQL functions or run `PRAGMA`s. The
+        connection is only lent: it can't be used after `prepare` returns.
         """
 
-    def fetch_all(
-        self, sql: str, parameters: Sequence[Parameter] | None = None
-    ) -> asyncio.Future[list[tuple[RowValue, ...]]]:
+    def fetch_all(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[list[Row]]:
         """Run a query and return all its rows. A statement that writes
         (like `INSERT ... RETURNING`) still works: it runs on the writer."""
 
-    def fetch_one(
-        self, sql: str, parameters: Sequence[Parameter] | None = None
-    ) -> asyncio.Future[tuple[RowValue, ...] | None]:
+    def fetch_one(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[Row | None]:
         """Run a query and return its first row, or `None`."""
 
     def execute(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[Executed]:
@@ -102,14 +115,149 @@ class Executed:
     def last_insert_id(self) -> int:
         """The id of the last inserted row (SQLite's `rowid`)."""
 
-class DatabaseError(Exception):
-    """Base class for all djox database errors."""
+class AggregateClass(Protocol):
+    """What `Connection.create_aggregate()` takes: a class whose instances
+    have `step(*arguments)` and `finalize()`."""
 
-class IntegrityError(DatabaseError):
-    """A constraint failed: a duplicate unique value, a missing foreign key row..."""
+    def __call__(self) -> Any: ...
+
+class Connection:
+    """One SQLite connection for sync code, shaped like Python's
+    `sqlite3.Connection`, on the SQLite bundled in djox. Django's sync ORM uses
+    it through `"ENGINE": "djox.backends.sqlite3"`.
+
+    Every method blocks the calling thread until SQLite is done, but lets
+    other Python threads run meanwhile.
+    """
+
+    @staticmethod
+    def sqlite(path: str | PathLike[str], *, timeout: float = 5.0) -> Connection:
+        """Open a SQLite database file (created if missing) and put it in WAL
+        mode. `":memory:"` opens a private in-memory database."""
+
+    def cursor(self) -> Cursor:
+        """A new cursor."""
+
+    def execute(self, sql: str, parameters: Parameters | None = None) -> Cursor:
+        """Shortcut for `connection.cursor().execute(sql, parameters)`."""
+
+    def executemany(self, sql: str, parameter_lists: Iterable[Parameters]) -> Cursor:
+        """Shortcut for `connection.cursor().executemany(sql, parameter_lists)`."""
+
+    def commit(self) -> None:
+        """Commit the open transaction, if there is one."""
+
+    def rollback(self) -> None:
+        """Roll back the open transaction, if there is one."""
+
+    def close(self) -> None:
+        """Close the connection; an open transaction is rolled back. Closing twice does nothing."""
+
+    @property
+    def closed(self) -> bool:
+        """Whether `close()` was called."""
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether a transaction is open."""
+
+    autocommit: bool
+    """`True` (the default): each statement commits on its own, unless you run
+    `BEGIN`. `False`: a write opens a transaction that stays open until
+    `commit()` or `rollback()`."""
+
+    def create_function(
+        self, name: str, argument_count: int, function: Callable[..., Any], *, deterministic: bool = False
+    ) -> None:
+        """Register a Python function that SQL can call. `argument_count` -1 means any number."""
+
+    def create_aggregate(self, name: str, argument_count: int, aggregate_class: AggregateClass) -> None:
+        """Register a Python aggregate class, with `step(*arguments)` and `finalize()`."""
+
+    def getlimit(self, category: int) -> int:
+        """One of SQLite's limits, like `sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER`."""
+
+    def setlimit(self, category: int, limit: int) -> int:
+        """Change one of SQLite's limits for this connection; returns the old value."""
+
+class Cursor:
+    """Runs statements on a `Connection` and hands back their rows (PEP 249).
+
+    Placeholders follow Django: with a sequence of parameters write `%s`, with
+    a mapping write `%(name)s`, and in both cases `%%` for a literal `%`.
+    Without parameters the SQL runs exactly as written.
+    """
+
+    arraysize: int
+    """How many rows `fetchmany()` returns by default (1)."""
+
+    def execute(self, sql: str, parameters: Parameters | None = None) -> Self:
+        """Run a statement. Returns the cursor."""
+
+    def executemany(self, sql: str, parameter_lists: Iterable[Parameters]) -> Self:
+        """Run an `INSERT`, `UPDATE`, `DELETE` or `REPLACE` once per item. Returns the cursor."""
+
+    def fetchone(self) -> Row | None:
+        """The next row, or `None`."""
+
+    def fetchmany(self, size: int | None = None) -> list[Row]:
+        """The next `size` rows (default: `arraysize`)."""
+
+    def fetchall(self) -> list[Row]:
+        """All the remaining rows."""
+
+    def close(self) -> None:
+        """Close the cursor."""
+
+    @property
+    def description(self) -> tuple[tuple[str, None, None, None, None, None, None], ...] | None:
+        """One 7-tuple per column (only the name is filled), or `None` for a statement without rows."""
+
+    @property
+    def rowcount(self) -> int:
+        """How many rows the last `INSERT`, `UPDATE`, `DELETE` or `REPLACE` changed, or -1."""
+
+    @property
+    def lastrowid(self) -> int | None:
+        """The id of the last inserted row."""
+
+    @property
+    def connection(self) -> Connection:
+        """The connection this cursor runs statements on."""
+
+    def setinputsizes(self, *sizes: object) -> None: ...
+    def setoutputsize(self, *arguments: object) -> None: ...
+    def __iter__(self) -> Iterator[Row]: ...
+    def __next__(self) -> Row: ...
+
+# The exceptions follow PEP 249, like Python's `sqlite3`.
+
+class Error(Exception):
+    """Base class for all djox errors."""
+
+class InterfaceError(Error):
+    """A problem with djox itself rather than with the database."""
+
+class DatabaseClosedError(InterfaceError):
+    """The database or connection was closed."""
+
+class DatabaseError(Error):
+    """Base class for errors reported by the database."""
+
+class DataError(DatabaseError):
+    """A value doesn't fit its column."""
 
 class OperationalError(DatabaseError):
     """The database could not run the statement: a syntax error, a missing table, a lock timeout..."""
 
-class DatabaseClosedError(DatabaseError):
-    """The database was closed."""
+class IntegrityError(DatabaseError):
+    """A constraint failed: a duplicate unique value, a missing foreign key row..."""
+
+class InternalError(DatabaseError):
+    """The database's own state is broken."""
+
+class ProgrammingError(DatabaseError):
+    """The caller's mistake: a wrong number of parameters, a statement that returns rows sent to execute()..."""
+
+class NotSupportedError(DatabaseError):
+    """The database doesn't support this."""
