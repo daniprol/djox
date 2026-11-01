@@ -70,6 +70,26 @@ class Condition:
 
 
 @dataclass(frozen=True)
+class Update:
+    """One value `update()` sets, like `pages=500` in `update(pages=500)`."""
+
+    name: str
+    """The name given to `update()`: a field's name, or its column (`author_id`)."""
+
+    field: "Field[Any, Any]"
+    """The model field it sets."""
+
+    value: Any
+    """The value, as given: the field prepares it when the statement runs, like Django."""
+
+    @property
+    def shape(self) -> tuple[Any, ...]:
+        """What changes the SQL: the field, and whether the value is `None`
+        (Django writes `SET "pages" = NULL` for it, with no parameter)."""
+        return (self.name, self.field, self.value is None)
+
+
+@dataclass(frozen=True)
 class SimpleQuery:
     """A query made only of what the fast lane understands (see the module docs).
 

@@ -1,4 +1,4 @@
-"""Understanding `filter()` and `order_by()` arguments, the way Django's lookups would.
+"""Understanding `filter()`, `order_by()` and `update()` arguments, the way Django would.
 
 `condition_for(Book, "pages__gt", 500)` finds the field (`pages`) and the
 lookup (`gt`), and prepares the value with the field's own
@@ -28,7 +28,7 @@ from django.db.models import lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields import related_lookups
 
-from djox._fast_lane.simple_query import Condition
+from djox._fast_lane.simple_query import Condition, Update
 
 # The lookup classes the fast lane knows, by lookup name: Django's plain ones,
 # the integer ones (which refuse numbers too big for the column) and the ones
@@ -207,3 +207,36 @@ def is_simple_ordering(model: type[models.Model], names: tuple[Any, ...]) -> boo
         if model_field(model, name.removeprefix("-")) is None:
             return False
     return True
+
+
+def updates_for(model: type[models.Model], keyword_arguments: dict[str, Any]) -> tuple[Update, ...] | None:
+    """The values of one `update()` call, in the order Django writes them
+    (the order given), or `None` if one of them must go to Django."""
+    if not keyword_arguments:
+        return None  # Django runs no SQL for `update()` with nothing to set
+    updates = []
+    for name, value in keyword_arguments.items():
+        field = updated_field(model, name)
+        if field is None:
+            return None
+        if isinstance(value, models.Model):
+            return None  # Django sets its primary key: its own way
+        if value is not None and prepare(field, value) is NOT_SIMPLE:
+            return None  # an expression (`F("pages") + 1`), a value of an unusual type...
+        updates.append(Update(name, field, value))
+    return tuple(updates)
+
+
+def updated_field(model: type[models.Model], name: str) -> "models.Field[Any, Any] | None":
+    """The field `update(name=...)` sets, if it is one plain column of the
+    model's own table. Django's `UPDATE` compiler writes those as `"column" = %s`."""
+    if name == "pk":
+        return None  # Django refuses `pk` in some cases: let it decide
+    field = model_field(model, name)
+    if field is None or field.generated:
+        return None  # Django skips generated fields
+    if field.model._meta.concrete_model is not model._meta.concrete_model:
+        return None  # a parent model's field: another table
+    if hasattr(field, "get_placeholder"):
+        return None  # the field writes its own SQL for its values
+    return field

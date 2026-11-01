@@ -16,9 +16,11 @@ leaves to Django.
 
 | Kind       | SQL Django writes                       | Used by                          |
 |------------|-----------------------------------------|----------------------------------|
-| `"rows"`   | the `SELECT` of the model's columns     | `async for`, `aget()`, `afirst()`... |
-| `"count"`  | `SELECT COUNT(*) ...` (`query.get_count()`) | `acount()`                   |
-| `"exists"` | `SELECT 1 ... LIMIT 1` (`query.has_results()`) | `aexists()`, `acontains()`  |
+| `"rows"`   | the `SELECT` of the model's columns     | `for`, `get()`, `first()`... and their `a`-versions |
+| `"count"`  | `SELECT COUNT(*) ...` (`query.get_count()`) | `count()`, `acount()`        |
+| `"exists"` | `SELECT 1 ... LIMIT 1` (`query.has_results()`) | `exists()`, `contains()`... |
+| `"update"` | `UPDATE ... SET ...` (`update()`)       | `update()`, `aupdate()`          |
+| `"delete"` | `DELETE FROM ...` (`_raw_delete()`)     | `delete()`, `adelete()` (a "fast delete") |
 """
 
 from dataclasses import dataclass
@@ -31,10 +33,10 @@ from django.db.models.base import ModelState
 
 from djox._core import InstanceBuilder
 from djox._fast_lane.conversions import conversion_for
-from djox._fast_lane.simple_query import SimpleQuery
+from djox._fast_lane.simple_query import SimpleQuery, Update
 from djox.backends.sqlite3 import compiler
 
-Kind = Literal["rows", "count", "exists"]
+Kind = Literal["rows", "count", "exists", "update", "delete"]
 
 
 @dataclass(frozen=True)
@@ -56,10 +58,11 @@ class Statement:
     `WHERE "in_print" = %s` (Django 6.0 and earlier do). Then those values are
     no parameters: they are in the SQL (and in the shape)."""
 
-    def parameters(self, simple_query: SimpleQuery, alias: str) -> list[Any]:
-        """The parameters to run this statement with, for `simple_query`'s values."""
+    def parameters(self, simple_query: SimpleQuery, alias: str, updates: tuple[Update, ...] = ()) -> list[Any]:
+        """The parameters to run this statement with, for `simple_query`'s
+        values (and, for an `UPDATE`, the values it sets, which come first)."""
         filter_parameters = parameters_for(simple_query, alias, self.writes_booleans_in_sql)
-        return [*self.select_parameters, *filter_parameters]
+        return [*self.select_parameters, *update_parameters(updates, alias), *filter_parameters]
 
 
 # Shapes the fast lane leaves to Django are remembered too, so it doesn't ask again.
@@ -73,14 +76,20 @@ MAX_STATEMENTS = 2000
 
 
 def statement_for(
-    queryset: "models.QuerySet[Any]", simple_query: SimpleQuery, kind: Kind, alias: str
+    queryset: "models.QuerySet[Any]",
+    simple_query: SimpleQuery,
+    kind: Kind,
+    alias: str,
+    updates: tuple[Update, ...] = (),
 ) -> Statement | None:
     """The statement for `simple_query`'s shape, written by Django the first
-    time, or `None` if the fast lane leaves this shape to Django."""
-    key = (queryset.model, alias, kind, simple_query.shape)
+    time, or `None` if the fast lane leaves this shape to Django. `updates`
+    are the values an `UPDATE` sets."""
+    update_shapes = tuple(update.shape for update in updates)
+    key = (queryset.model, alias, kind, simple_query.shape, update_shapes)
     found = statements.get(key)
     if found is None:
-        found = write_statement(queryset, simple_query, kind, alias)
+        found = write_statement(queryset, simple_query, kind, alias, updates)
         if len(statements) >= MAX_STATEMENTS:
             statements.clear()
         statements[key] = found
@@ -90,7 +99,11 @@ def statement_for(
 
 
 def write_statement(
-    queryset: "models.QuerySet[Any]", simple_query: SimpleQuery, kind: Kind, alias: str
+    queryset: "models.QuerySet[Any]",
+    simple_query: SimpleQuery,
+    kind: Kind,
+    alias: str,
+    updates: tuple[Update, ...] = (),
 ) -> Statement | str:
     """Let Django build `simple_query` and write its SQL (see the module docs)."""
     # A copy of the QuerySet with this note; asking for its `query` makes Django build it.
@@ -105,11 +118,17 @@ def write_statement(
             if instance_builder is None:
                 return LEFT_TO_DJANGO
         else:
-            # `get_count()` and `has_results()` run their statement: capture it instead.
+            # These methods run their statement: capture it instead.
             if kind == "count":
                 statement = compiler.capture(lambda: query.get_count(using=alias))
-            else:
+            elif kind == "exists":
                 statement = compiler.capture(lambda: query.has_results(using=alias))
+            elif kind == "update":
+                values = {update.name: update.value for update in updates}
+                statement = compiler.capture(lambda: django_queryset.update(**values))
+            else:
+                query.clear_ordering(force=True)  # what Django's `delete()` does first
+                statement = compiler.capture(lambda: django_queryset._raw_delete(alias))
             sql, django_parameters = statement.compiler.as_sql()
     except (EmptyResultSet, FullResultSet, RuntimeError):
         # Django answers this one without SQL, from the values: let it.
@@ -118,12 +137,11 @@ def write_statement(
 
     # Check that the fast lane computes Django's parameters, one of two ways.
     # `exists()` selects one constant before them (`SELECT %s AS "a"`, with 1).
-    select_parameter_count = 1 if kind == "exists" else 0
-    select_parameters = tuple(django_parameters[:select_parameter_count])
-    filter_parameters = list(django_parameters[select_parameter_count:])
+    select_parameters = tuple(django_parameters[:1]) if kind == "exists" else ()
     for writes_booleans_in_sql in (False, True):
-        if same_values(filter_parameters, parameters_for(simple_query, alias, writes_booleans_in_sql)):
-            return Statement(sql, instance_builder, select_parameters, writes_booleans_in_sql)
+        candidate = Statement(sql, instance_builder, select_parameters, writes_booleans_in_sql)
+        if same_values(list(django_parameters), candidate.parameters(simple_query, alias, updates)):
+            return candidate
     return LEFT_TO_DJANGO
 
 
@@ -191,6 +209,17 @@ def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql
         field = getattr(condition.field, "target_field", None) or condition.field
         for value in condition.values:
             parameters.append(field.get_db_prep_value(value, connection, prepared=True))
+    return parameters
+
+
+def update_parameters(updates: tuple[Update, ...], alias: str) -> list[Any]:
+    """The parameters of an `UPDATE`'s `SET`, prepared like Django's `UPDATE`
+    compiler prepares them (`get_db_prep_save()`). `None` has none: it is `NULL` in the SQL."""
+    connection = connections[alias]
+    parameters = []
+    for update in updates:
+        if update.value is not None:
+            parameters.append(update.field.get_db_prep_save(update.value, connection))
     return parameters
 
 
