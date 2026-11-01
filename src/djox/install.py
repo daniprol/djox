@@ -149,7 +149,11 @@ def queryset_class_on_djox(queryset_class: type[models.QuerySet[Any]]) -> type:
     if made is None:
         # The class looks methods up in `queryset_class` (the model's custom
         # `QuerySet`), then in `djox.QuerySet`, then in Django's `QuerySet`.
-        made = type(name, (queryset_class, QuerySet), {"__module__": __name__})
+        # It keeps `queryset_class`'s `__name__`, which error messages show
+        # (`'CustomQuerySet' object has no attribute ...`); pickle finds it by
+        # its `__qualname__`, the unique name it has in this module.
+        made = type(name, (queryset_class, QuerySet), {"__module__": __name__, "__qualname__": name})
+        made.__name__ = queryset_class.__name__
         setattr(sys.modules[__name__], name, made)
     return made
 

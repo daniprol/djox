@@ -51,7 +51,7 @@ line-length = 120
 target-version = "py311"
 src = ["src", "tests"]
 # Django's own tests, copied as they are (tests/django_suite/README.md), keep Django's style.
-extend-exclude = ["tests/django_suite/backends", "tests/django_suite/db_functions", "tests/django_suite/transactions", "tests/django_suite/async", "tests/django_suite/basic", "tests/django_suite/lookup", "tests/django_suite/ordering"]
+extend-exclude = ["tests/django_suite/*/"]  # every app folder; conftest.py is djox's own
 force-exclude = true  # also when prek passes those files by name
 
 [tool.ruff.lint]
@@ -107,14 +107,44 @@ files = ["src", "tests", "docs/examples"]
 mypy_path = "src"
 explicit_package_bases = true
 # Django's own tests, copied as they are, have no type hints.
-exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/", "tests/django_suite/basic/", "tests/django_suite/lookup/", "tests/django_suite/ordering/"]
+exclude = ["tests/django_suite/[^/]+/"]  # a regular expression: every app folder
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
 # The apps of Django's ported tests, which mypy doesn't check (see `exclude`).
 # Django's plugin still looks for them, as models of installed apps.
 [[tool.mypy.overrides]]
-module = ["async.*", "backends.*", "basic.*", "db_functions.*", "lookup.*", "ordering.*", "transactions.*"]
+module = [
+    "aggregation.*",
+    "aggregation_regress.*",
+    "annotations.*",
+    "async.*",
+    "backends.*",
+    "basic.*",
+    "bulk_create.*",
+    "custom_managers.*",
+    "dates.*",
+    "datetimes.*",
+    "db_functions.*",
+    "defer.*",
+    "delete.*",
+    "expressions.*",
+    "expressions_case.*",
+    "from_db_value.*",
+    "get_earliest_or_latest.*",
+    "get_or_create.*",
+    "lookup.*",
+    "many_to_many.*",
+    "many_to_one.*",
+    "null_queries.*",
+    "or_lookups.*",
+    "ordering.*",
+    "queries.*",
+    "reverse_lookup.*",
+    "transactions.*",
+    "update.*",
+    "update_only_fields.*",
+]
 ignore_missing_imports = true
 
 [tool.django-stubs]
@@ -122,5 +152,5 @@ django_settings_module = "tests.settings"
 
 [tool.pyrefly]
 project-includes = ["src", "tests", "docs/examples"]
-project-excludes = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/", "tests/django_suite/basic/", "tests/django_suite/lookup/", "tests/django_suite/ordering/"]
+project-excludes = ["tests/django_suite/*/"]
 search-path = ["src", "."]

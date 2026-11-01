@@ -7,9 +7,9 @@
   Django's test runner skips them; so do we.
 - Django's deprecation warnings are errors, like in Django's own test runner
   (some tests check that a warning is raised).
-- The tests were copied from one Django version (`PORTED_FROM`). Django's
-  tests change with Django, so on other versions they are not collected; the
-  rest of djox's tests still run there.
+- The tests were copied from one Django version (`DJANGO_TESTS_PORTED_FROM`
+  in `tests/settings.py`). Django's tests change with Django, so on other
+  versions they are not collected; the rest of djox's tests still run there.
 """
 
 import warnings
@@ -20,11 +20,10 @@ import pytest
 from django.db import connections
 from django.utils.deprecation import RemovedAfterNextVersionWarning, RemovedInNextVersionWarning
 
-# The Django version the tests here were copied from (the one in uv.lock).
-PORTED_FROM = (6, 1)
+from tests.settings import DJANGO_TESTS_PORTED_FROM
 
 # Read by pytest: files and folders it skips while collecting.
-collect_ignore_glob = [] if django.VERSION[:2] == PORTED_FROM else ["*"]
+collect_ignore_glob = [] if django.VERSION[:2] == DJANGO_TESTS_PORTED_FROM else ["*"]
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -43,11 +42,12 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             reason = unsupported.args[0] if unsupported.args else "not supported by djox yet"
             item.add_marker(pytest.mark.xfail(reason=reason, strict=True))
 
-        # A test's id in Django's suite, like "db_functions.math.test_round.RoundTests.test_float".
-        test_class = getattr(item, "cls", None)
-        if test_class is None:
+        # A test's id in Django's suite, like "expressions.tests.FTimeDeltaTests.test_mixed_comparisons1".
+        # It comes from the `django_ported` marker, as our copy of `tests.py` has another name.
+        ported = item.get_closest_marker("django_ported")
+        if ported is None:
             continue
-        class_id = f"{test_class.__module__}.{test_class.__name__}"
+        class_id = ported.args[0]
         test_id = f"{class_id}.{item.name}"
         for listed_id in (test_id, class_id):
             if listed_id in skips:
