@@ -9,13 +9,13 @@ import asyncio
 from typing import Any
 
 
-def set_result(future: asyncio.Future, result: Any) -> None:
+def set_result(future: asyncio.Future[Any], result: Any) -> None:
     """Give `future` its result, unless it was cancelled meanwhile."""
     if not future.done():
         future.set_result(result)
 
 
-def set_exception(future: asyncio.Future, exception: BaseException) -> None:
+def set_exception(future: asyncio.Future[Any], exception: BaseException) -> None:
     """Make `future` raise `exception`, unless it was cancelled meanwhile."""
     if not future.done():
         future.set_exception(exception)

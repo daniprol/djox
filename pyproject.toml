@@ -34,12 +34,14 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "c
 [dependency-groups]
 dev = [
     "django>=5.2",  # tests run SQL written by Django's compiler
+    "django-stubs>=6.1",  # type hints for Django, used by mypy and pyrefly
     "maturin>=1.9",
+    "mypy>=2.0",
     "prek>=0.5.7",
+    "pyrefly>=1.0",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
     "ruff>=0.14",
-    "ty>=0.0.1",
 ]
 docs = ["zensical>=0.0.72"]  # uv run --only-group docs zensical serve
 
@@ -85,6 +87,22 @@ asyncio_default_fixture_loop_scope = "function"
 requires = ["maturin>=1.9.4,<2.0"]  # 1.9.4 writes the PEP 639 license metadata
 build-backend = "maturin"
 
-[tool.ty.src]
+# Two type checkers, both reading Django's types from django-stubs:
+# - mypy, with the django-stubs plugin, is the reference: it knows each model's
+#   fields and checks QuerySet lookups, like the mypy most Django projects run.
+# - pyrefly is fast and has Django support built in; it is also the editor's language server.
 # benchmarks/ is its own uv project with its own dependencies; it is not type-checked here.
-exclude = ["benchmarks"]
+
+[tool.mypy]
+files = ["src", "tests", "docs/examples"]
+mypy_path = "src"
+explicit_package_bases = true
+strict = true
+plugins = ["mypy_django_plugin.main"]
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
+
+[tool.pyrefly]
+project-includes = ["src", "tests", "docs/examples"]
+search-path = ["src", "."]

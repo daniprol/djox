@@ -69,7 +69,7 @@ comments that explain each Rust feature (and each database detail) where it appe
 uv sync                              # builds the Rust extension
 uv run pytest                        # Python tests
 scripts/cargo-test.sh --workspace    # Rust tests
-uv run prek install                  # git hooks: ruff, ty, cargo fmt, clippy, tests
+uv run prek install                  # git hooks: ruff, mypy, pyrefly, cargo fmt, clippy, tests
 ```
 
 ## License
