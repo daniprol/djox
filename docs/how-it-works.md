@@ -112,9 +112,13 @@ method:
   dates), which must happen once. djox sends the signals with `asend()`, runs
   Django's `_save_table()` once, takes the `INSERT` from it, and awaits it.
 
-Methods that need a transaction (`aget_or_create()`, `abulk_create()`,
-deletes that cascade) and `prefetch_related()` still use Django's worker
-thread for now (roadmap step 4b).
+Methods that need a transaction or several statements (`aget_or_create()`,
+`abulk_create()`, deletes that cascade, `prefetch_related()`, `asave()` on a
+`djox.Model`) run Django's sync method unchanged, on a small pool of djox's
+own threads (`djox/_threads.py`), instead of Django's single worker thread.
+Each pooled thread keeps its Django connection open. Writers on one SQLite
+file take turns in asyncio, because SQLite has one writer, and its own way of
+waiting (sleeping and retrying) is slow.
 
 When async code runs inside a sync `atomic()` block (Django's `TestCase`),
 its SQL runs on that block's connection instead, so it sees the block's
@@ -138,8 +142,9 @@ thread. So `djox.atomic()` gives the block a thread:
 Django's own `atomic()` does the transaction work (savepoints, rollback on
 error, `on_commit`), so it behaves exactly like in sync code. asgiref's
 `ThreadSensitiveContext` routes every thread-sensitive call of the block
-(`sync_to_async()`, Django's async methods) to the block's thread. Blocks on
-one SQLite file take turns in asyncio, because SQLite has one writer.
+(`sync_to_async()`, Django's async methods) to the block's thread. The block's
+thread comes from the same pool, and blocks take their turn like other
+writers.
 
 ## The code
 

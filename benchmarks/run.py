@@ -143,6 +143,7 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("default"),
+        "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
     }
 
 
@@ -160,6 +161,7 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
         ),
         # Django has no async `atomic()`: the usual way is a sync function on its worker thread.
         "two inserts in a transaction": sync_to_async(lambda: two_inserts_in_a_transaction("default")),
+        "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
     }
 
 
@@ -205,6 +207,7 @@ def make_djox_sync() -> dict[str, Callable[[], object]]:
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("djox"),
+        "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
     }
 
 
@@ -228,6 +231,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
         "two inserts in a transaction": two_inserts,
+        "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
     }
 
 
@@ -276,8 +280,14 @@ REPEATS = {
     "count": 1000,
     "insert one book": 500,
     "two inserts in a transaction": 300,
+    "get or create (exists)": 500,
 }
 CONCURRENT_TASKS = 100
+# Each runs `CONCURRENT_TASKS` calls of a scenario at once, with `asyncio.gather()`.
+CONCURRENT_SCENARIOS = {
+    f"{CONCURRENT_TASKS} gets at once": "get one book by id",
+    f"{CONCURRENT_TASKS} get or create at once": "get or create (exists)",
+}
 
 
 def main() -> None:
@@ -304,8 +314,9 @@ def main() -> None:
             results[name] = {}
             for scenario, operation in operations.items():
                 results[name][scenario] = await time_async(operation, REPEATS[scenario])
-            concurrent = f"{CONCURRENT_TASKS} gets at once"
-            results[name][concurrent] = await time_concurrent(operations["get one book by id"], CONCURRENT_TASKS)
+            for concurrent, scenario in CONCURRENT_SCENARIOS.items():
+                if scenario in operations:
+                    results[name][concurrent] = await time_concurrent(operations[scenario], CONCURRENT_TASKS)
             report(name, results[name])
 
     asyncio.run(run_async_contenders())
@@ -325,7 +336,7 @@ def report(name: str, timings: dict[str, float]) -> None:
 
 def markdown_table(results: dict[str, dict[str, float]], machine: str) -> str:
     """The results as a Markdown table, for the README."""
-    scenarios = [*REPEATS, f"{CONCURRENT_TASKS} gets at once"]
+    scenarios = [*REPEATS, *CONCURRENT_SCENARIOS]
     names = list(results)
     lines = [f"Microseconds per call, lower is better. {machine}.", ""]
     lines.append("| | " + " | ".join(names) + " |")
