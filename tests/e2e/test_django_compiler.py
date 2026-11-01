@@ -10,8 +10,9 @@ Django's own SQLite connection never opens these files: djox and Python's
 
 import datetime
 import decimal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from django.db import connection as django_connection
@@ -66,12 +67,14 @@ async def fetch_models(database: djox.Database, queryset: QuerySet) -> list:
     first, last = klass_info["select_fields"][0], klass_info["select_fields"][-1] + 1
     field_names = [column[0].target.attname for column in select[first:last]]
     # Django 6.1 added "fetch modes": `from_db()` and the populators take one more argument.
+    # The signature depends on the installed Django, so it is called through an untyped name.
+    populators_for = cast("Callable[..., list]", get_related_populators)
     if hasattr(queryset, "_fetch_mode"):
         fetch_mode = {"fetch_mode": queryset._fetch_mode}
-        related_populators = get_related_populators(klass_info, select, queryset.db, queryset._fetch_mode)
+        related_populators = populators_for(klass_info, select, queryset.db, queryset._fetch_mode)
     else:
         fetch_mode = {}
-        related_populators = get_related_populators(klass_info, select, queryset.db)  # ty: ignore[missing-argument]
+        related_populators = populators_for(klass_info, select, queryset.db)
 
     model = queryset.model
     assert model is not None
