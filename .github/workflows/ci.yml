@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres-version: ["14", "18"]
+        postgres-version: ["15", "18"]  # the oldest Django 6.1 supports, and the newest
     services:
       postgres:
         image: postgres:${{ matrix.postgres-version }}
