@@ -13,6 +13,8 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
   model's own `asave()`, `adelete()` and `arefresh_from_db()`.
 - `djox.atomic()` and `djox.on_commit()` are Django's transactions, for
   async code (`async with djox.atomic(): ...`).
+- `djox.add_hooks(djox.Hooks(before_query=..., after_query=...))` calls your
+  functions around every SQL statement (`djox.hooks`).
 
 ```python
 import djox
@@ -46,6 +48,7 @@ from djox._core import (
     ProgrammingError,
     sqlite_version,
 )
+from djox.hooks import Hooks, Query, QueryFinished, add_hooks, remove_hooks
 
 if TYPE_CHECKING:
     from djox.manager import Manager
@@ -93,6 +96,7 @@ __all__ = [
     "DatabaseError",
     "Error",
     "Executed",
+    "Hooks",
     "IntegrityError",
     "InterfaceError",
     "InternalError",
@@ -101,9 +105,13 @@ __all__ = [
     "NotSupportedError",
     "OperationalError",
     "ProgrammingError",
+    "Query",
+    "QueryFinished",
     "QuerySet",
+    "add_hooks",
     "atomic",
     "connections",
     "on_commit",
+    "remove_hooks",
     "sqlite_version",
 ]
