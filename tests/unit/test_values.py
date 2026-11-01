@@ -52,7 +52,7 @@ async def test_values_that_cannot_be_stored_raise(database: djox.Database) -> No
     with pytest.raises(OverflowError):
         await database.fetch_all("SELECT %s", [2**64])
     with pytest.raises(TypeError, match="object"):
-        await database.fetch_all("SELECT %s", [object()])  # ty: ignore[invalid-argument-type]
+        await database.fetch_all("SELECT %s", [object()])  # type: ignore[list-item]  # on purpose: not a parameter
     with pytest.raises(TypeError, match="list or tuple"):
         await database.fetch_all("SELECT %s", "a")
 

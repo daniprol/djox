@@ -28,7 +28,7 @@ jobs:
       # The same hooks developers run on commit and on push (see prek.toml).
       - name: Commit hooks (ruff, cargo fmt, file checks)
         run: uv run --frozen prek run --all-files --show-diff-on-failure
-      - name: Push hooks (ty, clippy, cargo test, pytest)
+      - name: Push hooks (mypy, pyrefly, clippy, cargo test, pytest)
         run: uv run --frozen prek run --all-files --stage pre-push
 
   django-versions:

@@ -11,26 +11,17 @@ The Rust unit tests live next to the code (`scripts/cargo-test.sh --workspace`).
 Tests use real SQLite files in temporary folders. No mocks.
 """
 
-import tempfile
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
 import django
 import pytest
-from django.conf import settings
 
 import djox
 
-# Django can be configured once per process, so its database lives in a folder made for this test session.
-DJANGO_DATABASE = Path(tempfile.mkdtemp(prefix="djox-tests-")) / "django.sqlite3"
-
-settings.configure(
-    # Django only compiles SQL in these tests; its own connection never opens this file.
-    DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": DJANGO_DATABASE}},
-    INSTALLED_APPS=["tests.e2e.library"],
-    USE_TZ=True,
-    DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
-)
+# Django reads its settings from the module named here (also used by mypy's Django plugin).
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tests.settings")
 django.setup()
 
 

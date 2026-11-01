@@ -12,15 +12,18 @@ import datetime
 import decimal
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
 import pytest
 from django.db import connection as django_connection
-from django.db.models import QuerySet
-from django.db.models.query import get_related_populators
+from django.db.models import Model, QuerySet
+from django.db.models.query import RelatedPopulator, get_related_populators
 
 import djox
 from tests.e2e.library.models import Author, Book
+
+# "Some model class": `fetch_models(database, Book.objects...)` returns a `list[Book]`.
+ModelType = TypeVar("ModelType", bound=Model)
 
 PUBLISHED = datetime.datetime(1965, 8, 1, 12, 0, tzinfo=datetime.UTC)
 
@@ -57,7 +60,7 @@ async def library(tmp_path: Path) -> AsyncIterator[djox.Database]:
         yield database
 
 
-async def fetch_models(database: djox.Database, queryset: QuerySet) -> list:
+async def fetch_models(database: djox.Database, queryset: QuerySet[ModelType]) -> list[ModelType]:
     """Run a QuerySet on djox, the way the Django-style API will."""
     compiler = queryset.query.get_compiler(using=queryset.db)
     sql, parameters = compiler.as_sql()
@@ -67,8 +70,8 @@ async def fetch_models(database: djox.Database, queryset: QuerySet) -> list:
     first, last = klass_info["select_fields"][0], klass_info["select_fields"][-1] + 1
     field_names = [column[0].target.attname for column in select[first:last]]
     # Django 6.1 added "fetch modes": `from_db()` and the populators take one more argument.
-    # The signature depends on the installed Django, so it is called through an untyped name.
-    populators_for = cast("Callable[..., list]", get_related_populators)
+    # django-stubs describe the newest Django, so the older call is made through an untyped name.
+    populators_for = cast("Callable[..., list[RelatedPopulator]]", get_related_populators)
     if hasattr(queryset, "_fetch_mode"):
         fetch_mode = {"fetch_mode": queryset._fetch_mode}
         related_populators = populators_for(klass_info, select, queryset.db, queryset._fetch_mode)
@@ -78,7 +81,7 @@ async def fetch_models(database: djox.Database, queryset: QuerySet) -> list:
 
     model = queryset.model
     assert model is not None
-    instances = []
+    instances: list[ModelType] = []
     for row in compiler.results_iter(results=[rows]):
         instance = model.from_db(queryset.db, field_names, row[first:last], **fetch_mode)
         for populator in related_populators:

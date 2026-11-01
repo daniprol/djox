@@ -3,6 +3,7 @@
 import asyncio
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -63,7 +64,7 @@ async def test_a_slow_query_does_not_block_the_event_loop(database: djox.Databas
     """
     ticks = 0
 
-    async def tick_until_done(query: asyncio.Future) -> None:
+    async def tick_until_done(query: asyncio.Future[Any]) -> None:
         nonlocal ticks
         while not query.done():
             ticks += 1

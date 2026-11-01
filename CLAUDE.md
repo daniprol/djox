@@ -136,8 +136,13 @@ like an example of how to use djox.
 
 ## Workflow
 
-- Tools: uv, maturin, ruff, ty, pytest, cargo fmt, clippy. Hooks run with prek
-  (`prek.toml`): `uv run prek install` once.
+- Tools: uv, maturin, ruff, mypy, pyrefly, pytest, cargo fmt, clippy. Hooks
+  run with prek (`prek.toml`): `uv run prek install` once.
+- Types: all Python code, tests included, passes `mypy` (strict, with the
+  django-stubs plugin) and `pyrefly check`. Both read Django's types from
+  django-stubs. Fix the code rather than silencing a checker; when an ignore is
+  truly needed (a test that passes a wrong type on purpose), use
+  `# type: ignore[code]` with a short reason, which both checkers understand.
 - `uv run pytest` builds the extension and runs the Python tests.
   `scripts/cargo-test.sh --workspace` runs the Rust tests.
 - Docs: `uv run --only-group docs zensical serve`. Update them with every
