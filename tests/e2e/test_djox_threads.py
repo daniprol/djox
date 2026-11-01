@@ -13,10 +13,12 @@ from typing import Any
 
 import pytest
 from asgiref.sync import async_to_sync, sync_to_async
-from django.db import transaction
+from django.core.signals import request_finished
+from django.db import connection, transaction
 from django.db.models.signals import pre_save
 
 import djox
+from djox import _threads
 from tests.e2e.library.models import Author, Book
 
 PUBLISHED = datetime.datetime(1965, 8, 1, 12, 0, tzinfo=datetime.UTC)
@@ -148,3 +150,42 @@ def test_inside_a_sync_transaction_they_join_it() -> None:
         assert async_to_sync(get_or_create_twice)() == [True, False]
         transaction.set_rollback(True)
     assert Author.objects.count() == 0
+
+
+# ---------------------------------------------------------------- related managers
+
+
+async def test_related_managers_run_on_djoxs_threads() -> None:
+    # `author.books` is a related manager Django builds from `djox.Manager`.
+    author = await Author.objects.acreate(name="Frank Herbert")
+    thread_names: list[str] = []
+
+    def note_thread(sender: type[Book], **kwargs: Any) -> None:
+        thread_names.append(threading.current_thread().name)
+
+    pre_save.connect(note_thread, sender=Book)
+    try:
+        dune = await author.books.acreate(title="Dune", pages=412, price=decimal.Decimal("9.99"), published=PUBLISHED)
+    finally:
+        pre_save.disconnect(note_thread, sender=Book)
+    assert dune.author_id == author.pk
+    assert thread_names[0].startswith("djox"), thread_names
+
+
+# ---------------------------------------------------------------- connection upkeep
+
+
+async def test_a_pooled_threads_connection_is_closed_after_each_request() -> None:
+    # `CONN_MAX_AGE = 0` (Django's default) closes connections after each
+    # request; djox's pooled threads follow it, before their next call.
+    def this_threads_connection() -> object:
+        connection.ensure_connection()
+        return connection.connection
+
+    first = await _threads.run_django_method("default", this_threads_connection, writes=False)
+    again = await _threads.run_django_method("default", this_threads_connection, writes=False)
+    assert again is first, "no request went by: the connection is kept"
+
+    await request_finished.asend(sender=None)
+    after_request = await _threads.run_django_method("default", this_threads_connection, writes=False)
+    assert after_request is not first

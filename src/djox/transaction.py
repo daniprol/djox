@@ -33,9 +33,9 @@ thread's connection, between `BEGIN` and `COMMIT`".
 So everything inside the block sees the block's writes, and its writes are
 committed or rolled back together.
 
-SQLite runs one write transaction at a time, so blocks on the same file take
-turns: a block waits for the previous one in asyncio, without blocking the
-event loop (see `wait_for_write_turn()`).
+SQLite lets one connection write at a time, so a block waits in asyncio
+until it has the file's write turn to itself: no other block, and no plain
+write on its way to djox's writer thread (see `djox._write_turns`).
 
 Inside a sync transaction already (Django's `TestCase`, which runs each async
 test with `async_to_sync()` inside `atomic()`), `djox.atomic()` joins it, as
@@ -47,9 +47,7 @@ a nested block (a savepoint is a stack: two at once would mix).
 """
 
 import functools
-from asyncio import Lock
 from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
@@ -58,8 +56,8 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db import connections as django_connections
 
-from djox import _running
-from djox._threads import give_back_idle_thread, take_idle_thread, transaction_thread, wait_for_write_turn
+from djox import _running, _write_turns
+from djox._threads import give_back_idle_thread, take_idle_thread, tidy_connections, transaction_thread
 
 Parameters = ParamSpec("Parameters")
 Result = TypeVar("Result")
@@ -83,12 +81,10 @@ class Atomic:
         self.durable = durable
         # Set while the block is open (between `__aenter__` and `__aexit__`):
         self.django_atomic: Any = None
-        self.thread: ThreadPoolExecutor | None = None
-        self.write_turn: Lock | None = None
-        # Leaves the `ThreadSensitiveContext` when the block ends. An
-        # `AsyncExitStack` is an `async with` block that can be entered in
-        # one method and left in another.
-        self.thread_context = AsyncExitStack()
+        # What the outermost block set up (the write turn, its thread...), to
+        # undo when it ends. An `AsyncExitStack` is a stack of `async with`
+        # blocks that can be entered in one method and left in another.
+        self.outermost_block = AsyncExitStack()
 
     async def __aenter__(self) -> None:
         """Start the transaction (or, in a nested block, a savepoint)."""
@@ -97,6 +93,7 @@ class Atomic:
         alias = self.using or DEFAULT_DB_ALIAS
         sync_transaction = _running.open_sync_transaction(alias)
         self.django_atomic = transaction.atomic(using=self.using, savepoint=self.savepoint, durable=self.durable)
+        is_outermost = transaction_thread.get() is None and sync_transaction is None
 
         def enter() -> None:
             # This runs on the transaction's thread: Django's `atomic()` uses that thread's connection.
@@ -106,10 +103,12 @@ class Atomic:
                     "thread. Run the async code with async_to_sync() from inside the transaction "
                     "(Django's TestCase does), or use a test with transaction=True."
                 )
+            if is_outermost:
+                tidy_connections()  # a pooled thread: Django's connection upkeep first
             self.django_atomic.__enter__()
 
         try:
-            if transaction_thread.get() is None and sync_transaction is None:
+            if is_outermost:
                 await self.start_outermost_block(alias)
             # `thread_sensitive=True`: run on the thread asgiref picks for this
             # context, which is the transaction's thread (see the top of this file).
@@ -134,24 +133,22 @@ class Atomic:
             await self.end_outermost_block()
 
     async def start_outermost_block(self, alias: str) -> None:
-        """Wait for this block's turn to write, then give it a thread of its
-        own and send this task's thread-sensitive work to that thread."""
-        self.write_turn = await wait_for_write_turn(alias)
+        """Wait for the write turn, then give the block a pooled thread of its
+        own and send this task's thread-sensitive work to that thread.
+
+        Each step goes on `outermost_block`, which undoes them in reverse order.
+        """
+        steps = self.outermost_block
+        await steps.enter_async_context(_write_turns.transaction_alone(alias))
         thread = take_idle_thread()
-        await self.thread_context.enter_async_context(ThreadSensitiveContext(executor=thread))
-        self.thread = thread
-        self.transaction_thread_token = transaction_thread.set(self.thread)
+        steps.callback(give_back_idle_thread, thread)
+        await steps.enter_async_context(ThreadSensitiveContext(executor=thread))
+        token = transaction_thread.set(thread)
+        steps.callback(transaction_thread.reset, token)
 
     async def end_outermost_block(self) -> None:
-        """Undo `start_outermost_block()`, if this block is the outermost one."""
-        if self.thread is not None:
-            transaction_thread.reset(self.transaction_thread_token)
-            await self.thread_context.aclose()
-            give_back_idle_thread(self.thread)
-            self.thread = None
-        if self.write_turn is not None:
-            self.write_turn.release()
-            self.write_turn = None
+        """Undo `start_outermost_block()` (nothing, for a nested block)."""
+        await self.outermost_block.aclose()
 
     def __call__(self, function: Callable[Parameters, Awaitable[Result]]) -> Callable[Parameters, Awaitable[Result]]:
         """Use the block as a decorator: each call of `function` runs in a new block."""

@@ -29,7 +29,8 @@ there is one SQLite in the process and every write is kept.
 
 ## Async queries: `djox.Manager`
 
-Give a model `djox.Manager()`, and its async QuerySet methods run on djox:
+Give a model `djox.Manager()`, and its async QuerySet methods run on djox
+(for models you can't edit, see [Existing models](#existing-models-djox_models)):
 
 ```python
 import djox
@@ -64,15 +65,24 @@ and the event loop never waits for a thread.
 | `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | a djox thread |
 | anything with `prefetch_related()` | a djox thread |
 | models with parent models (multi-table inheritance): `acreate()`, `aupdate()` | a djox thread |
-| model methods `asave()`, `adelete()`, `arefresh_from_db()` | a djox thread, on a `djox.Model` (below); Django's worker thread on a plain `models.Model` |
+| model methods `asave()`, `adelete()`, `arefresh_from_db()` | a djox thread, on a `djox.Model` (below) or a model switched by `DJOX_MODELS`; Django's worker thread otherwise |
+| related managers: `author.books.acreate()`, `pizza.toppings.aadd()`, `aremove()`, `aclear()`, `aset()`, `aget_or_create()`, `aupdate_or_create()` | a djox thread (their queries, like `author.books.filter(...)`, run on djox) |
 
 "A djox thread" means Django's own sync method, unchanged, on one of djox's
 threads: a small pool, each thread keeping its connection open. Those calls
 don't queue behind each other or behind Django's single worker thread.
-Writes on one SQLite file take turns (SQLite has one writer), so twenty tasks
-running `aget_or_create()` for the same row at once create it once. Inside a
+Writes on one SQLite file take turns (SQLite has one writer, see
+[Writes take turns](#writes-take-turns)), so twenty tasks running
+`aget_or_create()` for the same row at once create it once. Inside a
 transaction (`djox.atomic()`, or Django's `TestCase`) they run on the
 transaction's thread, so they join it.
+
+A pooled thread looks after its connections like Django looks after a
+request thread's: once per request, before its next call, it runs Django's
+`close_old_connections()`. So `CONN_MAX_AGE` and `CONN_HEALTH_CHECKS` work as
+usual: with `CONN_MAX_AGE = 0` (Django's default) a pooled thread opens a
+fresh connection after each request, and with `CONN_MAX_AGE = None` it keeps
+one for good. A program without requests (a script) keeps them open.
 
 On a database whose `ENGINE` isn't djox's, every method is Django's own. A
 custom `QuerySet` can subclass `djox.QuerySet` and use
@@ -94,6 +104,39 @@ await author.asave()
 ```
 
 `djox.Model` is abstract (it has no table), so it changes no migration.
+
+### Existing models: `DJOX_MODELS`
+
+Models you can't (or don't want to) edit, like `django.contrib.auth`'s
+`User` or another library's models, can be switched to djox by
+configuration. Add `"djox"` to `INSTALLED_APPS`:
+
+```python
+# settings.py
+INSTALLED_APPS = [
+    ...,
+    "djox",
+]
+DJOX_MODELS = "__all__"  # the default: every model
+# DJOX_MODELS = ["auth", "shop.Order"]  # or some apps and models
+# DJOX_MODELS = []  # or none
+```
+
+When Django starts, djox switches each chosen model:
+
+- its managers (`objects`, and any custom manager) return `djox.QuerySet`s,
+  so their async methods run on djox. A custom `QuerySet` keeps its own
+  methods (`Shelf.objects.wide()` still works); djox fills in the async
+  methods it didn't write itself;
+- its related managers (`user.groups.aadd(...)`) run on djox's threads;
+- its `asave()`, `adelete()` and `arefresh_from_db()` become `djox.Model`'s,
+  unless the model defines its own.
+
+The model's code, its tables and its migrations don't change: a switched
+manager still has its own class name, so `makemigrations` and type checkers
+see the model as before. A model that already uses `djox.Manager` or
+`djox.Model` is left as it is, and on a database whose `ENGINE` isn't djox's
+every method keeps Django's behaviour.
 
 ### Inside a sync transaction
 
@@ -146,10 +189,30 @@ a sync transaction (Django's `TestCase`), the block joins it as a savepoint.
 
 SQLite runs one write transaction at a time, and `BEGIN IMMEDIATE` (djox's
 default `transaction_mode`) takes the write lock when the block starts. So
-blocks on the same database take turns: each waits in asyncio for the
-previous one to end, and gives up with "database is locked" after the
-`timeout` option. Keep blocks short, and don't wait for slow things (an HTTP
-call) inside one.
+blocks on the same database take turns with each other and with plain writes
+(below). Keep blocks short, and don't wait for slow things (an HTTP call)
+inside one.
+
+### Writes take turns
+
+SQLite lets one connection write at a time. djox writes through two kinds:
+
+- **plain writes** (`acreate()`, `aupdate()`, a one-statement `adelete()`)
+  go to djox's writer thread, which runs them one after the other;
+- **transactions** (`djox.atomic()` blocks, and Django's methods on djox's
+  threads like `aget_or_create()`) each run on a Django connection of their
+  own.
+
+When both write at once, SQLite would make one of them sleep and retry, with
+sleeps of up to 100 ms. Instead, djox has them take turns in asyncio, before
+they reach SQLite: plain writes share the turn, a transaction holds it alone.
+A waiting writer starts the moment the turn is free, and gives up with
+"database is locked" after the `timeout` option, like SQLite would. Plain
+writes that keep coming can't hold a transaction back: after a couple of
+milliseconds, new ones wait behind it.
+
+This covers the writes of one event loop. Writes from sync Django code (other
+threads) or other processes still meet SQLite's own waiting.
 
 A block costs two thread round trips (start and end), plus one per query
 inside. For a short transaction, wrapping a sync function in `sync_to_async()`
@@ -221,7 +284,8 @@ raises `ImproperlyConfigured`.
 - Django's sync ORM still blocks the thread it runs on, as always. While
   SQLite works, other Python threads keep running.
 - Models with Django's default manager keep Django's async methods (a worker
-  thread). Use `djox.Manager()` to run them on djox.
+  thread), unless `"djox"` is in `INSTALLED_APPS` (see `DJOX_MODELS`) or the
+  model uses `djox.Manager()`.
 - `djox.connections[alias]` used directly doesn't see an open transaction of
   Django's sync connection (like the one Django's `TestCase` wraps each test
   in); `djox.Manager` does. For raw SQL in such tests, use

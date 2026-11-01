@@ -49,7 +49,8 @@ Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in
 `objects = djox.Manager()` and its async methods (`aget`, `acount`, `async for`, `acreate`, `aupdate`...) run on djox
 instead of Django's worker thread: Django still writes the SQL and builds the objects. `djox.connections["default"]`
 gives the async `djox.Database` for the same file, `async with djox.atomic():` is Django's `atomic()` for async
-code, and `djox.Model` runs `asave()` and friends on djox's threads. One SQLite in the process matters: Python's `sqlite3` module has
+code, and `djox.Model` runs `asave()` and friends on djox's threads. For models you can't edit (`User`, other
+libraries'), add `"djox"` to `INSTALLED_APPS`: `DJOX_MODELS` picks which models switch to djox. One SQLite in the process matters: Python's `sqlite3` module has
 its own copy, and two copies can't see each other's locks. See [Use with Django](docs/django.md).
 
 ## Speed

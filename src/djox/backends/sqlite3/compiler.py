@@ -180,7 +180,7 @@ async def run_insert(alias: str, insert_compiler: "SQLInsertCompiler", returning
     with _running.mark_for_rollback_on_error(alias):
         for sql, parameters in insert_compiler.as_sql():
             if returning_fields:
-                rows.extend(await _running.fetch_all(alias, sql, parameters))
+                rows.extend(await _running.fetch_all(alias, sql, parameters, writes=True))
             else:
                 await _running.execute(alias, sql, parameters)
     if not returning_fields:

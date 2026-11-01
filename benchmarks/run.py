@@ -23,6 +23,7 @@ Contenders:
 import asyncio
 import datetime
 import decimal
+import itertools
 import json
 import platform
 import shutil
@@ -33,6 +34,7 @@ import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 import django
 from django.conf import settings
@@ -126,6 +128,12 @@ def new_book() -> dict[str, object]:
     }
 
 
+def alternating(first: Callable[[], Any], second: Callable[[], Any]) -> Callable[[], Any]:
+    """An operation that runs `first`, then `second`, then `first`... one per call."""
+    calls = itertools.count()
+    return lambda: first() if next(calls) % 2 == 0 else second()
+
+
 def two_inserts_in_a_transaction(alias: str) -> None:
     """The sync way: Django's `atomic()` around two `create()`s."""
     with transaction.atomic(using=alias):
@@ -161,6 +169,10 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
         ),
         # Django has no async `atomic()`: the usual way is a sync function on its worker thread.
         "two inserts in a transaction": sync_to_async(lambda: two_inserts_in_a_transaction("default")),
+        "one insert, or two in a transaction": alternating(
+            lambda: Book.objects.acreate(**new_book()),
+            sync_to_async(lambda: two_inserts_in_a_transaction("default")),
+        ),
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
     }
 
@@ -231,6 +243,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
         "two inserts in a transaction": two_inserts,
+        "one insert, or two in a transaction": alternating(lambda: books.acreate(**new_book()), two_inserts),
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
     }
 
@@ -281,12 +294,14 @@ REPEATS = {
     "insert one book": 500,
     "two inserts in a transaction": 300,
     "get or create (exists)": 500,
+    "one insert, or two in a transaction": 300,
 }
 CONCURRENT_TASKS = 100
 # Each runs `CONCURRENT_TASKS` calls of a scenario at once, with `asyncio.gather()`.
 CONCURRENT_SCENARIOS = {
     f"{CONCURRENT_TASKS} gets at once": "get one book by id",
     f"{CONCURRENT_TASKS} get or create at once": "get or create (exists)",
+    f"{CONCURRENT_TASKS} mixed writes at once": "one insert, or two in a transaction",
 }
 
 

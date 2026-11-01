@@ -82,8 +82,16 @@ them, and it should teach them both along the way.
 - **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
   djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
   `djox.Model`...) run unchanged on a small pool of djox's threads, not on
-  Django's single sync thread. Writers on one SQLite file take turns in
-  asyncio.
+  Django's single sync thread. Each pooled thread runs Django's
+  `close_old_connections()` once per request, so `CONN_MAX_AGE` works.
+  Related managers (`author.books.aadd()`) run there too (`related.py`).
+- **Write turns** (`src/djox/_write_turns.py`): SQLite has one writer, so
+  djox's plain writes (its writer thread) and transactions (a Django
+  connection each) take turns in asyncio, like a readers-writer lock, instead
+  of SQLite's sleep-and-retry.
+- **Existing models** (`src/djox/install.py`, `apps.py`): with `"djox"` in
+  `INSTALLED_APPS`, the models `DJOX_MODELS` chooses get djox managers and
+  model methods when Django is ready. Their code and migrations don't change.
 - **`djox.atomic()`** (`src/djox/transaction.py`): Django's own `atomic()`,
   run on a pooled thread that the block owns (asgiref's
   `ThreadSensitiveContext` sends the block's `sync_to_async()` calls there).

@@ -123,9 +123,20 @@ Methods that need a transaction or several statements (`aget_or_create()`,
 `abulk_create()`, deletes that cascade, `prefetch_related()`, `asave()` on a
 `djox.Model`) run Django's sync method unchanged, on a small pool of djox's
 own threads (`djox/_threads.py`), instead of Django's single worker thread.
-Each pooled thread keeps its Django connection open. Writers on one SQLite
-file take turns in asyncio, because SQLite has one writer, and its own way of
-waiting (sleeping and retrying) is slow.
+Each pooled thread keeps its Django connection open, and runs Django's
+`close_old_connections()` once per request, like a request thread
+(`CONN_MAX_AGE`). Related managers' async methods (`author.books.aadd()`) run
+there too (`djox/related.py`).
+
+Writers on one SQLite file take turns in asyncio (`djox/_write_turns.py`),
+because SQLite has one writer, and its own way of waiting (sleeping and
+retrying) is slow. Plain writes, sent to djox's writer thread, share the
+turn; a transaction on a Django connection holds it alone.
+
+With `"djox"` in `INSTALLED_APPS`, `djox/install.py` switches the models
+`DJOX_MODELS` chooses when Django is ready: each manager's class gets a
+djox subclass (same name, so migrations see no change) whose `QuerySet` is
+the model's own plus `djox.QuerySet`.
 
 When async code runs inside a sync `atomic()` block (Django's `TestCase`),
 its SQL runs on that block's connection instead, so it sees the block's
