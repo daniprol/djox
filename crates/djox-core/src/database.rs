@@ -1,0 +1,45 @@
+//! [`Database`]: what every backend must be able to do.
+
+use crate::{Executed, ReplySender, Rows, Value};
+
+/// A database that runs SQL for async Python code without blocking it.
+///
+/// A *trait* is a list of methods a type promises to have, like a Python
+/// `Protocol` or an abstract base class. The Python layer only knows this
+/// trait, so it works the same with every backend: SQLite today
+/// (`djox::sqlite::SqliteDatabase`), Postgres later.
+///
+/// The rules every backend follows:
+///
+/// - **SQL uses Django's `%s` placeholders**, because that is what Django's
+///   SQL compiler writes. Each backend converts them to its own style (`?` for
+///   SQLite, `$1` for Postgres). `%%` is a literal `%`.
+/// - **Methods never block.** Each one sends the statement right away and
+///   returns; the answer comes later through the [`ReplySender`], exactly
+///   once. Statements sent in order reach the database in order.
+/// - **Writes are never lost to a busy database.** The backend queues or pools
+///   connections so callers don't see "database is locked" errors under load.
+///
+/// `Send + Sync` means one database can be used from many threads at once
+/// (Python objects always can; Rust asks you to say so).
+pub trait Database: Send + Sync {
+    /// The backend's short name, like `"sqlite"`.
+    fn backend_name(&self) -> &str;
+
+    /// Runs a query and returns all its rows.
+    fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>);
+
+    /// Runs a statement that changes data (`INSERT`, `UPDATE`, `DELETE`...).
+    fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>);
+
+    /// Runs the same statement once for each list of parameters, in one
+    /// transaction: either all of them are kept or none is.
+    fn execute_many(&self, sql: String, parameter_lists: Vec<Vec<Value>>, reply: ReplySender<Executed>);
+
+    /// Closes the database. Statements already sent still finish; new ones
+    /// fail with [`crate::Error::Closed`]. Closing twice does nothing.
+    fn close(&self);
+
+    /// Whether [`Database::close`] was called.
+    fn is_closed(&self) -> bool;
+}

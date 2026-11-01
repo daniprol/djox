@@ -1,0 +1,90 @@
+[project]
+name = "djox"
+dynamic = ["version"]  # from Cargo.toml ([workspace.package] version)
+description = "Truly async Django ORM with a Rust core. Fast and readable, with hooks for library authors. SQLite first."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "daniprol" }]
+keywords = ["django", "orm", "async", "sqlite", "rust"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: Django",
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/daniprol/djox"
+Issues = "https://github.com/daniprol/djox/issues"
+
+[tool.maturin]
+module-name = "djox._core"
+python-packages = ["djox"]
+python-source = "src"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "crates/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[dependency-groups]
+dev = [
+    "django>=5.2",  # tests run SQL written by Django's compiler
+    "maturin>=1.9",
+    "prek>=0.5.7",
+    "pytest>=8",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.14",
+    "ty>=0.0.1",
+]
+docs = ["zensical>=0.0.72"]  # uv run --only-group docs zensical serve
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # import sorting
+    "N",       # naming
+    "UP",      # modern syntax for Python 3.11+
+    "B",       # likely bugs
+    "A",       # shadowing builtins
+    "C4",      # comprehensions
+    "SIM",     # simplifications
+    "RET",     # return statements
+    "PIE",     # misc. clean-ups
+    "PTH",     # pathlib over os.path
+    "PT",      # pytest style
+    "ASYNC",   # asyncio pitfalls
+    "RUF",     # ruff-specific
+]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config"]
+markers = [
+    "django_ported(source): a test copied from Django's test suite; `source` is its id there (see tests/django_suite/README.md)",
+    "django_adapted(reason): a ported Django test changed to fit djox; `reason` says what changed and why",
+    "django_unsupported(reason): a ported Django test for a feature djox doesn't support yet; expected to fail",
+]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[build-system]
+requires = ["maturin>=1.9.4,<2.0"]  # 1.9.4 writes the PEP 639 license metadata
+build-backend = "maturin"
+
+[tool.ty.src]
+# benchmarks/ is its own uv project with its own dependencies; it is not type-checked here.
+exclude = ["benchmarks"]

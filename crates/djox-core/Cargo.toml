@@ -1,0 +1,10 @@
+[package]
+name = "djox-core"
+description = "The shared types of djox and the Database trait every backend (SQLite, later Postgres) implements"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio = { version = "1.54", features = ["sync"] }
