@@ -2,7 +2,8 @@
 
     cd benchmarks && uv run python run.py
 
-Every contender runs on its own copy of the same SQLite file (10,000 books):
+Every contender runs on its own copy of the same SQLite file (10,000 books,
+each with 3 chapters, for `select_related()` and `prefetch_related()`):
 djox and Python's `sqlite3` bundle separate copies of SQLite, which must not
 open the same file in one process. Every contender uses the same SQLite
 settings as djox (WAL mode, `synchronous=NORMAL`), so writes compare fairly.
@@ -88,6 +89,23 @@ class Book(models.Model):
         app_label = "shelf"
 
 
+class Chapter(models.Model):
+    """For `select_related("book")` and `prefetch_related("chapters")`."""
+
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="chapters")
+    number = models.IntegerField()
+    title = models.CharField(max_length=200)
+
+    objects = models.Manager()
+    djox_objects = djox.Manager()
+
+    class Meta:
+        app_label = "shelf"
+
+
+CHAPTERS_PER_BOOK = 3
+
+
 # ---------------------------------------------------------------- the database
 
 
@@ -97,10 +115,16 @@ def create_database() -> None:
         cursor.execute("PRAGMA journal_mode = WAL")  # stored in the file, so every copy has it
     with connection.schema_editor() as editor:
         editor.create_model(Book)
+        editor.create_model(Chapter)
     published = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
     Book.objects.bulk_create(
         Book(title=f"Book {number}", pages=number % 1000, price=decimal.Decimal("9.99"), published=published)
         for number in range(BOOK_COUNT)
+    )
+    Chapter.objects.bulk_create(
+        Chapter(book_id=book_id, number=number, title=f"Chapter {number}")
+        for book_id in range(1, BOOK_COUNT + 1)
+        for number in range(1, CHAPTERS_PER_BOOK + 1)
     )
     connection.close()
     for name in ["sqlite3", "djox", "djox_engine"]:
@@ -148,6 +172,18 @@ def two_inserts_in_a_transaction(alias: str) -> None:
         Book.objects.using(alias).create(**new_book())
 
 
+def related_querysets(books: models.Manager, chapters: models.Manager) -> dict[str, Callable[[], models.QuerySet]]:
+    """The `select_related()` and `prefetch_related()` scenarios, as querysets
+    of the given managers (the same for every ORM contender)."""
+    return {
+        "20 chapters with their book": lambda: chapters.select_related("book").filter(number=2).order_by("id")[:20],
+        "1,000 chapters with their book": lambda: chapters.select_related("book").order_by("id")[:1000],
+        "20 books with their chapters": lambda: (
+            books.filter(pages__gt=500).order_by("-pages", "id").prefetch_related("chapters")[:20]
+        ),
+    }
+
+
 def make_django_sync() -> dict[str, Callable[[], object]]:
     return {
         "get one book by id": lambda: Book.objects.get(id=7),
@@ -160,7 +196,22 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("default"),
         "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
+        **listed(related_querysets(Book.objects, Chapter.objects)),
     }
+
+
+def listed(querysets: dict[str, Callable[[], models.QuerySet]]) -> dict[str, Callable[[], object]]:
+    """Each queryset, run with `list()`."""
+    return {name: (lambda make=make: list(make())) for name, make in querysets.items()}
+
+
+def fetched(querysets: dict[str, Callable[[], models.QuerySet]]) -> dict[str, Callable[[], Awaitable[object]]]:
+    """Each queryset, run with `async for`."""
+
+    async def fetch(queryset: models.QuerySet) -> list:
+        return [found async for found in queryset]
+
+    return {name: (lambda make=make: fetch(make())) for name, make in querysets.items()}
 
 
 def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
@@ -183,6 +234,7 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
             sync_to_async(lambda: two_inserts_in_a_transaction("default")),
         ),
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
+        **fetched(related_querysets(Book.objects, Chapter.objects)),
     }
 
 
@@ -219,7 +271,7 @@ def make_djox() -> dict[str, Callable[[], Awaitable[object]]]:
     }
 
 
-def make_djox_sync(manager: models.Manager) -> dict[str, Callable[[], object]]:
+def make_djox_sync(manager: models.Manager, chapter_manager: models.Manager) -> dict[str, Callable[[], object]]:
     books = manager.db_manager("djox")
     return {
         "get one book by id": lambda: books.get(id=7),
@@ -232,6 +284,7 @@ def make_djox_sync(manager: models.Manager) -> dict[str, Callable[[], object]]:
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("djox"),
         "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
+        **listed(related_querysets(books, chapter_manager.db_manager("djox"))),
     }
 
 
@@ -258,6 +311,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "two inserts in a transaction": two_inserts,
         "one insert, or two in a transaction": alternating(lambda: books.acreate(**new_book()), two_inserts),
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
+        **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"))),
     }
 
 
@@ -309,6 +363,9 @@ REPEATS = {
     "two inserts in a transaction": 300,
     "get or create (exists)": 500,
     "one insert, or two in a transaction": 300,
+    "20 chapters with their book": 1000,
+    "1,000 chapters with their book": 30,
+    "20 books with their chapters": 500,
 }
 CONCURRENT_TASKS = 100
 # Each runs `CONCURRENT_TASKS` calls of a scenario at once, with `asyncio.gather()`.
@@ -326,8 +383,8 @@ def main() -> None:
     # Sync code must run outside the event loop (Django refuses sync queries inside it).
     for name, operations in [
         ("django sync", make_django_sync()),
-        ("djox sync", make_djox_sync(Book.objects)),
-        ("djox.Manager sync", make_djox_sync(Book.djox_objects)),
+        ("djox sync", make_djox_sync(Book.objects, Chapter.objects)),
+        ("djox.Manager sync", make_djox_sync(Book.djox_objects, Chapter.djox_objects)),
         ("sqlite3", make_sqlite3()),
     ]:
         results[name] = {
@@ -364,7 +421,7 @@ def main() -> None:
 
 def report(name: str, timings: dict[str, float]) -> None:
     for scenario, microseconds in timings.items():
-        print(f"{name:>17} | {scenario:<20} | {microseconds:9.1f} us", file=sys.stderr)
+        print(f"{name:>17} | {scenario:<30} | {microseconds:9.1f} us", file=sys.stderr)
 
 
 def markdown_table(results: dict[str, dict[str, float]], machine: str) -> str:

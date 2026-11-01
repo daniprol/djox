@@ -183,6 +183,16 @@ skips most of it:
   Models whose `__init__` or `from_db()` is their own, or with
   `pre_init`/`post_init` receivers, are built by Django. For `values()` and
   `values_list()`, a dict or a tuple per row.
+- **`select_related()` too.** Its relations are part of the shape, so Django
+  writes the joins once. Its compiler says which columns belong to which
+  related model (`klass_info`, what Django's `RelatedPopulator` reads), and
+  Rust builds those objects the same way, from their own columns, then calls
+  Django's own setters to cache each one on its parent (`book.author`), and
+  the parent on it for a one-to-one. A `NULL` primary key means no related
+  object (an empty nullable foreign key).
+- **`prefetch_related()` keeps the note.** Its lookups live on the
+  `QuerySet`, not in Django's `Query`, so the main query stays on the fast
+  lane, on the djox thread that then runs Django's prefetching (`djox/prefetch.py`).
 - **Rust converts the values** (`src/conversions.rs`): text to `datetime`,
   `date` and `time`, a stored number to a `Decimal` rounded like Django
   rounds it, `0`/`1` to `bool`. Only when the column's converter is exactly
@@ -197,7 +207,7 @@ skips most of it:
   they behave like Django's in every way but speed.
 - **Anything else is Django's.** Asking for `queryset.query` builds Django's
   `Query` from the note, so `exclude()`, `Q()`, joins, `annotate()` and
-  `select_related()` work exactly as in Django.
+  `only()` work exactly as in Django.
 
 ## Hooks
 

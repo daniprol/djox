@@ -98,6 +98,11 @@ them, and it should teach them both along the way.
   run before and after every statement. Sync code is hooked through Django's
   `execute_wrappers`, async code in `_running.py`. Hooks are sync functions
   on purpose: they also run inside sync queries.
+- **Related objects**: `select_related()` is part of a fast lane shape, and
+  `ResultBuilder` builds the related objects from Django's `klass_info`
+  (`RelatedModel` in `src/results.rs`). `prefetch_related()` keeps the note;
+  Django's own prefetching runs unchanged on a djox thread
+  (`src/djox/prefetch.py` says why it isn't awaited query by query).
 - **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
   djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
   `djox.Model`...) run unchanged on a small pool of djox's threads, not on
@@ -181,6 +186,10 @@ them, and it should teach them both along the way.
    `values()` and `values_list()`, with dates, decimals and booleans
    converted in Rust. `aiterator()` streams its rows (done). Next: `F()` in
    `update()`, joins, `annotate()`.
+7. Related objects (done): `select_related()` on the fast lane (Rust builds
+   the related objects and calls Django's setters to cache them), and
+   `prefetch_related()` with its main query on the fast lane and Django's
+   own prefetching, both on a djox thread (`src/djox/prefetch.py`).
 
 Add features when someone needs them. If a change makes the core bigger, ask
 whether it could be a hook instead.
