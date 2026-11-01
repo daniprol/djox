@@ -28,13 +28,18 @@ Python 3.13, Django 6.1.
 
 | | django sync | djox sync | sqlite3 | django async | djox.Manager | djox |
 |---|---|---|---|---|---|---|
-| get one book by id | 204 | 218 | 4 | 588 | 454 | 166 |
-| fetch 20 books | 523 | 518 | 24 | 1,040 | 895 | 196 |
-| fetch 1,000 books | 8,154 | 8,379 | 572 | 12,138 | 11,711 | 1,031 |
-| count | 266 | 246 | 70 | 684 | 593 | 262 |
-| insert one book | 229 | 162 | 52 | 450 | 476 | 185 |
-| two inserts in a transaction | 326 | 312 | 65 | 712 | 1,362 | n/a |
-| 100 gets at once | n/a | n/a | n/a | 555 | 348 | 113 |
+| get one book by id | 305 | 316 | 7 | 660 | 575 | 190 |
+| fetch 20 books | 693 | 636 | 49 | 1,180 | 1,164 | 259 |
+| fetch 1,000 books | 13,489 | 10,400 | 1,163 | 13,522 | 13,435 | 1,013 |
+| count | 457 | 416 | 104 | 791 | 771 | 297 |
+| insert one book | 236 | 212 | 45 | 593 | 635 | 222 |
+| two inserts in a transaction | 438 | 423 | 51 | 845 | 1,662 | n/a |
+| get or create (exists) | 358 | 315 | n/a | 737 | 605 | n/a |
+| 100 gets at once | n/a | n/a | n/a | 586 | 388 | 104 |
+| 100 get or create at once | n/a | n/a | n/a | 600 | 458 | n/a |
+
+This VM's speed changes by about 20% from one run to the next (every column
+moves together), so compare numbers within one table, not across runs.
 
 "Two inserts in a transaction" is `atomic()` around two `create()`s. Django
 has no async `atomic()`, so "django async" runs that sync function with
@@ -46,11 +51,13 @@ has no async `atomic()`, so "django async" runs that sync function with
 - **djox's `ENGINE` costs nothing for sync code.** "djox sync" is as fast as
   Django's own SQLite backend, often a little faster.
 - **`djox.Manager` is the fastest way to run Django's async methods here,
-  and the gap grows with load.** One query at a time it is 4 to 23% faster
-  than Django's async methods for reads and counts, and level for inserts.
-  With 100 lookups at once it takes 348 µs each against 555 µs (37% less):
-  Django's async methods all queue for one shared worker thread, djox's
-  queries don't.
+  and the gap grows with load.** One query at a time it is level with
+  Django's async methods, within a few percent either way: both pay one
+  thread round trip. With 100 lookups at once it takes 388 µs each against
+  586 µs (34% less), and 100 `aget_or_create()` calls take 458 µs each
+  against 600 µs (24% less). Django's async methods all queue for one shared
+  worker thread; djox's queries don't, and `aget_or_create()` looks up on djox
+  before it takes a writer's turn.
 - **A short transaction is faster as one sync function.** `djox.atomic()`
   pays a thread round trip to start the transaction, one per query, and one
   to commit: four for two inserts, against one for `sync_to_async()` around

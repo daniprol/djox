@@ -21,13 +21,18 @@ by Django's own code. Three ways are used, depending on the method:
 - **Create**: `acreate()`. Django's steps of `save()`, with the `INSERT`
   taken from Django's code and awaited on djox (`compiler.capture()`).
 
-Everything else, and every case these don't cover yet (like
-`prefetch_related()`, or a model with parent models), calls Django's own
-async method, which runs the sync code on a worker thread. So nothing breaks;
-it is only slower. The same happens when the database's `ENGINE` isn't djox's.
+Methods that need a transaction or several statements (`aget_or_create()`,
+`aupdate_or_create()`, `abulk_create()`, `abulk_update()`, cascading
+`adelete()`, `ain_bulk()`, `prefetch_related()`, models with parent models)
+run Django's sync method unchanged, on one of djox's own threads
+(`djox._threads`): not on Django's single sync thread, where every Django
+async call in the process waits its turn. Inside a transaction, they run on
+the transaction's thread, so they join it.
+
+When the database's `ENGINE` isn't djox's, every method is Django's own.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Collection, Iterable, Mapping
 from typing import Any, TypeVar
 
 from asgiref.sync import sync_to_async
@@ -37,12 +42,14 @@ from django.db.models.query import MAX_GET_RESULTS  # how many rows `get()` read
 from django.db.models.signals import post_save, pre_save
 from django.db.models.sql.constants import MULTI
 
+from djox import _threads
 from djox._results import results_from_rows
 from djox.backends.sqlite3 import compiler
 from djox.backends.sqlite3.base import DatabaseWrapper
 
 # The model class of a `QuerySet`, like `Book` in `QuerySet[Book]`.
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)
+Result = TypeVar("Result")
 
 
 class QuerySet(models.QuerySet[ModelType]):
@@ -70,8 +77,11 @@ class QuerySet(models.QuerySet[ModelType]):
         """Fill the result cache, like Django's `_fetch_all()`, unless it is full already."""
         if self._result_cache is not None:
             return
-        if self._prefetch_lookups() or not runs_on_djox(self.db):
+        if self._prefetch_lookups():
             # `prefetch_related()` runs more queries after this one: Django's way.
+            await self._run_django_method(self._fetch_all, writes=False)
+            return
+        if not runs_on_djox(self.db):
             await sync_to_async(self._fetch_all)()
             return
         self._result_cache = await self._results_from_djox()
@@ -238,8 +248,10 @@ class QuerySet(models.QuerySet[ModelType]):
         # A model with parent models (multi-table inheritance) may update
         # several tables, with ids chosen while compiling: Django's way.
         using = self._alias_for_write()
-        if not runs_on_djox(using) or self.model._meta.parents:
+        if not runs_on_djox(using):
             return await super().aupdate(**kwargs)
+        if self.model._meta.parents:
+            return await self._run_django_method(lambda: self.update(**kwargs), writes=True)
         rows_affected = await compiler.run_first_statement(using, lambda: self.update(**kwargs))
         self._result_cache = None
         # No count means Django knew nothing would change (an empty filter).
@@ -250,8 +262,8 @@ class QuerySet(models.QuerySet[ModelType]):
 
         djox runs the delete itself when Django would do a "fast delete": one
         `DELETE` statement, because no signal receiver and no other model's
-        foreign key (`on_delete`) needs to know. Otherwise Django's `adelete()`
-        finds and deletes the related rows.
+        foreign key (`on_delete`) needs to know. Otherwise Django's `delete()`
+        finds and deletes the related rows, on one of djox's threads.
         """
         if not runs_on_djox(self._alias_for_write()):
             return await super().adelete()
@@ -270,7 +282,7 @@ class QuerySet(models.QuerySet[ModelType]):
         using = delete_queryset.db
         collector = Collector(using=using, origin=self)
         if not collector.can_fast_delete(delete_queryset):
-            return await super().adelete()
+            return await self._run_django_method(self.delete, writes=True)
         deleted = await compiler.run_first_statement(using, lambda: delete_queryset._raw_delete(using)) or 0
         self._result_cache = None
         # Like Django, a model is only listed when some of its rows were deleted.
@@ -285,8 +297,10 @@ class QuerySet(models.QuerySet[ModelType]):
         using = self._alias_for_write()
         # Models with parent models (multi-table inheritance) insert into
         # several tables, and `order_with_respect_to` needs a query first.
-        if not runs_on_djox(using) or meta.parents or meta.order_with_respect_to or meta.auto_created:
+        if not runs_on_djox(using):
             return await super().acreate(**kwargs)
+        if meta.parents or meta.order_with_respect_to or meta.auto_created:
+            return await self._run_django_method(lambda: self.create(**kwargs), writes=True)
         reverse_one_to_one_fields = frozenset(kwargs).intersection(meta._reverse_one_to_one_field_names)  # type: ignore[attr-defined]
         if reverse_one_to_one_fields:
             raise ValueError("The following fields do not exist in this model: " + ", ".join(reverse_one_to_one_fields))
@@ -295,6 +309,77 @@ class QuerySet(models.QuerySet[ModelType]):
         if hasattr(self, "_fetch_mode"):  # Django 6.1 and later
             obj._state.fetch_mode = self._fetch_mode  # pyrefly: ignore[read-only]  # django-stubs: read-only
         return obj
+
+    # -------------------------------------------- Django's methods, on djox's threads
+
+    async def aget_or_create(self, defaults: Mapping[str, Any] | None = None, **kwargs: Any) -> tuple[ModelType, bool]:
+        """Django's `get_or_create()`: the object matching `kwargs`, or a new
+        one, and whether it was created.
+
+        The lookup comes first, with `aget()` on djox. Only when nothing
+        matches does Django's `get_or_create()` run, on one of djox's threads
+        (see `djox._threads`): it looks again, and creates the object, while
+        no one else writes, so two tasks can't both create it.
+        """
+        if runs_on_djox(self.db):
+            try:
+                return await self.aget(**kwargs), False
+            except self.model.DoesNotExist:  # type: ignore[attr-defined]  # each model class has its own
+                pass
+        return await self._run_django_method(lambda: self.get_or_create(defaults, **kwargs), writes=True)
+
+    async def aupdate_or_create(
+        self,
+        defaults: Mapping[str, Any] | None = None,
+        create_defaults: Mapping[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> tuple[ModelType, bool]:
+        """Django's `update_or_create()`, on one of djox's threads."""
+        return await self._run_django_method(
+            lambda: self.update_or_create(defaults, create_defaults, **kwargs), writes=True
+        )
+
+    async def abulk_create(
+        self,
+        objs: Iterable[ModelType],  # Django's name
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[ModelType]:
+        """Django's `bulk_create()`, on one of djox's threads."""
+        return await self._run_django_method(
+            lambda: self.bulk_create(
+                objs,
+                batch_size=batch_size,
+                ignore_conflicts=ignore_conflicts,
+                update_conflicts=update_conflicts,
+                update_fields=update_fields,
+                unique_fields=unique_fields,
+            ),
+            writes=True,
+        )
+
+    async def abulk_update(
+        self, objs: Iterable[ModelType], fields: Iterable[str], batch_size: int | None = None
+    ) -> int:
+        """Django's `bulk_update()`, on one of djox's threads."""
+        return await self._run_django_method(lambda: self.bulk_update(objs, fields, batch_size), writes=True)
+
+    async def ain_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, ModelType]:
+        """Django's `in_bulk()`, on one of djox's threads."""
+        return await self._run_django_method(lambda: self.in_bulk(id_list, field_name=field_name), writes=False)
+
+    async def aexplain(self, *, format: str | None = None, **options: Any) -> str:  # noqa: A002  (Django's name)
+        """Django's `explain()`, on one of djox's threads."""
+        return await self._run_django_method(lambda: self.explain(format=format, **options), writes=False)
+
+    async def _run_django_method(self, method: Callable[[], Result], writes: bool) -> Result:
+        """Run Django's sync `method` on one of djox's threads (or in the
+        transaction this code is in), instead of Django's single sync thread."""
+        using = self._alias_for_write() if writes else self.db
+        return await _threads.run_django_method(using, method, writes)
 
     # ---------------------------------------------------------------- helpers
 

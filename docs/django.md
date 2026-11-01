@@ -59,17 +59,41 @@ and the event loop never waits for a thread.
 | `acount()`, `aexists()`, `acontains()`, `aaggregate()` | djox |
 | `acreate()` | djox (signals are sent with `asend()`) |
 | `aupdate()` | djox |
-| `adelete()` | djox when Django can delete with one statement (no `on_delete` work and no delete signal receivers); else Django |
-| `aget_or_create()`, `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | Django's worker thread, for now |
-| anything with `prefetch_related()` | Django's worker thread, for now |
-| models with parent models (multi-table inheritance): `acreate()`, `aupdate()` | Django's worker thread, for now |
-| model instance methods: `asave()`, `adelete()`, `arefresh_from_db()` | Django's (they don't go through the manager) |
+| `adelete()` | djox when Django can delete with one statement (no `on_delete` work and no delete signal receivers); else a djox thread |
+| `aget_or_create()` | djox for the lookup; a djox thread to create |
+| `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | a djox thread |
+| anything with `prefetch_related()` | a djox thread |
+| models with parent models (multi-table inheritance): `acreate()`, `aupdate()` | a djox thread |
+| model methods `asave()`, `adelete()`, `arefresh_from_db()` | a djox thread, on a `djox.Model` (below); Django's worker thread on a plain `models.Model` |
 
-"Django's worker thread" means the method behaves exactly as without djox:
-nothing breaks, it is only not faster yet. Inside a `djox.atomic()` block,
-these run on the block's own thread instead, in its transaction. The same happens on a database
-whose `ENGINE` isn't djox's. A custom `QuerySet` can subclass `djox.QuerySet`
-and use `MyQuerySet.as_manager()`.
+"A djox thread" means Django's own sync method, unchanged, on one of djox's
+threads: a small pool, each thread keeping its connection open. Those calls
+don't queue behind each other or behind Django's single worker thread.
+Writes on one SQLite file take turns (SQLite has one writer), so twenty tasks
+running `aget_or_create()` for the same row at once create it once. Inside a
+transaction (`djox.atomic()`, or Django's `TestCase`) they run on the
+transaction's thread, so they join it.
+
+On a database whose `ENGINE` isn't djox's, every method is Django's own. A
+custom `QuerySet` can subclass `djox.QuerySet` and use
+`MyQuerySet.as_manager()`.
+
+### Model methods: `djox.Model`
+
+A model's own `asave()`, `adelete()` and `arefresh_from_db()` don't go
+through its manager. Inherit from `djox.Model` instead of `models.Model` to
+run them on djox's threads; it also sets `objects = djox.Manager()`:
+
+```python
+class Author(djox.Model):
+    name = models.CharField(max_length=100)
+
+
+author = Author(name="Frank Herbert")
+await author.asave()
+```
+
+`djox.Model` is abstract (it has no table), so it changes no migration.
 
 ### Inside a sync transaction
 
