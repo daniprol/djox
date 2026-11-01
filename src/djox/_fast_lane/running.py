@@ -3,8 +3,9 @@
 `prepare()` does everything but running the SQL, and returns `None` when the
 fast lane leaves the query to Django; `djox.QuerySet` then runs it the way it
 would without the fast lane, with the same result. A `PreparedQuery` runs the
-same way from async code (`await prepared.fetch_rows()`) and from sync code
-(`prepared.fetch_rows_now()`), and turns the rows into the answer:
+same way from async code (`await prepared.fetch_rows()`, or `execute()` for a
+write) and from sync code (`prepared.fetch_rows_now()`, `execute_now()`), and
+turns the rows into the answer:
 
 ```python
 prepared = prepare(queryset, "count")
@@ -25,6 +26,7 @@ from django.db.models.query import ModelIterable
 from django.db.models.signals import post_init, pre_init
 
 from djox import _running
+from djox._fast_lane.simple_query import Update
 from djox._fast_lane.statements import Kind, Statement, statement_for, values_fit_their_columns
 
 if TYPE_CHECKING:
@@ -54,6 +56,18 @@ class PreparedQuery:
             return []
         return _running.fetch_all_now(self.alias, self.statement.sql, self.parameters)
 
+    async def execute(self) -> int:
+        """Run the `UPDATE` or `DELETE` on djox, from async code: how many rows it changed."""
+        if self.statement is None:
+            return 0
+        return await _running.execute(self.alias, self.statement.sql, self.parameters)
+
+    def execute_now(self) -> int:
+        """Run the `UPDATE` or `DELETE` on this thread's Django connection: how many rows it changed."""
+        if self.statement is None:
+            return 0
+        return _running.execute_now(self.alias, self.statement.sql, self.parameters)
+
     def instances(self, rows: "list[Row]", queryset: "models.QuerySet[Any]") -> list[Any]:
         """The model instances of `rows` (for a query prepared as `"rows"`)."""
         if self.statement is None:
@@ -71,10 +85,11 @@ class PreparedQuery:
         return bool(rows)
 
 
-def prepare(queryset: "models.QuerySet[Any]", kind: Kind) -> PreparedQuery | None:
+def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update, ...] = ()) -> PreparedQuery | None:
     """`queryset`'s simple query, ready to run as `kind`, or `None` to leave it to Django.
 
-    `queryset` must have a note (`queryset._simple_query`).
+    `queryset` must have a note (`queryset._simple_query`). `updates` are the
+    values an `UPDATE` sets.
     """
     if kind == "rows" and not can_build_instances(queryset):
         return None
@@ -85,10 +100,10 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind) -> PreparedQuery | Non
     # Checked first: Django writes no SQL (or other SQL) for such values.
     if not values_fit_their_columns(simple_query, alias):
         return None
-    statement = statement_for(queryset, simple_query, kind, alias)
+    statement = statement_for(queryset, simple_query, kind, alias, updates)
     if statement is None:
         return None
-    return PreparedQuery(statement, statement.parameters(simple_query, alias), alias)
+    return PreparedQuery(statement, statement.parameters(simple_query, alias, updates), alias)
 
 
 def can_build_instances(queryset: "models.QuerySet[Any]") -> bool:

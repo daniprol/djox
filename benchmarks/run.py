@@ -116,6 +116,7 @@ FETCH_20 = (
 )
 FETCH_1000 = 'SELECT "id", "title", "pages", "price", "published" FROM "shelf_book" ORDER BY "id" LIMIT 1000'
 COUNT = 'SELECT COUNT(*) FROM "shelf_book" WHERE "pages" > %s'
+UPDATE = 'UPDATE "shelf_book" SET "pages" = %s WHERE "id" = %s'
 INSERT = 'INSERT INTO "shelf_book" ("title", "pages", "price", "published") VALUES (%s, %s, %s, %s)'
 INSERT_VALUES = ["New book", 100, "9.99", "2020-01-01 00:00:00"]
 
@@ -153,6 +154,7 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         "fetch 20 books": lambda: list(Book.objects.filter(pages__gt=500).order_by("-pages", "id")[:20]),
         "fetch 1,000 books": lambda: list(Book.objects.order_by("id")[:1000]),
         "count": lambda: Book.objects.filter(pages__gt=500).count(),
+        "update one book": lambda: Book.objects.filter(id=7).update(pages=100),
         "insert one book": lambda: Book.objects.create(
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
@@ -170,6 +172,7 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
         "fetch 20 books": lambda: fetch(Book.objects.filter(pages__gt=500).order_by("-pages", "id")[:20]),
         "fetch 1,000 books": lambda: fetch(Book.objects.order_by("id")[:1000]),
         "count": lambda: Book.objects.filter(pages__gt=500).acount(),
+        "update one book": lambda: Book.objects.filter(id=7).aupdate(pages=100),
         "insert one book": lambda: Book.objects.acreate(
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
@@ -191,6 +194,7 @@ def make_sqlite3() -> dict[str, Callable[[], object]]:
         "fetch 20 books": lambda: database.execute(question_marks(FETCH_20), [500]).fetchall(),
         "fetch 1,000 books": lambda: database.execute(question_marks(FETCH_1000)).fetchall(),
         "count": lambda: database.execute(question_marks(COUNT), [500]).fetchall(),
+        "update one book": lambda: database.execute(question_marks(UPDATE), [100, 7]),
         "insert one book": lambda: database.execute(question_marks(INSERT), INSERT_VALUES),
         "two inserts in a transaction": lambda: two_inserts_with_sqlite3(database),
     }
@@ -210,6 +214,7 @@ def make_djox() -> dict[str, Callable[[], Awaitable[object]]]:
         "fetch 20 books": lambda: database.fetch_all(FETCH_20, [500]),
         "fetch 1,000 books": lambda: database.fetch_all(FETCH_1000),
         "count": lambda: database.fetch_all(COUNT, [500]),
+        "update one book": lambda: database.execute(UPDATE, [100, 7]),
         "insert one book": lambda: database.execute(INSERT, INSERT_VALUES),
     }
 
@@ -221,6 +226,7 @@ def make_djox_sync(manager: models.Manager) -> dict[str, Callable[[], object]]:
         "fetch 20 books": lambda: list(books.filter(pages__gt=500).order_by("-pages", "id")[:20]),
         "fetch 1,000 books": lambda: list(books.order_by("id")[:1000]),
         "count": lambda: books.filter(pages__gt=500).count(),
+        "update one book": lambda: books.filter(id=7).update(pages=100),
         "insert one book": lambda: books.create(
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
@@ -245,6 +251,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "fetch 20 books": lambda: fetch(books.filter(pages__gt=500).order_by("-pages", "id")[:20]),
         "fetch 1,000 books": lambda: fetch(books.order_by("id")[:1000]),
         "count": lambda: books.filter(pages__gt=500).acount(),
+        "update one book": lambda: books.filter(id=7).aupdate(pages=100),
         "insert one book": lambda: books.acreate(
             title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
         ),
@@ -297,6 +304,7 @@ REPEATS = {
     "fetch 20 books": 1000,
     "fetch 1,000 books": 50,
     "count": 1000,
+    "update one book": 500,
     "insert one book": 500,
     "two inserts in a transaction": 300,
     "get or create (exists)": 500,

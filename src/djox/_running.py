@@ -2,8 +2,9 @@
 open sync transaction, or, for sync code, on Django's own connection.
 
 `djox.QuerySet` builds SQL with Django's compiler, then calls `fetch_all()` or
-`execute()` here to run it (or `fetch_all_now()`, from sync code). Usually the SQL goes to the async `djox.Database`
-of the alias (`djox.connections[alias]`), which never blocks the event loop.
+`execute()` here to run it (from sync code, `fetch_all_now()` and
+`execute_now()`). Usually the SQL goes to the async `djox.Database` of the
+alias (`djox.connections[alias]`), which never blocks the event loop.
 
 There is one exception. When this code runs inside a sync transaction on the
 same alias, the SQL must run inside that transaction. A transaction
@@ -73,6 +74,14 @@ def fetch_all_now(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]
     with django_connections[alias].cursor() as cursor:
         cursor.execute(sql, parameters)
         return cursor.fetchall()  # type: ignore[no-any-return]  # Django's cursor is untyped
+
+
+def execute_now(alias: str, sql: str, parameters: Sequence[Any]) -> int:
+    """Run a statement that changes data from sync code, like `fetch_all_now()`,
+    and return how many rows it changed."""
+    with django_connections[alias].cursor() as cursor:
+        cursor.execute(sql, parameters)
+        return cursor.rowcount  # type: ignore[no-any-return]  # Django's cursor is untyped
 
 
 async def execute(alias: str, sql: str, parameters: Sequence[Any]) -> int:

@@ -367,3 +367,115 @@ def test_iterator_builds_instances_chunk_by_chunk() -> None:
 async def test_sync_methods_refuse_to_run_in_async_code_like_djangos() -> None:
     with pytest.raises(SynchronousOnlyOperation):
         Book.objects.filter(pages__gt=300).count()
+
+
+# ---------------------------------------------------------------- writes
+
+SECOND_EDITION = datetime.datetime(1970, 1, 1, 9, 30, tzinfo=datetime.UTC)
+
+
+def give_books_in_print_to_austen() -> int:
+    austen = Author.objects.get(name="Jane Austen")
+    return Book.objects.filter(in_print=True).update(author_id=austen.id)
+
+
+async def give_books_in_print_to_austen_async() -> int:
+    austen = await Author.objects.aget(name="Jane Austen")
+    return await Book.objects.filter(in_print=True).aupdate(author_id=austen.id)
+
+
+# Each write twice: the sync way, and the async way.
+WRITES: dict[str, tuple[Callable[[], Any], Callable[[], Any]]] = {
+    "update one value": (
+        lambda: Book.objects.filter(pages__gt=300).update(pages=1),
+        lambda: Book.objects.filter(pages__gt=300).aupdate(pages=1),
+    ),
+    "update several values": (
+        lambda: Book.objects.filter(title="Dune").update(
+            price=decimal.Decimal("1.50"), in_print=False, published=SECOND_EDITION
+        ),
+        lambda: Book.objects.filter(title="Dune").aupdate(
+            price=decimal.Decimal("1.50"), in_print=False, published=SECOND_EDITION
+        ),
+    ),
+    "update a foreign key": (give_books_in_print_to_austen, give_books_in_print_to_austen_async),
+    "update every book": (lambda: Book.objects.update(in_print=True), lambda: Book.objects.aupdate(in_print=True)),
+    "update nothing": (
+        lambda: Book.objects.filter(id__in=[]).update(pages=2),
+        lambda: Book.objects.filter(id__in=[]).aupdate(pages=2),
+    ),
+    "delete some": (
+        lambda: Book.objects.filter(pages__lt=300).delete(),
+        lambda: Book.objects.filter(pages__lt=300).adelete(),
+    ),
+    "delete every book": (lambda: Book.objects.all().delete(), lambda: Book.objects.all().adelete()),
+    "delete nothing": (
+        lambda: Book.objects.filter(id__in=[]).delete(),
+        lambda: Book.objects.filter(id__in=[]).adelete(),
+    ),
+}
+
+
+def every_book() -> list[dict[str, Any]]:
+    return [fields_of(book) for book in Book.objects.order_by("pk")]
+
+
+def written_by_django(write: Callable[[], Any]) -> tuple[Any, list[dict[str, Any]]]:
+    """What `write()` returns, and the books after it, with the fast lane
+    off. Rolled back, so the test can then write for real."""
+    with override_settings(DJOX_FAST_LANE=False), transaction.atomic():
+        result = write()
+        books = every_book()
+        transaction.set_rollback(True)
+    return result, books
+
+
+@pytest.mark.parametrize("name", WRITES)
+@pytest.mark.usefixtures("library")
+def test_sync_writes_give_djangos_answers(name: str) -> None:
+    write, _ = WRITES[name]
+    expected = written_by_django(write)
+    with CaptureQueriesContext(connection) as captured:
+        result = write()
+    if name.endswith("nothing"):
+        assert [query["sql"] for query in captured.captured_queries if "UPDATE" in query["sql"]] == []
+    else:
+        assert fast_statements(), "the fast lane ran it"
+    assert (result, djangos(every_book)) == expected
+
+
+@pytest.mark.parametrize("name", WRITES)
+@pytest.mark.usefixtures("library")
+async def test_async_writes_give_djangos_answers(name: str) -> None:
+    write, async_write = WRITES[name]
+    expected = await sync_to_async(written_by_django)(write)
+    result = await async_write()
+    assert fast_statements() or name.endswith("nothing"), "the fast lane ran it"
+    assert (result, await sync_to_async(djangos)(every_book)) == expected
+
+
+@pytest.mark.usefixtures("library")
+def test_writes_the_fast_lane_leaves_to_django() -> None:
+    assert Book.objects.filter(pages__gt=300).update(pages=F("pages") + 1) == 2
+    assert Book.objects.filter(title="Dune").update(author=Author.objects.get(name="Jane Austen")) == 1
+    assert Author.objects.filter(name="Frank Herbert").delete() == (2, {"library.Book": 1, "library.Author": 1})
+    assert [found for found in fast_statements() if "UPDATE" in found.sql or "DELETE" in found.sql] == []
+
+
+def test_writes_keep_djangos_errors() -> None:
+    with pytest.raises(TypeError, match="Cannot update a query once a slice has been taken"):
+        Book.objects.all()[:1].update(pages=1)
+    with pytest.raises(TypeError, match="Cannot use 'limit' or 'offset' with delete"):
+        Book.objects.all()[:1].delete()
+    with pytest.raises(ValueError, match="expected a number"):
+        Book.objects.update(pages="many")
+
+
+@pytest.mark.usefixtures("library")
+def test_a_failed_update_marks_the_transaction_for_rollback() -> None:
+    with transaction.atomic():
+        with pytest.raises(Exception, match="NOT NULL"):
+            Book.objects.filter(title="Dune").update(published=None)
+        assert transaction.get_rollback()
+        transaction.set_rollback(False)
+    assert Book.objects.filter(title="Dune").count() == 1

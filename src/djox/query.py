@@ -45,18 +45,18 @@ from collections.abc import AsyncIterator, Callable, Collection, Iterable, Itera
 from typing import Any, TypeVar
 
 from asgiref.sync import sync_to_async
-from django.db import NotSupportedError, connections, models
+from django.db import NotSupportedError, connections, models, transaction
 from django.db.models.deletion import Collector
 from django.db.models.query import MAX_GET_RESULTS  # how many rows `get()` reads at most
 from django.db.models.signals import post_save, pre_save
 from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
-from djox import _fast_lane, _threads
+from djox import _fast_lane, _running, _threads
 from djox._fast_lane import running as fast_lane
-from djox._fast_lane.lookups import condition_for, is_simple_ordering
+from djox._fast_lane.lookups import condition_for, is_simple_ordering, updates_for
 from djox._fast_lane.running import PreparedQuery
-from djox._fast_lane.simple_query import Condition, SimpleQuery
+from djox._fast_lane.simple_query import Condition, SimpleQuery, Update
 from djox._fast_lane.statements import Kind
 from djox._results import results_from_rows
 from djox.backends.sqlite3 import compiler
@@ -433,6 +433,12 @@ class QuerySet(models.QuerySet[ModelType]):
             return await super().aupdate(**kwargs)
         if self.model._meta.parents:
             return await self._run_django_method(lambda: self.update(**kwargs), writes=True)
+        with _running.mark_for_rollback_on_error(using):
+            prepared = self._prepared_update(kwargs)
+            if prepared is not None:
+                rows_affected = await prepared.execute()
+                self._result_cache = None
+                return rows_affected
         rows_affected = await compiler.run_first_statement(using, lambda: self.update(**kwargs))
         self._result_cache = None
         # No count means Django knew nothing would change (an empty filter).
@@ -448,6 +454,11 @@ class QuerySet(models.QuerySet[ModelType]):
         """
         if not runs_on_djox(self._alias_for_write()):
             return await super().adelete()
+        prepared = self._prepared_fast_delete()
+        if prepared is not None:
+            with _running.mark_for_rollback_on_error(prepared.alias):
+                deleted = await prepared.execute()
+            return self._deleted(deleted)
         self._not_support_combined_queries("delete")  # type: ignore[attr-defined]
         if self.query.is_sliced:
             raise TypeError("Cannot use 'limit' or 'offset' with delete().")
@@ -465,9 +476,39 @@ class QuerySet(models.QuerySet[ModelType]):
         if not collector.can_fast_delete(delete_queryset):
             return await self._run_django_method(self.delete, writes=True)
         deleted = await compiler.run_first_statement(using, lambda: delete_queryset._raw_delete(using)) or 0
+        return self._deleted(deleted)
+
+    def _deleted(self, deleted: int) -> tuple[int, dict[str, int]]:
+        """What `delete()` returns after a delete in one statement."""
         self._result_cache = None
         # Like Django, a model is only listed when some of its rows were deleted.
         return deleted, ({self.model._meta.label: deleted} if deleted else {})
+
+    def _prepared_update(self, kwargs: dict[str, Any]) -> PreparedQuery | None:
+        """`update(**kwargs)` on the fast lane, ready to run, or `None`.
+
+        A sliced query is left to Django, which refuses it.
+        """
+        if self._simple_query is None or self._simple_query.is_sliced or self.model._meta.parents:
+            return None
+        updates = updates_for(self.model, kwargs)
+        if updates is None:
+            return None
+        return self._prepared_for_fast_lane("update", updates)
+
+    def _prepared_fast_delete(self) -> PreparedQuery | None:
+        """`delete()` on the fast lane, ready to run, or `None`.
+
+        Only when Django would delete in one statement (a "fast delete"): no
+        signal receiver and no other model's foreign key needs to know.
+        A sliced query is left to Django, which refuses it.
+        """
+        if self._simple_query is None or self._simple_query.is_sliced:
+            return None
+        using = self._alias_for_write()
+        if not Collector(using=using, origin=self).can_fast_delete(self):
+            return None
+        return self._prepared_for_fast_lane("delete")
 
     # ---------------------------------------------------------------- create
 
@@ -639,14 +680,39 @@ class QuerySet(models.QuerySet[ModelType]):
             return obj in self._result_cache
         return self.filter(pk=obj.pk).exists()
 
+    def update(self, **kwargs: Any) -> int:
+        """Django's `update()`."""
+        using = self._alias_for_write()
+        with transaction.mark_for_rollback_on_error(using=using):
+            prepared = self._prepared_update(kwargs)
+            if prepared is not None:
+                rows_affected = prepared.execute_now()
+                self._result_cache = None
+                return rows_affected
+        return super().update(**kwargs)
+
+    def delete(self) -> tuple[int, dict[str, int]]:
+        """Django's `delete()`."""
+        prepared = self._prepared_fast_delete()
+        if prepared is None:
+            return super().delete()
+        # Django's `Collector` deletes inside `atomic()`, even with one statement.
+        with transaction.atomic(using=prepared.alias, savepoint=False):
+            deleted = prepared.execute_now()
+        return self._deleted(deleted)
+
     # ---------------------------------------------------------------- helpers
 
-    def _prepared_for_fast_lane(self, kind: Kind) -> PreparedQuery | None:
+    def _prepared_for_fast_lane(self, kind: Kind, updates: tuple[Update, ...] = ()) -> PreparedQuery | None:
         """This query, ready to run on the fast lane as `kind`, or `None` if
         it isn't simple, or its database isn't djox's."""
         if self._simple_query is None or not runs_on_djox(self.db):
             return None
-        return fast_lane.prepare(self, kind)
+        # While djox's async methods run Django's sync code to capture its SQL
+        # (`compiler.capture()`), the SQL must reach Django's compiler.
+        if compiler.current_replay.get() is not None:
+            return None
+        return fast_lane.prepare(self, kind, updates)
 
     def _alias_for_write(self) -> str:
         """The database alias writes go to (the router's `db_for_write()`)."""
