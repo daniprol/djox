@@ -31,7 +31,7 @@ from django.core.signals import setting_changed
 from django.db import connections, models
 from django.db.models.base import ModelState
 
-from djox._core import ResultBuilder
+from djox._core import RelatedModel, ResultBuilder
 from djox._fast_lane.conversions import conversion_for
 from djox._fast_lane.simple_query import SimpleQuery, Update
 from djox.backends.sqlite3 import compiler
@@ -48,6 +48,11 @@ class Statement:
 
     result_builder: ResultBuilder | None
     """For `"rows"`: builds the results (instances, tuples or dicts). `None` for the other kinds."""
+
+    related_models: tuple[type[models.Model], ...] = ()
+    """For `"rows"`: the models whose instances `select_related()` adds. The
+    fast lane checks before each query that the builder may still make them
+    (no signal receiver was connected since, see `running.builds_like_django()`)."""
 
     select_parameters: tuple[Any, ...] = ()
     """Parameters Django puts in the `SELECT` clause, before the filters' ones:
@@ -110,13 +115,15 @@ def write_statement(
     django_queryset = queryset._with_simple_query(simple_query)  # type: ignore[attr-defined]  # djox.QuerySet's
     query = django_queryset.query
     result_builder = None
+    related_models: tuple[type[models.Model], ...] = ()
     try:
         if kind == "rows":
             sql_compiler = query.get_compiler(using=alias)
             sql, django_parameters = sql_compiler.as_sql()
-            result_builder = result_builder_for(queryset.model, sql_compiler, simple_query.values_fields)
-            if result_builder is None:
+            found = result_builder_for(queryset.model, sql_compiler, simple_query.values_fields)
+            if found is None:
                 return LEFT_TO_DJANGO
+            result_builder, related_models = found
         else:
             # These methods run their statement: capture it instead.
             if kind == "count":
@@ -139,7 +146,7 @@ def write_statement(
     # `exists()` selects one constant before them (`SELECT %s AS "a"`, with 1).
     select_parameters = tuple(django_parameters[:1]) if kind == "exists" else ()
     for writes_booleans_in_sql in (False, True):
-        candidate = Statement(sql, result_builder, select_parameters, writes_booleans_in_sql)
+        candidate = Statement(sql, result_builder, related_models, select_parameters, writes_booleans_in_sql)
         if same_values(list(django_parameters), candidate.parameters(simple_query, alias, updates)):
             return candidate
     return LEFT_TO_DJANGO
@@ -158,10 +165,11 @@ def same_values(first: list[Any], second: list[Any]) -> bool:
 
 def result_builder_for(
     model: type[models.Model], sql_compiler: Any, values_fields: tuple[str, ...] | None
-) -> ResultBuilder | None:
-    """A `ResultBuilder` for the rows of `sql_compiler`'s `SELECT`, or `None`
-    if they aren't simply the model's own columns (or, for `values()`, the
-    fields asked for).
+) -> tuple[ResultBuilder, tuple[type[models.Model], ...]] | None:
+    """A `ResultBuilder` for the rows of `sql_compiler`'s `SELECT`, and the
+    models of `select_related()` it makes, or `None` if the rows aren't simply
+    the model's own columns (or, for `values()`, the fields asked for), plus
+    whole related models.
 
     After `as_sql()`, the compiler knows what it selected (`select`), which
     model the columns belong to (`klass_info`) and how Django converts each
@@ -170,20 +178,26 @@ def result_builder_for(
     columns = [selected[0] for selected in sql_compiler.select]
     if sql_compiler.has_extra_select:
         return None  # columns added only for ordering
+    related: list[RelatedModel] = []
+    related_models: list[type[models.Model]] = []
     if values_fields is None:
-        # Model instances: one attribute per column, every field of the model.
+        # Model instances: one attribute per column, every field of the model,
+        # then every field of each related model (`select_related()`).
         klass_info = sql_compiler.klass_info
-        if (
-            sql_compiler.annotation_col_map
-            or klass_info is None
-            or klass_info["model"] is not model
-            or klass_info.get("related_klass_infos")
-            or list(klass_info["select_fields"]) != list(range(len(columns)))
-        ):
+        if sql_compiler.annotation_col_map or klass_info is None or klass_info["model"] is not model:
             return None
-        names = [column.target.attname for column in columns]
-        if len(names) != len(model._meta.concrete_fields):
+        if whole_model_columns(klass_info, columns) != (0, len(model._meta.concrete_fields)):
             return None  # some fields are deferred (`only()`, `defer()`): Django's `from_db()` handles that
+        found_related = related_models_for(klass_info, columns, related_models)
+        if found_related is None:
+            return None
+        related = found_related
+        column_count = len(model._meta.concrete_fields)
+        for related_model in related_models:
+            column_count += len(related_model._meta.concrete_fields)
+        if column_count != len(columns):
+            return None  # columns that belong to no model
+        names = [column.target.attname for column in columns]
     else:
         # `values()` and `values_list()`: one key (or tuple position) per field
         # asked for, named like Django's `ValuesIterable` names them. (Django
@@ -205,8 +219,70 @@ def result_builder_for(
             functions, expression = column_converters
             conversions.append(conversion_for(functions, expression, sql_compiler.connection))
     if values_fields is not None:
-        return ResultBuilder(names, converters, conversions, sql_compiler.connection)
-    return ResultBuilder(names, converters, conversions, sql_compiler.connection, model, ModelState)
+        return ResultBuilder(names, converters, conversions, sql_compiler.connection), ()
+    builder = ResultBuilder(names, converters, conversions, sql_compiler.connection, model, ModelState, related)
+    return builder, tuple(related_models)
+
+
+def related_models_for(
+    klass_info: dict[str, Any], columns: list[Any], related_models: list[type[models.Model]]
+) -> list[RelatedModel] | None:
+    """The `RelatedModel`s `select_related()` adds below `klass_info` (and,
+    in turn, below them), or `None` if one isn't simple enough. Each model is
+    also added to `related_models`.
+
+    Django describes each related model in `klass_info["related_klass_infos"]`,
+    for its `RelatedPopulator`: the model, its columns, and the functions that
+    cache it on its parent (`local_setter`) and its parent on it (`remote_setter`).
+    """
+    related = []
+    for related_info in klass_info.get("related_klass_infos", []):
+        related_model = related_info["model"]
+        model_columns = whole_model_columns(related_info, columns)
+        # `from_parent`: a child model of multi-table inheritance, whose
+        # columns are mixed with its parent's. Django's `RelatedPopulator` reorders them.
+        if related_info["from_parent"] or model_columns is None:
+            return None
+        first_column, end_column = model_columns
+        if end_column - first_column != len(related_model._meta.concrete_fields):
+            return None  # some fields are deferred (`only()`)
+        names = [columns[index].target.attname for index in range(first_column, end_column)]
+        # Django checks the first column of the primary key (a composite
+        # primary key's columns are all `NULL` when one is).
+        primary_key_name = related_model._meta.pk_fields[0].attname
+        if primary_key_name not in names:
+            return None
+        below = related_models_for(related_info, columns, related_models)
+        if below is None:
+            return None
+        related_models.append(related_model)
+        related.append(
+            RelatedModel(
+                related_model,
+                first_column,
+                end_column,
+                first_column + names.index(primary_key_name),
+                related_info["local_setter"],
+                related_info["remote_setter"],
+                below,
+            )
+        )
+    return related
+
+
+def whole_model_columns(klass_info: dict[str, Any], columns: list[Any]) -> tuple[int, int] | None:
+    """Where a model's columns start and end in the row, `(first, end)` like
+    `row[first:end]`, if they are side by side and are plain columns. Otherwise `None`."""
+    select_fields = list(klass_info["select_fields"])
+    if not select_fields:
+        return None
+    first_column, end_column = select_fields[0], select_fields[-1] + 1
+    if select_fields != list(range(first_column, end_column)):
+        return None
+    for index in select_fields:
+        if getattr(columns[index], "target", None) is None:
+            return None
+    return first_column, end_column
 
 
 def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql: bool = False) -> list[Any]:

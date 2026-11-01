@@ -10,7 +10,7 @@
 //! | `connection.rs` | `djox.Connection`: one SQLite connection for sync code (Django's ORM) |
 //! | `cursor.rs`     | `djox.Cursor`: runs statements on a `Connection`, hands back rows |
 //! | `functions.rs`  | Python functions and aggregates as SQL functions               |
-//! | `results.rs`    | `djox.ResultBuilder`: rows to model instances, tuples or dicts, for the fast lane |
+//! | `results.rs`    | `djox.ResultBuilder`: rows to model instances (with `select_related()` objects), tuples or dicts, for the fast lane |
 //! | `conversions.rs` | Django's date, time, decimal and boolean converters, in Rust |
 //! | `threads.rs`    | Taking the GIL from djox's worker threads, quickly             |
 //! | `values.rs`   | Python values to djox values and back; rows to lists of tuples  |
@@ -38,6 +38,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<connection::PythonConnection>()?;
     module.add_class::<cursor::Cursor>()?;
     module.add_class::<results::ResultBuilder>()?;
+    module.add_class::<results::RelatedModel>()?;
     // The version of the SQLite bundled in djox, like `"3.54.1"`.
     module.add("sqlite_version", djox::sqlite::sqlite_version())?;
     errors::add_exceptions_to_module(module)?;

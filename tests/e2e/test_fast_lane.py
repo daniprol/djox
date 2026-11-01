@@ -210,7 +210,7 @@ DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
     "F": lambda: Book.objects.filter(pages__gt=F("id")),
     "a join": lambda: Book.objects.filter(author__name="Jane Austen"),
     "icontains": lambda: Book.objects.filter(title__icontains="dune"),
-    "select_related": lambda: Book.objects.select_related("author").filter(pages__gt=300),
+    "select_related, then only": lambda: Book.objects.select_related("author").only("title", "author__name"),
     "a string for an integer": lambda: Book.objects.filter(pages="412"),
     "only": lambda: Book.objects.only("title"),
 }

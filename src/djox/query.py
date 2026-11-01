@@ -47,6 +47,7 @@ from typing import Any, TypeVar
 
 from asgiref.sync import sync_to_async
 from django.db import NotSupportedError, connections, models, transaction
+from django.db.models import prefetch_related_objects
 from django.db.models.deletion import Collector
 from django.db.models.query import (
     MAX_GET_RESULTS,  # how many rows `get()` reads at most
@@ -67,6 +68,7 @@ from djox._fast_lane.statements import Kind
 from djox._results import results_from_rows
 from djox.backends.sqlite3 import compiler
 from djox.backends.sqlite3.base import DatabaseWrapper
+from djox.prefetch import aprefetch_related_objects
 
 # The model class of a `QuerySet`, like `Book` in `QuerySet[Book]`.
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)
@@ -177,6 +179,42 @@ class QuerySet(models.QuerySet[ModelType]):
         clone._db = alias  # type: ignore[attr-defined]  # Django's
         return clone
 
+    def select_related(self, *fields: Any) -> "QuerySet[ModelType]":
+        """Django's `select_related()`: fetch the related objects in the same
+        query, with a join. Relations given by name are noted for the fast lane.
+
+        `select_related()` with no names (every non-null foreign key, which
+        Django 6.1 deprecates) is Django's. So are its errors: after
+        `values()` here, and a wrong name when the query runs, like in Django.
+        """
+        simple_query = self._recordable_query()
+        if simple_query is None or self._fields is not None or not fields:  # type: ignore[attr-defined]  # Django's
+            return super().select_related(*fields)
+        if fields == (None,):
+            return self._with_simple_query(simple_query.without_select_related())
+        if not all(isinstance(name, str) for name in fields):
+            return super().select_related(*fields)
+        return self._with_simple_query(simple_query.with_select_related(fields))
+
+    def prefetch_related(self, *lookups: Any) -> "QuerySet[ModelType]":
+        """Django's `prefetch_related()`: after this query, fetch the related
+        objects with one more query per relation (see `djox.prefetch`).
+
+        The lookups are kept on the `QuerySet`, like Django keeps them, so a
+        simple query keeps its note and still runs on the fast lane.
+        """
+        simple_query = self._recordable_query()
+        if simple_query is None:
+            return super().prefetch_related(*lookups)
+        # (Django also refuses relations of `FilteredRelation`, which only
+        # `annotate()` adds: a simple query has none.)
+        clone = self._with_simple_query(simple_query)
+        if lookups == (None,):
+            clone._prefetch_related_lookups = ()  # type: ignore[attr-defined]  # Django's
+        else:
+            clone._prefetch_related_lookups = (*self._prefetch_lookups(), *lookups)  # type: ignore[attr-defined]
+        return clone
+
     def values(self, *fields: Any, **expressions: Any) -> "QuerySet[Any]":
         """Django's `values()`: dicts instead of instances. The model's own fields are noted for the fast lane."""
         simple_query = self._recordable_query()
@@ -241,16 +279,18 @@ class QuerySet(models.QuerySet[ModelType]):
         """Fill the result cache, like Django's `_fetch_all()`, unless it is full already."""
         if self._result_cache is not None:
             return
+        if not runs_on_djox(self.db):
+            await sync_to_async(self._fetch_all)()
+            return
+        if self._prefetch_lookups():
+            # The main query (on the fast lane when it is simple) and Django's
+            # prefetching after it, together on one of djox's threads: one
+            # round trip from the event loop for all of them (`djox.prefetch`).
+            await self._run_django_method(self._fetch_all, writes=False)
+            return
         prepared = self._prepared_for_fast_lane("rows")
         if prepared is not None:
             self._result_cache = prepared.results(await prepared.fetch_rows(), self)
-            return
-        if self._prefetch_lookups():
-            # `prefetch_related()` runs more queries after this one: Django's way.
-            await self._run_django_method(self._fetch_all, writes=False)
-            return
-        if not runs_on_djox(self.db):
-            await sync_to_async(self._fetch_all)()
             return
         self._result_cache = await self._results_from_djox()
 
@@ -266,24 +306,33 @@ class QuerySet(models.QuerySet[ModelType]):
         """Like Django's `aiterator()`: results without filling the result
         cache, read from the database `chunk_size` rows at a time, so a big
         query never holds all its rows in memory."""
-        if self._prefetch_lookups() or not runs_on_djox(self.db):
+        if not runs_on_djox(self.db):
             async for result in super().aiterator(chunk_size):
                 yield result
             return
         if chunk_size <= 0:
             raise ValueError("Chunk size must be strictly positive.")
+        async for results in self._chunks_of_results(chunk_size):
+            # With `prefetch_related()`, Django prefetches for each chunk.
+            lookups = self._prefetch_lookups()
+            if lookups:
+                await aprefetch_related_objects(results, *lookups)
+            for result in results:
+                yield result
+
+    async def _chunks_of_results(self, chunk_size: int) -> AsyncIterator[list[Any]]:
+        """This query's results, `chunk_size` at a time, each chunk read from
+        the database when the one before has been used (`aiterator()`)."""
         prepared = self._prepared_for_fast_lane("rows")
         if prepared is not None:
             async for rows in prepared.stream_rows(chunk_size):
-                for result in prepared.results(rows, self):
-                    yield result
+                yield prepared.results(rows, self)
             return
         queryset = self._chain()  # type: ignore[attr-defined]  # Django's private copy method
         sql_compiler = queryset.query.get_compiler(using=queryset.db)
         async for rows in compiler.stream_statement(queryset.db, sql_compiler, chunk_size):
             # `[rows]`: one chunk, the shape `execute_sql(MULTI)` returns.
-            for result in results_from_rows(queryset, sql_compiler, [rows]):
-                yield result
+            yield results_from_rows(queryset, sql_compiler, [rows])
 
     async def aget(self, *args: Any, **kwargs: Any) -> ModelType:
         """The one object matching the filters. The same steps as Django's `get()`."""
@@ -670,9 +719,15 @@ class QuerySet(models.QuerySet[ModelType]):
             yield from super()._iterator(use_chunked_fetch, chunk_size)  # type: ignore[misc]  # Django's
             return
         rows = prepared.fetch_rows_now()
-        chunk_size = chunk_size or 2000  # Django's default, without `prefetch_related()`
+        lookups = self._prefetch_lookups()
+        # Like Django: with `prefetch_related()`, only `iterator(chunk_size=...)` prefetches, for each chunk.
+        prefetches = bool(lookups) and chunk_size is not None
+        chunk_size = chunk_size or 2000
         for start in range(0, len(rows), chunk_size):
-            yield from prepared.results(rows[start : start + chunk_size], self)
+            results = prepared.results(rows[start : start + chunk_size], self)
+            if prefetches:
+                prefetch_related_objects(results, *lookups)
+            yield from results
 
     def get(self, *args: Any, **kwargs: Any) -> ModelType:
         """Django's `get()`."""

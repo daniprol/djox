@@ -120,6 +120,9 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update,
     statement = statement_for(queryset, simple_query, kind, alias, updates)
     if statement is None:
         return None
+    for related_model in statement.related_models:
+        if not builds_like_django(related_model):
+            return None
     return PreparedQuery(statement, statement.parameters(simple_query, alias, updates), alias)
 
 
@@ -132,6 +135,8 @@ def can_build_results(queryset: "models.QuerySet[Any]") -> bool:
     `__init__` or `from_db()` do, and no one may listen to the `pre_init` and
     `post_init` signals that `__init__` sends. Some fields listen to them
     themselves (`ImageField` with `width_field`, `GenericForeignKey`).
+    The models of `select_related()` are checked the same way, once the
+    statement says which they are (`prepare()`).
     """
     model = queryset.model
     asks_for_values = queryset._simple_query.values_fields is not None  # type: ignore[attr-defined]  # djox.QuerySet's
@@ -144,6 +149,16 @@ def can_build_results(queryset: "models.QuerySet[Any]") -> bool:
     fetch_mode = getattr(queryset, "_fetch_mode", None)
     if fetch_mode is not None and fetch_mode.track_peers:
         return False  # Django 6.1's FETCH_PEERS links the instances to each other
+    return builds_like_django(model)
+
+
+def builds_like_django(model: type[models.Model]) -> bool:
+    """Whether `ResultBuilder` makes `model`'s instances the way `from_db()`
+    would: the model keeps Django's `__init__` and `from_db()`, and no one
+    listens to the `pre_init` and `post_init` signals (see `can_build_results()`).
+
+    Checked before every query, since a receiver may be connected at any time.
+    """
     if model.__init__ is not models.Model.__init__:
         return False
     if model.from_db.__func__ is not models.Model.from_db.__func__:  # type: ignore[attr-defined]  # a classmethod
