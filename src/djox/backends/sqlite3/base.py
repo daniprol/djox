@@ -20,7 +20,7 @@ from django.db.backends.sqlite3 import base
 from django.utils.asyncio import async_unsafe
 
 import djox
-from djox import _running
+from djox import _running, hooks
 from djox.backends.sqlite3 import dbapi
 from djox.backends.sqlite3.creation import DatabaseCreation
 from djox.backends.sqlite3.features import DatabaseFeatures
@@ -38,6 +38,11 @@ class DatabaseWrapper(base.DatabaseWrapper):
 
     # `connection` is the open `djox.Connection` (or `None`); Django's stubs call it `Any`.
     connection: djox.Connection | None
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # djox's hooks around every statement Django's cursors run (see `djox.hooks`).
+        self.execute_wrappers.append(hooks.execute_with_hooks)
 
     def get_connection_params(self) -> dict[str, Any]:
         """Read and check the settings. Django calls this before each new connection."""

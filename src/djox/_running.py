@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from django.db import connections as django_connections
 
 import djox
+from djox import hooks
 
 if TYPE_CHECKING:
     # `Row` exists only in the type hints of `djox._core` (`_core.pyi`).
@@ -44,6 +45,14 @@ async def fetch_all(alias: str, sql: str, parameters: Sequence[Any], writes: boo
     `writes` is `True` for a statement that writes and returns rows (`INSERT
     ... RETURNING`): it then takes part in the write turn, like `execute()`.
     """
+    if hooks.added_hooks:
+        with hooks.around_query(alias, sql, parameters) as query:
+            return await fetch_all_without_hooks(alias, query.sql, query.parameters, writes)
+    return await fetch_all_without_hooks(alias, sql, parameters, writes)
+
+
+async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any], writes: bool) -> "list[Row]":
+    """`fetch_all()`, once the hooks (`djox.hooks`) have seen the statement."""
     started = time.perf_counter()
     transaction_wrapper = open_sync_transaction(alias)
     if transaction_wrapper is not None:
@@ -71,6 +80,7 @@ def fetch_all_now(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]
     raises Django's exceptions, all by Django's own code. (And, like them,
     it refuses to run inside async code: `SynchronousOnlyOperation`.)
     """
+    # (Django's cursor runs the hooks, `djox.hooks.execute_with_hooks()`.)
     with django_connections[alias].cursor() as cursor:
         cursor.execute(sql, parameters)
         return cursor.fetchall()  # type: ignore[no-any-return]  # Django's cursor is untyped
@@ -86,6 +96,14 @@ def execute_now(alias: str, sql: str, parameters: Sequence[Any]) -> int:
 
 async def execute(alias: str, sql: str, parameters: Sequence[Any]) -> int:
     """Run a statement that changes data and return how many rows it changed."""
+    if hooks.added_hooks:
+        with hooks.around_query(alias, sql, parameters) as query:
+            return await execute_without_hooks(alias, query.sql, query.parameters)
+    return await execute_without_hooks(alias, sql, parameters)
+
+
+async def execute_without_hooks(alias: str, sql: str, parameters: Sequence[Any]) -> int:
+    """`execute()`, once the hooks (`djox.hooks`) have seen the statement."""
     started = time.perf_counter()
     transaction_wrapper = open_sync_transaction(alias)
     if transaction_wrapper is not None:
