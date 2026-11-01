@@ -5,7 +5,7 @@
 //!
 //! | File          | What it does                                                   |
 //! |---------------|----------------------------------------------------------------|
-//! | `database.rs`   | `djox.Database`: the async class around a backend's `Database` |
+//! | `database.rs`   | `djox.Database`: the async class around a backend's `Database`, and `RowStream` |
 //! | `answers.rs`    | Finishing an `asyncio.Future` when a backend answers           |
 //! | `connection.rs` | `djox.Connection`: one SQLite connection for sync code (Django's ORM) |
 //! | `cursor.rs`     | `djox.Cursor`: runs statements on a `Connection`, hands back rows |
@@ -34,6 +34,7 @@ mod values;
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<database::PythonDatabase>()?;
     module.add_class::<database::Executed>()?;
+    module.add_class::<database::RowStream>()?;
     module.add_class::<connection::PythonConnection>()?;
     module.add_class::<cursor::Cursor>()?;
     module.add_class::<results::ResultBuilder>()?;

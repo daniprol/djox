@@ -16,7 +16,7 @@ import pytest
 from asgiref.sync import async_to_sync, sync_to_async
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Count, F, Max, Sum
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_init, post_save, pre_save
 from django.test.utils import CaptureQueriesContext
 
 import djox
@@ -94,6 +94,47 @@ async def test_aiterator_gives_every_book_without_keeping_them() -> None:
     titles = [book.title async for book in queryset.aiterator(chunk_size=2)]
     assert titles == ["Dune Messiah", "Dune", "Emma"]
     assert queryset._result_cache is None
+
+
+@pytest.mark.usefixtures("library")
+async def test_aiterator_builds_the_books_one_chunk_at_a_time() -> None:
+    built: list[Book] = []
+
+    def count_built(sender: type[Book], instance: Book, **kwargs: Any) -> None:
+        built.append(instance)
+
+    post_init.connect(count_built, sender=Book)
+    try:
+        books = Book.objects.select_related("author").order_by("pages").aiterator(chunk_size=2)
+        first = await anext(books)
+        assert (first.title, first.author.name) == ("Dune Messiah", "Frank Herbert")
+        assert len(built) == 2, "the books of the first chunk only"
+        assert [book.title async for book in books] == ["Dune", "Emma"]
+    finally:
+        post_init.disconnect(count_built, sender=Book)
+
+
+@pytest.mark.usefixtures("library")
+async def test_writes_run_while_aiterator_reads() -> None:
+    async for book in Book.objects.order_by("pages").aiterator(chunk_size=1):
+        # The stream reads on a connection of its own: the writer is free.
+        await Book.objects.filter(pk=book.pk).aupdate(pages=book.pages + 1)
+    assert [book.pages async for book in Book.objects.order_by("pages")] == [257, 413, 475]
+
+
+@pytest.mark.usefixtures("library")
+async def test_aiterator_runs_inside_an_open_sync_transaction() -> None:
+    async def titles() -> list[str]:
+        return [book.title async for book in Book.objects.order_by("title").aiterator(chunk_size=1)]
+
+    def add_one_and_read() -> list[str]:
+        with transaction.atomic():
+            add_book("Persuasion", 249, Author.objects.get(name="Jane Austen"))
+            found = async_to_sync(titles)()
+            transaction.set_rollback(True)
+        return found
+
+    assert await sync_to_async(add_one_and_read)() == ["Dune", "Dune Messiah", "Emma", "Persuasion"]
 
 
 @pytest.mark.usefixtures("library")

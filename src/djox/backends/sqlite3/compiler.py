@@ -25,6 +25,9 @@ Running a method twice costs time, so when the last step after the statement
 is simple (`count()` returns the first column), `run_first_statement()` stops
 after step 2 and the caller finishes the method in a line or two.
 
+`run_statement()` and `stream_statement()` compile and run a statement
+directly, for methods djox writes itself (`aiterator()` streams its rows).
+
 Otherwise, these compilers are exactly Django's.
 
 | Class                   | What it compiles               |
@@ -36,16 +39,19 @@ Otherwise, these compilers are exactly Django's.
 | `SQLAggregateCompiler`  | `SELECT` around a subquery, for aggregates |
 """
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from django.core.exceptions import EmptyResultSet
 from django.db.models.sql import compiler
 from django.db.models.sql.constants import CURSOR, GET_ITERATOR_CHUNK_SIZE, MULTI, NO_RESULTS, ROW_COUNT, SINGLE
 
 from djox import _running
+
+if TYPE_CHECKING:
+    from djox._core import Row
 
 Result = TypeVar("Result")
 
@@ -167,6 +173,23 @@ async def run_statement(alias: str, sql_compiler: "compiler.SQLCompiler", result
     if sql_compiler.has_extra_select:
         rows = [row[0 : sql_compiler.col_count] for row in rows]
     return [rows]
+
+
+async def stream_statement(
+    alias: str, sql_compiler: "compiler.SQLCompiler", chunk_size: int
+) -> "AsyncIterator[list[Row]]":
+    """Compile a `SELECT` and run it on djox, yielding its rows `chunk_size`
+    at a time: the chunks Django's `execute_sql(MULTI)` would hand out."""
+    try:
+        sql, parameters = sql_compiler.as_sql()
+        if not sql:
+            raise EmptyResultSet
+    except EmptyResultSet:
+        return  # Django knows without asking that nothing matches
+    async for rows in _running.stream_rows(alias, sql, parameters, chunk_size):
+        if sql_compiler.has_extra_select:
+            rows = [row[0 : sql_compiler.col_count] for row in rows]
+        yield rows
 
 
 async def run_insert(alias: str, insert_compiler: "SQLInsertCompiler", returning_fields: Any) -> list[Any]:

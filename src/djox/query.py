@@ -12,6 +12,7 @@ by Django's own code. Three ways are used, depending on the method:
 - **Rows**: `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()`,
   `aearliest()`, `alatest()`. Compile the `SELECT`, await its rows on djox,
   and let Django's iterable class build the results (`djox._results`).
+  `aiterator()` streams the rows, a chunk at a time.
 - **First statement**: `acount()`, `aexists()`, `acontains()`, `aupdate()`,
   `adelete()`. Run Django's sync method until it reaches its statement, await
   that on djox, and turn the answer into the result (a number, `True`...)
@@ -262,8 +263,9 @@ class QuerySet(models.QuerySet[ModelType]):
         return results_from_rows(queryset, sql_compiler, rows)
 
     async def aiterator(self, chunk_size: int = 2000) -> AsyncIterator[ModelType]:
-        """Like Django's `aiterator()`, without filling the result cache. For
-        now all rows are fetched at once (`chunk_size` is only checked)."""
+        """Like Django's `aiterator()`: results without filling the result
+        cache, read from the database `chunk_size` rows at a time, so a big
+        query never holds all its rows in memory."""
         if self._prefetch_lookups() or not runs_on_djox(self.db):
             async for result in super().aiterator(chunk_size):
                 yield result
@@ -272,11 +274,16 @@ class QuerySet(models.QuerySet[ModelType]):
             raise ValueError("Chunk size must be strictly positive.")
         prepared = self._prepared_for_fast_lane("rows")
         if prepared is not None:
-            results = prepared.results(await prepared.fetch_rows(), self)
-        else:
-            results = await self._results_from_djox()
-        for result in results:
-            yield result
+            async for rows in prepared.stream_rows(chunk_size):
+                for result in prepared.results(rows, self):
+                    yield result
+            return
+        queryset = self._chain()  # type: ignore[attr-defined]  # Django's private copy method
+        sql_compiler = queryset.query.get_compiler(using=queryset.db)
+        async for rows in compiler.stream_statement(queryset.db, sql_compiler, chunk_size):
+            # `[rows]`: one chunk, the shape `execute_sql(MULTI)` returns.
+            for result in results_from_rows(queryset, sql_compiler, [rows]):
+                yield result
 
     async def aget(self, *args: Any, **kwargs: Any) -> ModelType:
         """The one object matching the filters. The same steps as Django's `get()`."""

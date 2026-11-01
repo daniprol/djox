@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
-use djox_core::{Database, Error, Executed, ReplySender, Result, Rows, Value};
+use djox_core::{ChunkRequests, Database, Error, Executed, ReplySender, Result, Rows, Value};
 
 use super::connection::{Access, SqliteConnection};
 use super::readers::ReaderQueue;
@@ -18,6 +18,8 @@ use super::worker::{Job, Jobs, start_worker};
 ///   order they were sent, so they never fail with "database is locked".
 /// - `fetch_all` goes to whichever reader is free. A statement that writes
 ///   (like `INSERT ... RETURNING`) is passed on to the writer.
+/// - `stream_rows` opens a reader connection of its own, on a thread of its
+///   own, for as long as the stream lasts.
 pub struct SqliteDatabase {
     /// The two queues, or `None` once the database is closed.
     ///
@@ -26,7 +28,14 @@ pub struct SqliteDatabase {
     /// one locks it just long enough to copy a queue sender.
     queues: Mutex<Option<Queues>>,
     settings: SqliteSettings,
+    /// What `open_with` was given to prepare each new connection, kept for
+    /// the connections streams open later.
+    prepare: Arc<Prepare>,
 }
+
+/// A function that prepares a new connection (see [`SqliteDatabase::open_with`]).
+/// `dyn Fn(...)` is "any function with this signature", like a `Callable` type hint.
+type Prepare = dyn Fn(SqliteConnection) -> Result<SqliteConnection> + Send + Sync;
 
 /// The writer's queue, and the queue all readers share.
 struct Queues {
@@ -52,10 +61,12 @@ impl SqliteDatabase {
     ///
     /// `prepare` takes the connection and gives it back. Taking it (instead of
     /// borrowing it) lets the Python extension wrap it in a Python object for
-    /// the duration of the call.
+    /// the duration of the call. It is kept for the connections of streams,
+    /// so it must be usable from any thread (`Send + Sync`) and own what it
+    /// uses (`'static`).
     pub fn open_with(
         settings: SqliteSettings,
-        prepare: impl Fn(SqliteConnection) -> Result<SqliteConnection>,
+        prepare: impl Fn(SqliteConnection) -> Result<SqliteConnection> + Send + Sync + 'static,
     ) -> Result<SqliteDatabase> {
         settings.check()?;
         let writer_connection = prepare(SqliteConnection::open(&settings, Access::Writer)?)?;
@@ -92,6 +103,7 @@ impl SqliteDatabase {
         Ok(SqliteDatabase {
             queues: Mutex::new(Some(queues)),
             settings,
+            prepare: Arc::new(prepare),
         })
     }
 
@@ -147,6 +159,30 @@ impl Database for SqliteDatabase {
 
     fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>) {
         self.send_to_readers(Job::FetchAll { sql, parameters, reply });
+    }
+
+    fn stream_rows(&self, sql: String, parameters: Vec<Value>, chunk_size: usize, requests: ChunkRequests) {
+        if self.is_closed() {
+            return; // dropping `requests` answers the first chunk with `Error::Closed`
+        }
+        let settings = self.settings.clone();
+        let prepare = Arc::clone(&self.prepare);
+        // A thread and a connection of its own (see the trait's docs). If the
+        // thread can't start, `requests` is dropped with it: `Error::Closed`.
+        let _ = std::thread::Builder::new()
+            .name("djox-sqlite-stream".to_string())
+            .spawn(move || {
+                let opened =
+                    SqliteConnection::open(&settings, Access::Reader).and_then(|connection| prepare(connection));
+                match opened {
+                    Ok(mut connection) => connection.stream(&sql, &parameters, chunk_size.max(1), &requests),
+                    Err(error) => {
+                        if let Some(reply) = requests.next() {
+                            reply.send(Err(error));
+                        }
+                    }
+                }
+            });
     }
 
     fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>) {
@@ -299,10 +335,12 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let mut settings = SqliteSettings::new(folder.path().join("app.sqlite3"));
         settings.reader_count = 2;
-        // `Mutex` (like `threading.Lock`) lets the closure count calls through a shared reference.
-        let prepared = Mutex::new(0);
-        let database = SqliteDatabase::open_with(settings, |mut connection| {
-            *prepared.lock().unwrap() += 1;
+        // `Arc<Mutex<...>>`: a counter shared with the closure (which the
+        // database keeps), behind a lock (like `threading.Lock`).
+        let prepared = Arc::new(Mutex::new(0));
+        let counter = Arc::clone(&prepared);
+        let database = SqliteDatabase::open_with(settings, move |mut connection| {
+            *counter.lock().unwrap() += 1;
             connection.create_scalar_function("answer", 0, true, |_| Ok(Value::Integer(42)))?;
             Ok(connection)
         })
@@ -311,5 +349,75 @@ mod tests {
         assert_eq!(*prepared.lock().unwrap(), 3, "the writer and two readers");
         let rows = fetch_all(&database, "SELECT answer()", vec![]).unwrap();
         assert_eq!(rows.rows, [[Value::Integer(42)]]);
+    }
+
+    /// Asks a stream for its next chunk and blocks until it arrives.
+    fn next_chunk(stream: &djox_core::RowStream) -> Result<Rows> {
+        let (sender, reply) = Reply::new();
+        stream.next_chunk(sender);
+        reply.wait_blocking()
+    }
+
+    fn add_books(database: &SqliteDatabase, count: usize) {
+        for number in 0..count {
+            execute(
+                database,
+                "INSERT INTO book (title) VALUES (%s)",
+                vec![Value::Text(format!("Book {number}"))],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_stream_hands_out_its_rows_chunk_by_chunk() {
+        let (_folder, database) = open(1);
+        add_books(&database, 5);
+        let (stream, requests) = djox_core::RowStream::new();
+        database.stream_rows("SELECT id FROM book ORDER BY id".into(), vec![], 2, requests);
+        let mut sizes = Vec::new();
+        loop {
+            let chunk = next_chunk(&stream).unwrap();
+            sizes.push(chunk.rows.len());
+            if chunk.rows.len() < 2 {
+                break;
+            }
+        }
+        assert_eq!(sizes, [2, 2, 1]);
+        assert_eq!(next_chunk(&stream).unwrap_err(), Error::Closed, "nothing after the end");
+    }
+
+    #[test]
+    fn other_statements_run_while_a_stream_waits() {
+        // One reader only: the stream must not take it.
+        let (_folder, database) = open(1);
+        add_books(&database, 3);
+        let (stream, requests) = djox_core::RowStream::new();
+        database.stream_rows("SELECT id FROM book".into(), vec![], 1, requests);
+        assert_eq!(next_chunk(&stream).unwrap().rows.len(), 1);
+        assert_eq!(count_books(&database), Value::Integer(3));
+        add_books(&database, 1);
+        assert_eq!(count_books(&database), Value::Integer(4));
+        drop(stream); // stopping early lets the stream's connection go
+    }
+
+    #[test]
+    fn a_stream_refuses_writes_and_reports_errors() {
+        let (_folder, database) = open(1);
+        let (stream, requests) = djox_core::RowStream::new();
+        database.stream_rows("DELETE FROM book".into(), vec![], 10, requests);
+        assert!(matches!(next_chunk(&stream), Err(Error::Programming(_))));
+        let (stream, requests) = djox_core::RowStream::new();
+        database.stream_rows("SELECT nothing FROM book".into(), vec![], 10, requests);
+        assert!(next_chunk(&stream).is_err());
+    }
+
+    #[test]
+    fn a_closed_database_streams_nothing() {
+        let (_folder, database) = open(1);
+        database.close();
+        let (stream, requests) = djox_core::RowStream::new();
+        database.stream_rows("SELECT 1".into(), vec![], 10, requests);
+        assert_eq!(next_chunk(&stream).unwrap_err(), Error::Closed);
     }
 }

@@ -77,6 +77,13 @@ class Database:
     def fetch_one(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[Row | None]:
         """Run a query and return its first row, or `None`."""
 
+    def stream_rows(
+        self, sql: str, parameters: Sequence[Parameter] | None = None, *, chunk_size: int = 2000
+    ) -> RowStream:
+        """Run a query and hand its rows over `chunk_size` at a time. The
+        stream reads on a connection of its own, so other statements never
+        wait for it. Only queries that read can be streamed."""
+
     def execute(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[Executed]:
         """Run a statement that changes data."""
 
@@ -103,6 +110,21 @@ class Database:
         exception: BaseException | None,
         traceback: TracebackType | None,
     ) -> None: ...
+
+class RowStream:
+    """The rows of one query, a chunk at a time (from `Database.stream_rows()`).
+
+    When it is garbage collected, its connection is let go, even if not
+    every row was read.
+    """
+
+    @property
+    def chunk_size(self) -> int:
+        """The most rows a chunk has."""
+
+    def next_chunk(self) -> asyncio.Future[list[Row]]:
+        """The next chunk of rows. A chunk with fewer than `chunk_size` rows
+        is the last one; asking again raises `DatabaseClosedError`."""
 
 class Executed:
     """What a statement that changes data gives back."""

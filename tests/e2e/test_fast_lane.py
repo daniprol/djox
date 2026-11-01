@@ -269,9 +269,18 @@ async def test_many_queries_of_one_shape_at_once() -> None:
     assert len(fast_statements()) == 1
 
 
+@pytest.mark.parametrize("make_queryset", SIMPLE_QUERYSETS.values(), ids=SIMPLE_QUERYSETS.keys())
+@pytest.mark.parametrize("chunk_size", [1, 3, 2000])
 @pytest.mark.usefixtures("library")
-async def test_aiterator_and_acontains() -> None:
-    assert [book.title async for book in Book.objects.order_by("title").aiterator()][:2] == ["Dune", "Dune Messiah"]
+async def test_aiterator_streams_djangos_objects(make_queryset: MakeQuerySet, chunk_size: int) -> None:
+    expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
+    books = [book async for book in make_queryset().aiterator(chunk_size=chunk_size)]
+    assert [fields_of(book) for book in books] == [fields_of(book) for book in expected]
+    assert len(fast_statements()) == 1
+
+
+@pytest.mark.usefixtures("library")
+async def test_acontains() -> None:
     emma = await Book.objects.aget(title="Emma")
     assert await Book.objects.filter(pages__gt=400).acontains(emma) is True
     assert await Book.objects.filter(pages__lt=400).acontains(emma) is False
@@ -516,6 +525,14 @@ def test_values_give_djangos_rows(make_queryset: MakeQuerySet) -> None:
 async def test_async_values_give_djangos_rows(make_queryset: MakeQuerySet) -> None:
     expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
     assert [row async for row in make_queryset()] == expected
+    assert any(found.result_builder for found in fast_statements()), "the fast lane built the rows"
+
+
+@pytest.mark.parametrize("make_queryset", VALUES_QUERYSETS.values(), ids=VALUES_QUERYSETS.keys())
+@pytest.mark.usefixtures("library")
+async def test_aiterator_streams_djangos_values(make_queryset: MakeQuerySet) -> None:
+    expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
+    assert [row async for row in make_queryset().aiterator(chunk_size=2)] == expected
     assert any(found.result_builder for found in fast_statements()), "the fast lane built the rows"
 
 

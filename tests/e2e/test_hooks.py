@@ -75,6 +75,19 @@ async def test_hooks_see_async_queries_and_writes(herbert: Author, recorder: Rec
     assert len(recorder.before) == len(recorder.after), "every statement finished once"
 
 
+async def test_hooks_see_a_streamed_query_once(herbert: Author, recorder: Recorder) -> None:
+    for title in ["Dune", "Dune Messiah", "Children of Dune"]:
+        await sync_to_async(new_book(herbert, title).save)()
+    recorder.before.clear()
+    recorder.after.clear()
+
+    titles = [book.title async for book in Book.objects.order_by("pk").aiterator(chunk_size=1)]
+
+    assert titles == ["Dune", "Dune Messiah", "Children of Dune"]
+    assert len(recorder.before) == len(recorder.after) == 1, "one statement, however many chunks"
+    assert recorder.after[0][1].error is None
+
+
 @pytest.mark.parametrize("use_async", [False, True])
 async def test_before_query_can_change_what_runs(herbert: Author, use_async: bool) -> None:
     def ask_for_someone_else(query: djox.Query) -> djox.Query:

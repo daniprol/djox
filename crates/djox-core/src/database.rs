@@ -1,6 +1,6 @@
 //! [`Database`]: what every backend must be able to do.
 
-use crate::{Executed, ReplySender, Rows, Value};
+use crate::{ChunkRequests, Executed, ReplySender, Rows, Value};
 
 /// A database that runs SQL for async Python code without blocking it.
 ///
@@ -28,6 +28,15 @@ pub trait Database: Send + Sync {
 
     /// Runs a query and returns all its rows.
     fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>);
+
+    /// Runs a query and hands its rows over `chunk_size` at a time, each
+    /// chunk when the caller asks for it through its [`crate::RowStream`].
+    ///
+    /// The stream gets a connection of its own until it ends (or the caller
+    /// drops its `RowStream`), so a slow caller never holds up other
+    /// statements, and other statements, even ones sent while the stream is
+    /// read, never wait for it. Only queries that read can be streamed.
+    fn stream_rows(&self, sql: String, parameters: Vec<Value>, chunk_size: usize, requests: ChunkRequests);
 
     /// Runs a statement that changes data (`INSERT`, `UPDATE`, `DELETE`...).
     fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>);

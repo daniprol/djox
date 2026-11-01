@@ -21,16 +21,19 @@
 //! | `value.rs`    | [`Value`]: one value sent to or read from the database            |
 //! | `rows.rs`     | [`Rows`] (what a query returns) and [`Executed`] (what a write returns) |
 //! | `reply.rs`    | [`ReplySender`]: how a backend hands back an answer; [`Reply`] to await it |
+//! | `stream.rs`   | [`RowStream`]: the rows of a big query, a chunk at a time           |
 //! | `error.rs`    | [`Error`] and [`Result`]                                          |
 
 mod database;
 mod error;
 mod reply;
 mod rows;
+mod stream;
 mod value;
 
 pub use database::Database;
 pub use error::{Error, Result};
 pub use reply::{Reply, ReplySender};
 pub use rows::{Executed, Rows};
+pub use stream::{ChunkRequests, RowStream};
 pub use value::Value;

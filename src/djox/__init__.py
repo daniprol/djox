@@ -46,6 +46,7 @@ from djox._core import (
     NotSupportedError,
     OperationalError,
     ProgrammingError,
+    RowStream,
     sqlite_version,
 )
 from djox.hooks import Hooks, Query, QueryFinished, add_hooks, remove_hooks
@@ -108,6 +109,7 @@ __all__ = [
     "Query",
     "QueryFinished",
     "QuerySet",
+    "RowStream",
     "add_hooks",
     "atomic",
     "connections",

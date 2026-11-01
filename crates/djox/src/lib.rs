@@ -16,4 +16,4 @@
 
 pub mod sqlite;
 
-pub use djox_core::{Database, Error, Executed, Reply, ReplySender, Result, Rows, Value};
+pub use djox_core::{ChunkRequests, Database, Error, Executed, Reply, ReplySender, Result, RowStream, Rows, Value};

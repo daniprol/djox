@@ -3,8 +3,8 @@
 `prepare()` does everything but running the SQL, and returns `None` when the
 fast lane leaves the query to Django; `djox.QuerySet` then runs it the way it
 would without the fast lane, with the same result. A `PreparedQuery` runs the
-same way from async code (`await prepared.fetch_rows()`, or `execute()` for a
-write) and from sync code (`prepared.fetch_rows_now()`, `execute_now()`), and
+same way from async code (`await prepared.fetch_rows()`, `stream_rows()` for
+`aiterator()`, or `execute()` for a write) and from sync code (`prepared.fetch_rows_now()`, `execute_now()`), and
 turns the rows into the answer:
 
 ```python
@@ -18,6 +18,7 @@ the open transaction if there is one, with Django's exceptions, and in
 Django's query log.
 """
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,13 @@ class PreparedQuery:
         if self.statement is None:
             return []
         return _running.fetch_all_now(self.alias, self.statement.sql, self.parameters)
+
+    async def stream_rows(self, chunk_size: int) -> "AsyncIterator[list[Row]]":
+        """Run the statement on djox and yield its rows `chunk_size` at a time (`aiterator()`)."""
+        if self.statement is None:
+            return
+        async for rows in _running.stream_rows(self.alias, self.statement.sql, self.parameters, chunk_size):
+            yield rows
 
     async def execute(self) -> int:
         """Run the `UPDATE` or `DELETE` on djox, from async code: how many rows it changed."""

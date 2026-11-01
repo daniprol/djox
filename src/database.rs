@@ -21,7 +21,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::answers::future_for_answer;
+use crate::answers::{future_for_answer, future_for_stream_answer};
 use crate::connection::PythonConnection;
 use crate::errors::to_python_error;
 use crate::values::{parameters_from_python, row_to_python, rows_to_python};
@@ -70,21 +70,25 @@ impl PythonDatabase {
         }
         let location = path.display().to_string();
 
-        // An exception raised by `prepare` is kept here and raised as it is,
-        // instead of being turned into a djox error. `Mutex` lets the closure
-        // below store it (it may only borrow what it captures).
-        let prepare_error: Mutex<Option<PyErr>> = Mutex::new(None);
-        let prepare_connection = |sqlite: SqliteConnection| -> djox::Result<SqliteConnection> {
+        // An exception raised by `prepare` while opening is kept here and
+        // raised as it is, instead of being turned into a djox error. The
+        // closure below is kept by the database (streams open connections
+        // later), so it owns what it uses: `move`, and an `Arc` (a shared
+        // pointer) to the `Mutex` that stores the error.
+        let prepare_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+        let kept_error = Arc::clone(&prepare_error);
+        let connection_location = location.clone();
+        let prepare_connection = move |sqlite: SqliteConnection| -> djox::Result<SqliteConnection> {
             let Some(prepare) = &prepare else {
                 return Ok(sqlite);
             };
             Python::attach(|py| {
-                let lent = Py::new(py, PythonConnection::lend(sqlite, location.clone()))
-                    .map_err(|error| keep_error(&prepare_error, error))?;
+                let lent = Py::new(py, PythonConnection::lend(sqlite, connection_location.clone()))
+                    .map_err(|error| keep_error(&kept_error, error))?;
                 let called = prepare.call1(py, (lent.clone_ref(py),));
                 // Take the connection back whatever happened, so it is closed properly.
                 let sqlite = lent.get().take_back();
-                called.map_err(|error| keep_error(&prepare_error, error))?;
+                called.map_err(|error| keep_error(&kept_error, error))?;
                 sqlite.ok_or_else(|| djox::Error::Settings("prepare() closed the connection".to_string()))
             })
         };
@@ -131,6 +135,28 @@ impl PythonDatabase {
         })?;
         self.backend.fetch_all(sql, parameters, reply);
         Ok(future)
+    }
+
+    /// Runs a query and hands its rows over a chunk at a time: a `RowStream`.
+    ///
+    /// Each `await stream.next_chunk()` gives up to `chunk_size` rows; fewer
+    /// means the query has no more. The stream reads on a connection of its
+    /// own, so other statements never wait for it. Only queries that read
+    /// can be streamed.
+    #[pyo3(signature = (sql, parameters = None, *, chunk_size = 2000))]
+    fn stream_rows(
+        &self,
+        sql: String,
+        parameters: Option<&Bound<'_, PyAny>>,
+        chunk_size: usize,
+    ) -> PyResult<RowStream> {
+        if chunk_size == 0 {
+            return Err(PyValueError::new_err("chunk_size must be 1 or more"));
+        }
+        let parameters = parameters_from_python(parameters)?;
+        let (stream, requests) = djox::RowStream::new();
+        self.backend.stream_rows(sql, parameters, chunk_size, requests);
+        Ok(RowStream { stream, chunk_size })
     }
 
     /// Runs a statement that changes data, and returns an `Executed`.
@@ -195,6 +221,44 @@ impl PythonDatabase {
     fn __repr__(&self) -> String {
         let closed = if self.backend.is_closed() { ", closed" } else { "" };
         format!("Database.{}('{}'{closed})", self.backend.backend_name(), self.location)
+    }
+}
+
+/// The rows of one query, a chunk at a time (from `Database.stream_rows()`).
+///
+/// ```python
+/// stream = database.stream_rows("SELECT * FROM book", chunk_size=500)
+/// while True:
+///     rows = await stream.next_chunk()
+///     ...
+///     if len(rows) < stream.chunk_size:
+///         break  # that was the last chunk
+/// ```
+///
+/// When the stream is garbage collected, its connection is let go, even if
+/// not every row was read.
+#[pyclass(module = "djox", frozen)]
+pub struct RowStream {
+    stream: djox::RowStream,
+    /// The most rows a chunk has.
+    #[pyo3(get)]
+    chunk_size: usize,
+}
+
+#[pymethods]
+impl RowStream {
+    /// The next chunk of rows, as a list of tuples. A chunk with fewer than
+    /// `chunk_size` rows is the last one; asking again raises
+    /// `DatabaseClosedError`.
+    fn next_chunk<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        // The answer comes from the stream's own thread, which ends with the stream.
+        let (future, reply) = future_for_stream_answer(py, |py, rows: Rows| Ok(rows_to_python(py, rows)?.into_any()))?;
+        self.stream.next_chunk(reply);
+        Ok(future)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("RowStream(chunk_size={})", self.chunk_size)
     }
 }
 
