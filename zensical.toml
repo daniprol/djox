@@ -19,6 +19,8 @@ nav = [
 
 [project.theme]
 language = "en"  # also the language of the built-in search
+logo = "assets/logo.svg"
+favicon = "assets/logo.svg"
 features = [
   "content.action.edit",    # "edit this page" button
   "content.code.annotate",
