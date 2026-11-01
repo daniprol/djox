@@ -36,6 +36,13 @@ The event loop never waits.
 - **A few readers** (one per CPU core, at most 4) share another queue and run
   in parallel. They are opened read-only; a statement sent to `fetch_all`
   that turns out to write (`INSERT ... RETURNING`) is passed to the writer.
+  A new query wakes the reader that went to sleep last, so queries that come
+  one at a time keep landing on the same warm thread, while a burst of
+  queries spreads over all of them.
+- **Threads are started once.** The writer and the readers start when the
+  database opens and live until it closes: no thread is started per query.
+  Each one registers with Python the first time it hands back an answer and
+  stays registered, so taking the GIL to finish a Future is cheap.
 - **WAL mode**: readers never wait for the writer, and the writer never waits
   for readers.
 - **`synchronous = NORMAL`**: safe with WAL and much faster than Django's
