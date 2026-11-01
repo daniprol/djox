@@ -122,6 +122,7 @@ class CastTests(TestCase):
         )
 
     @pytest.mark.django_adapted("runs with USE_TZ=False, like Django's own test settings (djox's test settings use True)")
+    # djox: this override is new. djox's test settings use USE_TZ=True.
     @override_settings(USE_TZ=False)
     def test_cast_from_db_date_to_datetime(self):
         dt_value = datetime.date(2018, 9, 28)
@@ -154,6 +155,7 @@ class CastTests(TestCase):
         self.assertEqual(dates.get().cast_date, today)
 
     @pytest.mark.django_adapted("runs with USE_TZ=False, like Django's own test settings (djox's test settings use True)")
+    # djox: this override is new. djox's test settings use USE_TZ=True.
     @override_settings(USE_TZ=False)
     def test_cast_from_python_to_datetime(self):
         now = datetime.datetime.now()

@@ -138,7 +138,7 @@ like an example of how to use djox.
 - **Ported Django tests** (`tests/django_suite/README.md`): as djox takes over
   a part of the ORM, copy Django's tests for it. Mark each with
   `@pytest.mark.django_ported("<django test id>")`, plus
-  `@pytest.mark.django_adapted("why")` if it had to change, or
+  `@pytest.mark.django_adapted("why")` if it had to change (with a `# djox:` comment on each changed line), or
   `@pytest.mark.django_unsupported("why")` if djox can't pass it yet (it then
   runs as a strict `xfail`, so we notice when it starts passing). pytest ends
   with a count of unchanged, adapted and unsupported Django tests. Ported

@@ -24,7 +24,8 @@ and run against djox.
 3. Then, for each test, exactly one of:
    - nothing else: the test runs **unchanged** and must pass;
    - `@pytest.mark.django_adapted("why")`: the test was **changed** to fit
-     djox. Say what changed and why;
+     djox. Say what changed and why, and put a `# djox: ...` comment on
+     each changed line, so the difference from Django's version is easy to find;
    - `@pytest.mark.django_unsupported("why")`: djox doesn't support this
      **yet**. The test is expected to fail (strict `xfail`), so the day it
      starts passing pytest says so, and the marker must be removed.
