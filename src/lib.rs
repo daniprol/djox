@@ -10,6 +10,7 @@
 //! | `connection.rs` | `djox.Connection`: one SQLite connection for sync code (Django's ORM) |
 //! | `cursor.rs`     | `djox.Cursor`: runs statements on a `Connection`, hands back rows |
 //! | `functions.rs`  | Python functions and aggregates as SQL functions               |
+//! | `instances.rs`  | `djox.InstanceBuilder`: rows to model instances, for the fast lane |
 //! | `threads.rs`    | Taking the GIL from djox's worker threads, quickly             |
 //! | `values.rs`   | Python values to djox values and back; rows to lists of tuples  |
 //! | `errors.rs`   | The Python exception classes (`djox.DatabaseError`...)          |
@@ -22,6 +23,7 @@ mod cursor;
 mod database;
 mod errors;
 mod functions;
+mod instances;
 mod threads;
 mod values;
 
@@ -32,6 +34,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<database::Executed>()?;
     module.add_class::<connection::PythonConnection>()?;
     module.add_class::<cursor::Cursor>()?;
+    module.add_class::<instances::InstanceBuilder>()?;
     // The version of the SQLite bundled in djox, like `"3.54.1"`.
     module.add("sqlite_version", djox::sqlite::sqlite_version())?;
     errors::add_exceptions_to_module(module)?;

@@ -14,9 +14,12 @@ Contenders:
 - sqlite3:       Python's `sqlite3` with SQL written by hand. The floor: no ORM at all.
 - django async:  Django's async methods (`aget`, `async for`, `acount`), which run
                  the sync code on a worker thread.
-- djox.Manager:  the same async methods on `djox.Manager()`: Django builds the SQL
-                 and the model instances, djox runs the SQL without a worker thread.
+- djox safe lane: the same async methods on `djox.Manager()` with the fast lane
+                 off (`DJOX_FAST_LANE = False`): Django builds the query, the SQL and the
+                 model instances, djox runs the SQL without a worker thread.
                  Transactions use `djox.atomic()`.
+- djox.Manager:  the same, with the fast lane (the default): simple queries reuse the
+                 SQL Django wrote for their shape, and Rust builds the instances.
 - djox:          `djox.Database` with the same hand-written SQL as sqlite3.
 """
 
@@ -60,6 +63,7 @@ settings.configure(
     },
     INSTALLED_APPS=[],
     USE_TZ=True,
+    DJOX_FAST_LANE=True,  # switched off for the "djox safe lane" contender
 )
 django.setup()
 
@@ -321,11 +325,14 @@ def main() -> None:
         report(name, results[name])
 
     async def run_async_contenders() -> None:
-        for name, operations in [
-            ("django async", make_django_async()),
-            ("djox.Manager", make_djox_manager()),
-            ("djox", make_djox()),
+        for name, fast_lane, operations in [
+            ("django async", True, make_django_async()),
+            ("djox safe lane", False, make_djox_manager()),
+            ("djox.Manager", True, make_djox_manager()),
+            ("djox", True, make_djox()),
         ]:
+            # Read whenever a QuerySet is made, so it can change between contenders.
+            settings.DJOX_FAST_LANE = fast_lane
             results[name] = {}
             for scenario, operation in operations.items():
                 results[name][scenario] = await time_async(operation, REPEATS[scenario])

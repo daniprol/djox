@@ -230,6 +230,28 @@ class Cursor:
     def __iter__(self) -> Iterator[Row]: ...
     def __next__(self) -> Row: ...
 
+class InstanceBuilder:
+    """Turns result rows into Django model instances, for the fast lane
+    (`djox._fast_lane`): the instances Django's `from_db()` would make, built in Rust."""
+
+    def __init__(
+        self,
+        model: type[Any],
+        attnames: Sequence[str],
+        converters: Sequence[tuple[Sequence[Callable[[Any, Any, Any], Any]], Any] | None],
+        connection: Any,
+        model_state: type[Any],
+    ) -> None:
+        """`attnames`: the attribute of each column. `converters`: per column,
+        `None` or `(functions, expression)`, like Django's `get_converters()`."""
+
+    def build(self, rows: list[Row], alias: str, fetch_mode: Any = None) -> list[Any]:
+        """One instance per row, from the database `alias`."""
+
+    @property
+    def column_count(self) -> int:
+        """How many columns each row must have."""
+
 # The exceptions follow PEP 249, like Python's `sqlite3`.
 
 class Error(Exception):

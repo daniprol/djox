@@ -10,6 +10,13 @@ and run against djox.
 | `transactions/` | `transactions/tests.py`                             | `atomic()`, savepoints, autocommit           |
 | `db_functions/` | `db_functions/{datetime,math,text,comparison}/`     | Django's SQL functions (`django_date_extract`, `MD5`...) on djox's SQLite |
 | `async/`        | `async/test_async_{queryset,model_methods,related_managers}.py` | The `a`-methods on `djox.Manager` and `djox.Model`, inside `TestCase`'s transaction |
+| `basic/`        | `basic/tests.py`                                    | Creating, saving, getting and refreshing objects through `djox.QuerySet` |
+| `lookup/`       | `lookup/tests.py`                                   | `filter()` lookups, `in_bulk()`, `values()`: the fast lane's notes, and Django's `Query` built from them |
+| `ordering/`     | `ordering/tests.py`                                 | `order_by()`, `reverse()`, `Meta.ordering`, `first()`/`last()` and slices on `djox.QuerySet` |
+
+The models of `basic/`, `lookup/` and `ordering/` are left as Django wrote
+them: `DJOX_MODELS` (in `tests/settings.py`) switches them to djox, so their
+sync tests run on `djox.QuerySet`, with the fast lane's notes.
 
 In `async/models.py` each model has `objects = djox.Manager()`, and
 `SimpleModel` (the one `test_async_model_methods.py` saves and deletes) is a

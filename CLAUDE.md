@@ -79,6 +79,15 @@ them, and it should teach them both along the way.
   runs it). Rows are turned into results by Django's own iterable classes
   (`_results.py`); single-statement methods are replayed with the answer
   (`backends/sqlite3/compiler.py`); `_running.py` decides where the SQL runs.
+- **The fast lane** (`src/djox/_fast_lane`): while a `djox.QuerySet` is only
+  filtered with plain values (`exact`, `gt`, `in`, `isnull`...), ordered by
+  columns and sliced, it keeps a note (`SimpleQuery`) instead of building
+  Django's `Query`. Its reading methods reuse the SQL Django wrote once for
+  the same query *shape*, and Rust builds the instances
+  (`src/instances.rs`, with Django's converters). Asking for
+  `queryset.query` builds Django's `Query` from the note, so everything
+  else falls back to Django. Django writes the SQL on purpose: it is written
+  once per shape, so a second SQL writer in Rust would buy no speed.
 - **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
   djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
   `djox.Model`...) run unchanged on a small pool of djox's threads, not on
@@ -96,8 +105,8 @@ them, and it should teach them both along the way.
   run on a pooled thread that the block owns (asgiref's
   `ThreadSensitiveContext` sends the block's `sync_to_async()` calls there).
 - **Rust does the heavy, repetitive work** (running SQL, converting rows,
-  later compiling common queries). Python keeps the Django-facing API small
-  and readable.
+  building model instances). Python keeps the Django-facing API small and
+  readable.
 
 ### Things to know
 
@@ -114,6 +123,12 @@ them, and it should teach them both along the way.
   GIL and waiting for a connection, while the connection's thread runs a
   Python SQL function (which needs the GIL), would wait forever. Every
   `djox.Connection` method does `py.detach(...)` before `lock()`.
+- **The fast lane must give Django's answer, or step aside.** Each value is
+  prepared by its field when `filter()` runs, so errors come at the same
+  moment as in Django. A new shape's statement is kept only if the fast lane
+  computes the same parameters as Django did (value by value, type by type).
+  Anything a shape can't capture (integers too big for the column, an empty
+  `in`) is checked on every query.
 - **Replay only side-effect-free methods.** `compiler.replay()` runs a Django
   method again once its statement is answered. A method that sends signals or
   computes defaults (`save()`) must use `compiler.capture()` instead, or it
@@ -146,7 +161,10 @@ them, and it should teach them both along the way.
    at fixed points (`before_query`, `after_query`...), returning `None` to
    change nothing or a new value to replace it. Django's signals keep working
    (sent with `Signal.asend()`).
-6. The fast lane: Rust compiles common queries itself, cached per query shape.
+6. The fast lane (done): simple reads skip Django's query building and
+   compiler, reusing Django's SQL per query shape, and Rust builds the
+   instances. Next: writes (`aupdate`, `adelete`), `values()`, and Rust
+   converters for dates and decimals.
 
 Add features when someone needs them. If a change makes the core bigger, ask
 whether it could be a hook instead.

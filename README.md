@@ -59,13 +59,13 @@ Microseconds per call on a 4-core cloud VM, lower is better ([method and all num
 
 | | Django sync | Django async | `djox.Manager` | djox (raw SQL) |
 |---|---:|---:|---:|---:|
-| get one book by id | 305 | 660 | 575 | 190 |
-| fetch 20 books | 693 | 1,180 | 1,164 | 259 |
-| 100 gets at once (each) | | 586 | 388 | 104 |
+| get one book by id | 191 | 552 | 171 | 93 |
+| fetch 20 books | 491 | 1,000 | 333 | 126 |
+| 100 gets at once (each) | | 495 | 154 | 104 |
 
-`djox.Manager` runs Django's own query building and model instances, with the SQL on djox: it beats Django's async
-methods, most of all under load, because no query waits for Django's single worker thread. Raw djox shows what is left
-once Django's Python work moves to Rust (roadmap step 6).
+`djox.Manager` runs the SQL on djox, so no query waits for Django's single worker thread. Simple queries also take
+the fast lane: they reuse the SQL Django wrote for the same shape of query, and Rust builds the model instances. An
+async `aget()` on djox is then faster than Django's own sync `get()`.
 
 ## How it is built
 
