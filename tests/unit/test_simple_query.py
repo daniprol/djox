@@ -1,6 +1,7 @@
 """`SimpleQuery`, the fast lane's note of a query: slices, shapes, and Django's `Query` built from it."""
 
 import itertools
+from typing import Any
 
 import pytest
 from django.db.models import Q
@@ -64,3 +65,31 @@ def test_replay_builds_the_query_django_would_build() -> None:
     django_query.set_limits(2, 5)
     assert str(noted.query) == str(django_query)
     assert noted._simple_query is None, "asking for the query built it"
+
+
+def test_select_related_adds_to_the_relations_given_before() -> None:
+    noted = SimpleQuery().with_select_related(("author",)).with_select_related(("author", "editions"))
+    assert noted.select_related == ("author", "editions"), "each relation once, in the order given"
+    assert noted.shape != SimpleQuery().shape, "Django writes the joins into the SQL"
+    assert noted.without_select_related().select_related == ()
+
+
+def test_values_forget_select_related_like_django() -> None:
+    assert SimpleQuery().with_select_related(("author",)).with_values(("title",)).select_related == ()
+
+
+def test_replay_builds_djangos_select_related() -> None:
+    noted: Any = QuerySet(Book).select_related("author").filter(pages__gt=100)
+    assert noted._simple_query is not None, "select_related() was noted"
+    django_query = Query(Book)
+    django_query.add_q(Q(pages__gt=100))
+    django_query.add_select_related(["author"])
+    assert str(noted.query) == str(django_query)
+
+
+def test_prefetch_related_keeps_the_note() -> None:
+    # `Any`: django-stubs doesn't know Django's private `_prefetch_related_lookups`.
+    noted: Any = QuerySet(Book).filter(pages__gt=100).prefetch_related("editions").prefetch_related("author")
+    assert noted._simple_query is not None, "prefetching doesn't change the query"
+    assert noted._prefetch_related_lookups == ("editions", "author")
+    assert noted.prefetch_related(None)._prefetch_related_lookups == ()

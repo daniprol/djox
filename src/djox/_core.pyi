@@ -291,15 +291,19 @@ class ResultBuilder:
         connection: Any,
         model: type[Any] | None = None,
         model_state: type[Any] | None = None,
+        related: Sequence[RelatedModel] = (),
     ) -> None:
         """`names`: per column, the attribute of an instance or the key of a
         dict. `converters`: per column, `None` or `(functions, expression)`,
         like Django's `get_converters()`. `conversions`: per column, `None` or
         the Rust conversion doing the same (`djox._fast_lane.conversions`).
-        `model` and `model_state` are needed for `instances()` only."""
+        `model` and `model_state` are needed for `instances()` only.
+        `related`: the models `select_related()` adds; the model's own columns
+        end where the first one's begin."""
 
     def instances(self, rows: list[Row], alias: str, fetch_mode: Any = None) -> list[Any]:
-        """One model instance per row, from the database `alias`."""
+        """One model instance per row, from the database `alias`, with its
+        `select_related()` objects cached on it."""
 
     def tuples(self, rows: list[Row]) -> list[tuple[Any, ...]]:
         """One tuple of converted values per row."""
@@ -310,6 +314,25 @@ class ResultBuilder:
     @property
     def column_count(self) -> int:
         """How many columns each row must have."""
+
+class RelatedModel:
+    """A model `select_related()` adds to each instance a `ResultBuilder`
+    makes, like the author of a book: where its columns are in the row, and
+    Django's functions that cache it on its parent (and the parent on it)."""
+
+    def __init__(
+        self,
+        model: type[Any],
+        first_column: int,
+        end_column: int,
+        primary_key_column: int,
+        set_on_parent: Callable[[Any, Any], Any],
+        set_on_related: Callable[[Any, Any], Any],
+        related: Sequence[RelatedModel] = (),
+    ) -> None:
+        """Its columns are `row[first_column:end_column]`; a `NULL` at
+        `primary_key_column` means no related object. `related`: the models
+        `select_related()` adds to this one in turn."""
 
 # The exceptions follow PEP 249, like Python's `sqlite3`.
 

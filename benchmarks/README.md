@@ -1,7 +1,8 @@
 # Benchmarks
 
 The same queries through Django's ORM, plain `sqlite3` and djox, on a SQLite
-file with 10,000 books.
+file with 10,000 books, each with 3 chapters (for `select_related()` and
+`prefetch_related()`).
 
 ```bash
 cd benchmarks && uv run --reinstall-package djox python run.py   # prints the table, writes results/latest.json
@@ -33,21 +34,29 @@ Python 3.13, Django 6.1.
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
-| get one book by id | 187 | 247 | 58 | 7 | 605 | 436 | 214 | 89 |
-| fetch 20 books | 518 | 474 | 204 | 47 | 1,088 | 831 | 371 | 139 |
-| fetch 1,000 books | 8,478 | 10,469 | 4,693 | 1,314 | 12,824 | 9,844 | 4,667 | 1,187 |
-| count | 293 | 248 | 87 | 105 | 775 | 668 | 237 | 142 |
-| update one book | 121 | 158 | 54 | 16 | 495 | 443 | 215 | 108 |
-| insert one book | 176 | 228 | 169 | 56 | 533 | 594 | 522 | 128 |
-| two inserts in a transaction | 334 | 452 | 352 | 70 | 696 | 1,907 | 1,694 | n/a |
-| get or create (exists) | 186 | 243 | 65 | n/a | 588 | 512 | 159 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 632 | 1,175 | 1,097 | n/a |
-| 100 gets at once | n/a | n/a | n/a | n/a | 559 | 444 | 186 | 77 |
-| 100 get or create at once | n/a | n/a | n/a | n/a | 478 | 500 | 215 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | n/a | 661 | 1,349 | 1,247 | n/a |
+| get one book by id | 216 | 186 | 61 | 4 | 507 | 371 | 132 | 63 |
+| fetch 20 books | 543 | 460 | 120 | 26 | 957 | 753 | 216 | 99 |
+| fetch 1,000 books | 7,515 | 7,662 | 2,469 | 622 | 9,864 | 8,920 | 3,055 | 693 |
+| count | 283 | 278 | 95 | 67 | 584 | 420 | 177 | 127 |
+| update one book | 138 | 110 | 54 | 9 | 304 | 261 | 157 | 73 |
+| insert one book | 159 | 149 | 167 | 45 | 331 | 346 | 365 | 104 |
+| two inserts in a transaction | 325 | 318 | 305 | 51 | 535 | 1,091 | 1,247 | n/a |
+| get or create (exists) | 194 | 195 | 61 | n/a | 482 | 341 | 147 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 481 | 871 | 926 | n/a |
+| 20 chapters with their book | 694 | 802 | 176 | n/a | 1,195 | 1,006 | 293 | n/a |
+| 1,000 chapters with their book | 13,441 | 13,830 | 4,901 | n/a | 15,413 | 14,336 | 5,661 | n/a |
+| 20 books with their chapters | 1,884 | 1,812 | 1,303 | n/a | 2,368 | 2,340 | 1,723 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 426 | 331 | 142 | 58 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 407 | 268 | 118 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 460 | 779 | 773 | n/a |
 
 This VM's speed changes by about 20% from one run to the next (every column
 moves together), so compare numbers within one table, not across runs.
+
+"20 chapters with their book" is `select_related("book")` on a filtered,
+sliced query; "1,000 chapters with their book" the same without a filter.
+"20 books with their chapters" is `prefetch_related("chapters")` on 20 books:
+two queries.
 
 "Two inserts in a transaction" is `atomic()` around two `create()`s. Django
 has no async `atomic()`, so "django async" runs that sync function with
@@ -60,15 +69,24 @@ two `acreate()`s.
   (Django's own manager on djox's `ENGINE`) is within this VM's noise of
   Django's own SQLite backend.
 - **The fast lane makes sync code three times faster.** With `djox.Manager`,
-  a sync `get()` takes 58 µs against 187 µs on Django, `count()` 87 against
-  293, `update()` 54 against 121, and 1,000 books are built in half the
-  time. The fast lane skips Django's query building and SQL compiler (the
+  a sync `get()` takes 61 µs against 216 µs on Django, `count()` 95 against
+  283, `update()` 54 against 138, and 1,000 books are built in a third of
+  the time. The fast lane skips Django's query building and SQL compiler (the
   SQL of each query shape is written once, by Django), and Rust builds the
   instances and converts their dates and decimals.
 - **Async code gains as much, plus no worker thread.** An async `aget()`
-  takes 214 µs against 605 µs with Django's `aget()`, and 1,000 books 4.7 ms
-  against 12.8 ms. What is left over the sync numbers is the round trip to
+  takes 132 µs against 507 µs with Django's `aget()`, and 1,000 books 3.1 ms
+  against 9.9 ms. What is left over the sync numbers is the round trip to
   djox's threads (below).
+- **`select_related()` takes the fast lane too.** 20 chapters with their
+  book take 176 µs in sync code against 694 µs on Django, and 293 µs async
+  against 1,195 µs: Django writes the join once, and Rust builds both
+  objects of each row.
+- **`prefetch_related()` gains less.** Its main query takes the fast lane,
+  but the prefetching query is built and run by Django's own prefetching
+  (on a djox thread, for async code), so 20 books with their chapters take
+  1.7 ms against 2.4 ms with Django's async ORM. Putting the prefetching
+  queries on the fast lane too is a possible next step.
 - **Inserts and transactions don't take the fast lane.** `acreate()` and
   `atomic()` blocks run Django's own code, so they are the same with it or
   without it.

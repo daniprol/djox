@@ -20,12 +20,16 @@ and run against djox.
 | `get_or_create/`, `bulk_create/` | the same folders                     | `get_or_create()`, `update_or_create()`, `bulk_create()` |
 | `many_to_one/`, `many_to_many/`, `reverse_lookup/` | the same folders   | Related managers and lookups across relations |
 | `custom_managers/`, `defer/`, `dates/`, `datetimes/`, `get_earliest_or_latest/`, `null_queries/`, `or_lookups/`, `from_db_value/` | the same folders | Custom managers and `QuerySet`s, `defer()`/`only()`, `dates()`, `datetimes()`, `earliest()`/`latest()`, `None` in filters, OR-ing querysets, field converters |
+| `select_related/`, `select_related_onetoone/`, `select_related_regress/` | `select_related*/tests.py` | `select_related()` on `djox.QuerySet`: the fast lane's joins, and the related objects Rust builds |
+| `prefetch_related/` | `prefetch_related/{tests,test_prefetch_related_objects,test_uuid}.py` | `prefetch_related()` on `djox.QuerySet`, after a main query on the fast lane |
 
 The models of `basic/`, `lookup/`, `ordering/` and of the query apps after
 them in the table are left as Django wrote them: `DJOX_MODELS` (in
 `tests/settings.py`) switches them to djox, so their sync tests run on
-`djox.QuerySet`, with the fast lane's notes. (Most of those tests use more
-than the fast lane can note, so they check that djox steps aside correctly.)
+`djox.QuerySet`, with the fast lane's notes. (Most of the query tests use more
+than the fast lane can note, so they check that djox steps aside correctly.
+The async paths of `select_related()` and `prefetch_related()` are tested in
+`tests/e2e/test_related_objects.py`.)
 
 Like Django's own test settings, `tests/settings.py` has a second database,
 `"other"` (for tests with `databases = {"default", "other"}`), and installs

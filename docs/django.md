@@ -65,7 +65,7 @@ and the event loop never waits for a thread.
 | `adelete()` | djox when Django can delete with one statement (no `on_delete` work and no delete signal receivers); else a djox thread |
 | `aget_or_create()` | djox for the lookup; a djox thread to create |
 | `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | a djox thread |
-| anything with `prefetch_related()` | a djox thread |
+| `prefetch_related()` | a djox thread, with the main query on the fast lane when it is simple (below) |
 | models with parent models (multi-table inheritance): `acreate()`, `aupdate()` | a djox thread |
 | model methods `asave()`, `adelete()`, `arefresh_from_db()` | a djox thread, on a `djox.Model` (below) or a model switched by `DJOX_MODELS`; Django's worker thread otherwise |
 | related managers: `author.books.acreate()`, `pizza.toppings.aadd()`, `aremove()`, `aclear()`, `aset()`, `aget_or_create()`, `aupdate_or_create()` | a djox thread (their queries, like `author.books.filter(...)`, run on djox) |
@@ -102,6 +102,34 @@ through. It sees the database as it was when it started.
 Inside a sync transaction (below), the rows are read all at once on the
 transaction's connection, the only one that sees its writes.
 
+### Related objects: `select_related()` and `prefetch_related()`
+
+Both work as in Django, sync and async:
+
+```python
+books = [book async for book in Book.objects.select_related("author")]
+authors = [author async for author in Author.objects.prefetch_related("books")]
+await djox.aprefetch_related_objects(books, "editions")  # on a list you already have
+```
+
+`select_related()` joins the related tables into the query, so it is one
+query like any other: on djox, and on the fast lane (below) when the rest of
+the query is simple. Rust then builds each object and its related objects,
+and caches them on each other with Django's own setters.
+
+`prefetch_related()` runs the main query (on the fast lane when it is
+simple) and then Django's own `prefetch_related_objects()`, unchanged,
+together on one of djox's threads: one more query per relation, one round
+trip from the event loop for all of them, and the event loop never waits. Every kind of relation and `Prefetch()` object works as in Django.
+`aiterator(chunk_size=...)` prefetches for each chunk, like Django's.
+Inside a transaction the prefetching runs on the transaction's thread, so it
+sees its writes.
+
+Why not await each prefetching query on djox, like everything else? Django
+runs those queries from deep inside its own code, level after level, and
+each level needs the one before it. On a thread, all of them cost one round
+trip from the event loop; awaited, each would cost one.
+
 ### The fast lane
 
 Simple queries skip Django's query building and SQL compiler, and get their
@@ -118,6 +146,9 @@ A query takes the fast lane when it is:
   `Meta.ordering`), reversed, and sliced (`[10:20]`);
 - optionally narrowed to some of the model's own columns with `values(...)`
   or `values_list(...)` (`flat=True` included);
+- optionally joined with `select_related("author", "author__publisher")`
+  (relations by name; not to child models of multi-table inheritance), and
+  followed by any `prefetch_related()`;
 - and then read or written with one of these methods:
 
 | Kind | Async | Sync |
@@ -136,8 +167,8 @@ slice and columns, with any values), and keeps it. Rust then builds the
 results: model instances, dicts or tuples, converting dates, times,
 decimals and booleans the way Django's converters do (and leaving any value
 it doesn't handle to Django's converter). Everything else (`exclude()`,
-`Q()`, `F()`, joins like `author__name`, `annotate()`, `select_related()`,
-models with parent models) runs as described above, with the same results.
+`Q()`, `F()`, joins like `author__name`, `annotate()`, `only()`,
+`select_related()` with no names, models with parent models) runs as described above, with the same results.
 Errors are raised where Django raises them: a wrong field name or value
 still raises at `filter()`.
 
