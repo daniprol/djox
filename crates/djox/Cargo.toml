@@ -1,0 +1,17 @@
+[package]
+name = "djox"
+description = "The djox backends: run SQL for async Python without blocking it. SQLite today, Postgres later"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+djox-core = { path = "../djox-core" }
+# SQLite backend
+crossbeam-channel = "0.5"
+rusqlite = { version = "0.41", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.54", features = ["rt-multi-thread"] }

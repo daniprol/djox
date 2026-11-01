@@ -1,0 +1,12 @@
+/target
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+.foliq/
+site/
+*.sqlite3*

@@ -1,0 +1,44 @@
+{
+  "machine": "Linux x86_64, Python 3.13.18, Django 6.1.2",
+  "book_count": 10000,
+  "microseconds_per_call": {
+    "django sync": {
+      "get one book by id": 377.6483809999718,
+      "fetch 20 books": 838.4523560000616,
+      "fetch 1,000 books": 15266.90520000102,
+      "count": 418.42110399988997,
+      "insert one book": 425.8632599999146
+    },
+    "sqlite3": {
+      "get one book by id": 11.346279000008508,
+      "fetch 20 books": 76.92973499979416,
+      "fetch 1,000 books": 1435.3256999993391,
+      "count": 159.90561700004946,
+      "insert one book": 76.24385600001915
+    },
+    "django async": {
+      "get one book by id": 854.2853225000044,
+      "fetch 20 books": 1437.0327149999866,
+      "fetch 1,000 books": 16681.425579999996,
+      "count": 966.6994649999197,
+      "insert one book": 649.577994000083,
+      "100 gets at once": 685.6232799987083
+    },
+    "djox": {
+      "get one book by id": 207.4050009999837,
+      "fetch 20 books": 299.0040899999258,
+      "fetch 1,000 books": 1351.831840001978,
+      "count": 340.89453000001413,
+      "insert one book": 230.26849000007132,
+      "100 gets at once": 144.07895999966058
+    },
+    "django + djox": {
+      "get one book by id": 649.8909064999907,
+      "fetch 20 books": 1260.2243909998379,
+      "fetch 1,000 books": 16367.73451999943,
+      "count": 707.3394040000949,
+      "insert one book": 318.51190799989126,
+      "100 gets at once": 452.52439000023514
+    }
+  }
+}
