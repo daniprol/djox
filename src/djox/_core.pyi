@@ -239,11 +239,14 @@ class InstanceBuilder:
         model: type[Any],
         attnames: Sequence[str],
         converters: Sequence[tuple[Sequence[Callable[[Any, Any, Any], Any]], Any] | None],
+        conversions: Sequence[tuple[Any, ...] | None],
         connection: Any,
         model_state: type[Any],
     ) -> None:
         """`attnames`: the attribute of each column. `converters`: per column,
-        `None` or `(functions, expression)`, like Django's `get_converters()`."""
+        `None` or `(functions, expression)`, like Django's `get_converters()`.
+        `conversions`: per column, `None` or the Rust conversion doing the same
+        (`djox._fast_lane.conversions`)."""
 
     def build(self, rows: list[Row], alias: str, fetch_mode: Any = None) -> list[Any]:
         """One instance per row, from the database `alias`."""
