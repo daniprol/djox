@@ -27,7 +27,7 @@ uv add djox  # or: pip install djox  (not on PyPI yet: build from source with `u
 ## Quickstart
 
 ```python
---8<-- "docs/examples/quickstart.py"
+--8 < --"docs/examples/quickstart.py"
 ```
 
 - SQL uses Django's `%s` placeholders (`%%` for a literal `%`).

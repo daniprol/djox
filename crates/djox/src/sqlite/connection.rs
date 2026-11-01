@@ -7,7 +7,7 @@
 //! `djox.Connection` (used by Django's sync ORM) calls these methods on the
 //! caller's thread, after letting other Python threads run.
 
-use djox_core::{Error, Executed, Result, Rows, Value};
+use djox_core::{ChunkRequests, Error, Executed, Result, Rows, Value};
 use rusqlite::limits::Limit;
 use rusqlite::types::{ToSqlOutput, ValueRef};
 use rusqlite::{ErrorCode, OpenFlags, TransactionBehavior, params_from_iter};
@@ -169,13 +169,65 @@ impl SqliteConnection {
             .map_err(to_djox_error)?;
         // `while let Some(row) = ...` loops until `next()` returns `None`: no more rows.
         while let Some(row) = cursor.next().map_err(to_djox_error)? {
-            let mut values = Vec::with_capacity(column_count);
-            for index in 0..column_count {
-                values.push(from_sqlite(row.get_ref(index).map_err(to_djox_error)?));
-            }
-            rows.push(values);
+            rows.push(values_of(row, column_count)?);
         }
         Ok(Rows { columns, rows })
+    }
+
+    /// Runs a query written with Django's `%s` placeholders and answers each
+    /// chunk `requests` asks for with the next `chunk_size` rows, until there
+    /// are no more rows or the caller stops asking (see `djox_core::RowStream`).
+    ///
+    /// It returns when the stream is over: the statement is finished then.
+    pub fn stream(&mut self, sql: &str, parameters: &[Value], chunk_size: usize, requests: &ChunkRequests) {
+        // Nothing runs until the first chunk is asked for.
+        let Some(mut reply) = requests.next() else { return };
+        let sql = to_question_marks(sql);
+        // `prepare` rather than `prepare_cached`: a stream's connection is used once.
+        let mut statement = match self.connection.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(error) => return reply.send(Err(to_djox_error(error))),
+        };
+        if !statement.readonly() {
+            return reply.send(Err(Error::Programming(
+                "only a query that reads can be streamed".to_string(),
+            )));
+        }
+        let columns: Vec<String> = statement.column_names().map(String::from).collect();
+        let column_count = columns.len();
+        let mut cursor = match statement.query(params_from_iter(parameters.iter().map(to_sqlite))) {
+            Ok(cursor) => cursor,
+            Err(error) => return reply.send(Err(to_djox_error(error))),
+        };
+        loop {
+            let mut chunk = Vec::with_capacity(chunk_size);
+            let mut finished = false;
+            while chunk.len() < chunk_size {
+                // `match` on the result of `next()`: a row, the end, or an error.
+                match cursor.next() {
+                    Ok(Some(row)) => match values_of(row, column_count) {
+                        Ok(values) => chunk.push(values),
+                        Err(error) => return reply.send(Err(error)),
+                    },
+                    Ok(None) => {
+                        finished = true;
+                        break;
+                    }
+                    Err(error) => return reply.send(Err(to_djox_error(error))),
+                }
+            }
+            reply.send(Ok(Rows {
+                columns: columns.clone(),
+                rows: chunk,
+            }));
+            if finished {
+                return;
+            }
+            match requests.next() {
+                Some(next_reply) => reply = next_reply,
+                None => return, // the caller stopped early
+            }
+        }
     }
 
     /// How many rows the statement that just ran changed, if it is one that changes rows.
@@ -245,6 +297,15 @@ impl SqliteConnection {
             last_insert_id: self.connection.last_insert_rowid(),
         })
     }
+}
+
+/// The values of one row, as djox values.
+fn values_of(row: &rusqlite::Row<'_>, column_count: usize) -> Result<Vec<Value>> {
+    let mut values = Vec::with_capacity(column_count);
+    for index in 0..column_count {
+        values.push(from_sqlite(row.get_ref(index).map_err(to_djox_error)?));
+    }
+    Ok(values)
 }
 
 /// Whether `sql` is an `INSERT`, `UPDATE`, `DELETE` or `REPLACE`: the

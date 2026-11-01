@@ -1,9 +1,9 @@
 """Where a query of `djox.QuerySet` runs: on djox's async database, in an
 open sync transaction, or, for sync code, on Django's own connection.
 
-`djox.QuerySet` builds SQL with Django's compiler, then calls `fetch_all()` or
-`execute()` here to run it (from sync code, `fetch_all_now()` and
-`execute_now()`). Usually the SQL goes to the async `djox.Database` of the
+`djox.QuerySet` builds SQL with Django's compiler, then calls `fetch_all()`,
+`stream_rows()` or `execute()` here to run it (from sync code,
+`fetch_all_now()` and `execute_now()`). Usually the SQL goes to the async `djox.Database` of the
 alias (`djox.connections[alias]`), which never blocks the event loop.
 
 There is one exception. When this code runs inside a sync transaction on the
@@ -24,7 +24,7 @@ Both ways do what Django's cursors do: turn djox's exceptions into Django's
 
 import asyncio
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
@@ -70,6 +70,43 @@ async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any
                 rows = await djox.connections[alias].fetch_all(sql, parameters)
         log_query(wrapper, sql, parameters, started)
     return rows
+
+
+async def stream_rows(alias: str, sql: str, parameters: Sequence[Any], chunk_size: int) -> "AsyncIterator[list[Row]]":
+    """Run a query and yield its rows `chunk_size` at a time, each chunk read
+    from the database when the previous one has been used (`aiterator()`).
+
+    The rows come from a connection of the stream's own (`Database.stream_rows()`).
+    The hooks and Django's query log see the statement once, when its first
+    chunk arrives: that is when Django's cursor would have run it. If the
+    caller stops early, the rest of the rows are never read.
+    """
+    if open_sync_transaction(alias) is not None:
+        # Only the transaction's connection sees its writes, and it runs one
+        # statement at a time: read every row there, then hand them out.
+        rows = await fetch_all(alias, sql, parameters)
+        for start in range(0, len(rows), chunk_size):
+            yield rows[start : start + chunk_size]
+        return
+    wrapper = django_connections[alias]
+    query = hooks.run_before_query(hooks.Query(alias, sql, parameters))
+    started = time.perf_counter()
+    try:
+        with wrapper.wrap_database_errors:
+            stream = djox.connections[alias].stream_rows(query.sql, query.parameters, chunk_size=chunk_size)
+            rows = await stream.next_chunk()
+    except BaseException as error:
+        hooks.run_after_query(query, hooks.QueryFinished(time.perf_counter() - started, error))
+        raise
+    hooks.run_after_query(query, hooks.QueryFinished(time.perf_counter() - started))
+    log_query(wrapper, query.sql, query.parameters, started)
+    # A chunk shorter than `chunk_size` is the last one.
+    while len(rows) == chunk_size:
+        yield rows
+        with wrapper.wrap_database_errors:
+            rows = await stream.next_chunk()
+    if rows:
+        yield rows
 
 
 def fetch_all_now(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]":
