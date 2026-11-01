@@ -3,7 +3,7 @@
 djox is a truly async Django ORM with a Rust core. Django keeps doing what it
 does well (models, migrations, admin, the QuerySet language); djox replaces the
 part that talks to the database, so `await Book.objects.aget(...)` really runs
-without blocking. SQLite first; Postgres later. Read this file before changing
+without blocking. SQLite and Postgres. Read this file before changing
 anything.
 
 ## The main rule: code that teaches
@@ -48,7 +48,7 @@ them, and it should teach them both along the way.
 | Path                | What it is                                                         |
 |---------------------|--------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types (`Value`, `Rows`, `Executed`, `Reply`, `Error`) and the `Database` trait. Small and stable |
-| `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later   |
+| `crates/djox`       | The backends, one folder each: `sqlite/` and `postgres/`            |
 | `src/*.rs`          | The Python extension `djox._core` (PyO3): `Database` and `RowStream` (async), `Connection` and `Cursor` (sync, for Django), SQL functions, value conversions, `ResultBuilder` (the fast lane's results), exceptions |
 | `src/djox`          | The Python package, with Django's `ENGINE` in `backends/sqlite3/` and `djox.connections` |
 | `tests`             | Python tests: `unit/`, `integration/`, `e2e/`, `django_suite/` (see Testing) |
@@ -62,13 +62,21 @@ them, and it should teach them both along the way.
   two backends; that is accepted, so each stays easy to read and to change.
 - **The contract of a backend** (`crates/djox-core/src/database.rs`): SQL uses
   Django's `%s` placeholders; methods never block (they send the statement and
-  return a `Reply`); statements sent in order run in order; callers never see
-  "database is locked" under load.
+  return a `Reply`); a statement sent after another one's answer sees its
+  writes; callers never see "database is locked" under load.
 - **The Python layer only knows the trait.** `djox.Database` holds an
   `Arc<dyn Database>`; each backend adds one constructor
-  (`Database.sqlite(...)`, later `Database.postgres(...)`).
+  (`Database.sqlite(...)`, `Database.postgres(...)`).
 - **SQLite** (`crates/djox/src/sqlite`): one writer thread with its own queue,
   a few reader threads sharing another queue, WAL mode. See the module docs.
+- **Postgres** (`crates/djox/src/postgres`): a pool of connections
+  (`deadpool-postgres` on `tokio-postgres`) on a small tokio runtime the
+  database owns; statements prepared once per connection; streams on a
+  connection of their own. Its `ENGINE` (`src/djox/backends/postgresql`) is
+  Django's Postgres backend, still on psycopg for sync code; only async code
+  runs on djox's pool. Two drivers are two clients of the server, so (unlike
+  SQLite) they can't lose each other's writes. Rust returns typed values
+  (`Value::Decimal`, `DateTimeUtc`...) so Python gets what psycopg gives Django.
 - **Django's `ENGINE`** (`src/djox/backends/sqlite3`): Django's own SQLite
   backend classes, subclassed, changing only what touches SQLite. Each Django
   thread gets a `djox.Connection` (sqlite3-shaped, runs on the caller's
@@ -186,7 +194,9 @@ them, and it should teach them both along the way.
    `values()` and `values_list()`, with dates, decimals and booleans
    converted in Rust. `aiterator()` streams its rows (done). Next: `F()` in
    `update()`, joins, `annotate()`.
-7. Related objects (done): `select_related()` on the fast lane (Rust builds
+7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`.
+   Next: TLS, reading arrays, ranges and `hstore` from async code.
+8. Related objects (done): `select_related()` on the fast lane (Rust builds
    the related objects and calls Django's setters to cache them), and
    `prefetch_related()` with its main query on the fast lane and Django's
    own prefetching, both on a djox thread (`src/djox/prefetch.py`).
@@ -223,6 +233,11 @@ like an example of how to use djox.
   with a count of unchanged, adapted and unsupported Django tests. Ported
   files stay as Django wrote them (no ruff, mypy or pyrefly on them), and run
   only on the Django version they were copied from.
+- **Postgres too.** With `DJOX_POSTGRES_URL` set (a server's URL), the
+  Rust and Python Postgres tests run; `DJOX_TEST_DATABASE=postgres` also
+  runs the Django tests (djox's and the ported ones) on
+  `djox.backends.postgresql`. Mark a test of what only the SQLite backend
+  does `@pytest.mark.sqlite_only("why")`. CI runs both.
 - **Every supported Django version** runs in CI: Django's compiler internals
   change between releases.
 

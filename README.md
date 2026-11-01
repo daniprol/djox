@@ -1,6 +1,6 @@
 # djox
 
-**Truly async Django ORM with a Rust core 🦀** Fast and readable, with hooks for library authors. SQLite first.
+**Truly async Django ORM with a Rust core 🦀** Fast and readable, with hooks for library authors. SQLite and Postgres.
 
 Django's async ORM methods (`aget`, `acreate`, `async for`...) run the sync ORM on a worker thread and wait for it.
 djox runs queries on connections that Rust owns, each on its own thread, and wakes Python only when the answer is
@@ -8,7 +8,7 @@ ready. Django keeps doing what it does well: models, migrations, admin and the Q
 
 > **Status: early.** djox has its engine, `djox.Database`, a Django `ENGINE` that runs Django's own queries on the
 > same SQLite, `djox.Manager` (Django's QuerySet methods on djox, with a fast lane for simple queries, sync and
-> async), async transactions (`djox.atomic()`) and hooks. Postgres comes later. See the [roadmap](docs/roadmap.md).
+> async), async transactions (`djox.atomic()`), hooks, and a Postgres backend. See the [roadmap](docs/roadmap.md).
 
 ## Quickstart
 
@@ -77,7 +77,7 @@ Django's own sync `get()`.
 | Path                | What it is                                                          |
 |---------------------|---------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
-| `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
+| `crates/djox`       | The backends, one folder each: `sqlite/` and `postgres/`             |
 | `src/*.rs`          | The Python extension `djox._core` (PyO3)                             |
 | `src/djox`          | The Python package, and Django's `ENGINE` (`djox.backends.sqlite3`)  |
 

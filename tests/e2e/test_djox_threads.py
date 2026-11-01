@@ -44,6 +44,9 @@ async def test_aget_or_create_creates_once_then_gets() -> None:
     assert (again.pk, created) == (author.pk, False)
 
 
+@pytest.mark.sqlite_only(
+    "SQLite's one writer makes get_or_create() safe without a unique constraint; Postgres needs one, as in Django"
+)
 async def test_get_or_create_at_once_creates_one_row() -> None:
     # Writers take turns, so twenty tasks asking at once create one author.
     results = await asyncio.gather(*(Author.objects.aget_or_create(name="Ursula K. Le Guin") for _ in range(20)))
@@ -122,6 +125,23 @@ async def test_they_dont_wait_for_djangos_sync_thread() -> None:
     finally:
         release.set()
         await busy
+
+
+async def test_many_blocks_at_once_share_a_few_threads() -> None:
+    # Each pooled thread holds a connection: on Postgres, a hundred blocks at
+    # once must not open a hundred connections.
+    thread_names: set[str] = set()
+
+    async def add_author(number: int) -> None:
+        async with djox.atomic():
+            author = await Author.objects.acreate(name=f"Author {number}")
+            await sync_to_async(lambda: thread_names.add(threading.current_thread().name), thread_sensitive=True)()
+            await author.asave()
+
+    await asyncio.gather(*(add_author(number) for number in range(50)))
+
+    assert await Author.objects.acount() == 50
+    assert len(thread_names) <= _threads.MAX_WRITING_THREADS
 
 
 # ---------------------------------------------------------------- inside a transaction

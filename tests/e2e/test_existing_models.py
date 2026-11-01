@@ -10,6 +10,7 @@ from io import StringIO
 from typing import Any
 
 import pytest
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.db.models.signals import m2m_changed, pre_save
@@ -90,6 +91,24 @@ async def test_a_librarys_models_run_on_djox_too() -> None:
     assert (await User.objects.aget(username="dani")).first_name == "Dani"
 
 
+def test_a_related_managers_queryset_stays_unchanged_by_its_copies() -> None:
+    # Django 6.1's related managers set their `QuerySet` up "in place"
+    # (`_avoid_cloning()`), calling `using()` there for a manager bound to a
+    # database. djox's copy made by `using()` must not stay "in place" for
+    # good, or filtering it would change it (and `get_or_create()`, which
+    # calls `get()` twice, would fail).
+    shelf = Shelf.objects.create(name="Hall")
+    shelf.labels.add(Label.objects.create(text="red"), Label.objects.create(text="blue"))
+    labels = shelf.labels.db_manager("default").all()
+    assert [label.text for label in labels.filter(text="blue")] == ["blue"]
+    assert labels.count() == 2
+
+
+def test_a_switched_querysets_errors_name_its_class() -> None:
+    with pytest.raises(AttributeError, match="'ShelfQuerySet' object has no attribute 'missing'"):
+        Shelf.objects.wide().missing  # noqa: B018  # the attribute lookup is the test
+
+
 def test_a_switched_queryset_can_be_pickled() -> None:
     # Cached querysets are pickled: the class must be found again.
     queryset = Shelf.objects.wide()
@@ -97,6 +116,9 @@ def test_a_switched_queryset_can_be_pickled() -> None:
     assert type(again) is type(queryset)
 
 
+@pytest.mark.skipif(
+    "auth" in getattr(settings, "MIGRATION_MODULES", {}), reason="auth's migrations are off (Postgres test settings)"
+)
 def test_migrations_dont_see_djox() -> None:
     # `auth`'s `UserManager` is written down in its migrations: switching it
     # to djox must not look like a change.

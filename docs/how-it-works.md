@@ -53,6 +53,43 @@ The event loop never waits.
   that connection, never one of the shared readers, and the thread ends with
   the stream.
 
+## The Postgres backend
+
+Postgres is a server: a connection is a socket, and many connections can
+read and write at once. So there is no single writer: `Database.postgres()`
+keeps a pool of connections (`deadpool-postgres`, 10 by default) on a small
+runtime of async Rust (`tokio`, two threads) that the database owns.
+Python sends a statement, a task borrows a free connection, runs it, and
+completes Python's Future; the event loop never waits, and no Python
+thread is used.
+
+```text
+  Python (asyncio)          Rust (tokio, 2 threads)
+  ─────────────────         ──────────────────────────────────────────
+  await fetch_all(...) ─►  task: borrow a connection ─► run ─┐
+  await execute(...)   ─►  task: borrow a connection ─► run ─┼─► Postgres server
+  await execute(...)   ─►  task: borrow a connection ─► run ─┘
+```
+
+- **Prepared statements.** Each connection prepares a statement the first
+  time it sees its SQL and keeps it, so the same query costs one round trip
+  afterwards. Django writes the same SQL for the same query shape, so a few
+  hundred statements cover an app.
+- **`%s` becomes `$1`.** Django's placeholders are turned into Postgres's
+  numbered ones. Numbers go to the server in binary; everything else goes
+  as text and the server reads it as the column's type, as psycopg does.
+- **Errors are sorted by SQLSTATE class**, like psycopg sorts them: `23...`
+  is an `IntegrityError`, `22...` a `DataError`, `42...` a
+  `ProgrammingError`.
+- **Streams** open a connection of their own, in a read-only transaction,
+  and read the query through a portal (a server-side cursor) a chunk at a
+  time.
+
+Django's sync code stays on Django's own backend and psycopg: two drivers
+on two sockets are two clients of the server, so nothing has to be shared.
+Async queries inside a sync transaction run on that transaction's psycopg
+connection, as on SQLite.
+
 ## Django's own queries
 
 Django's sync ORM (and everything built on it: migrations, the admin, the
@@ -251,13 +288,14 @@ writers.
 | Path                | What it is                                                          |
 |---------------------|---------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
-| `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
+| `crates/djox`       | The backends, one folder each: `sqlite/` and `postgres/`            |
 | `src/*.rs`          | The Python extension `djox._core`: `Database`, `RowStream`, `Connection`, `Cursor`, `ResultBuilder` and its conversions |
-| `src/djox`          | The Python package: Django's `ENGINE` in `backends/sqlite3`, `djox.Manager` and `djox.QuerySet`, the fast lane in `_fast_lane` |
+| `src/djox`          | The Python package: Django's `ENGINE`s in `backends/sqlite3` and `backends/postgresql`, `djox.Manager` and `djox.QuerySet`, the fast lane in `_fast_lane` |
 
-Each backend owns everything about its database. Postgres will be a new
-folder with its own connection pool, behind the same `Database` trait, and
-`djox.Database.postgres(...)` next to `djox.Database.sqlite(...)`.
+Each backend owns everything about its database (connections, threads or
+pool, value conversions, placeholders, errors) in its own folder, behind the
+same `Database` trait: `djox.Database.sqlite(...)` and
+`djox.Database.postgres(...)` give the same Python object.
 
 The Rust code is written for Python developers who have never seen Rust:
 plain names, straight-line code, and comments that explain each Rust feature

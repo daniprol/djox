@@ -2,8 +2,8 @@
 //!
 //! The class holds the backend behind the `Database` trait, so the same
 //! Python class (and every method on it) works for every backend. Each
-//! backend only adds a constructor: `Database.sqlite(...)` today,
-//! `Database.postgres(...)` later.
+//! backend only adds a constructor: `Database.sqlite(...)` and
+//! `Database.postgres(...)`.
 //!
 //! Each method sends its statement to the backend right away and returns an
 //! `asyncio.Future` that the backend finishes when the answer arrives (see
@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use djox::postgres::{PostgresDatabase, PostgresSettings};
 use djox::sqlite::{SqliteConnection, SqliteDatabase, SqliteSettings};
 use djox::{Database, Rows, Value};
 use pyo3::exceptions::PyValueError;
@@ -27,7 +28,7 @@ use crate::errors::to_python_error;
 use crate::values::{parameters_from_python, row_to_python, rows_to_python};
 
 /// A database used from async code. Make one with a backend's constructor,
-/// like `Database.sqlite("app.sqlite3")`.
+/// like `Database.sqlite("app.sqlite3")` or `Database.postgres("postgresql://localhost/app")`.
 ///
 /// `frozen` means Python can't set attributes on it, which lets many threads
 /// use it at once without extra locking.
@@ -36,7 +37,7 @@ pub struct PythonDatabase {
     /// The backend. `Arc` is a shared pointer (like a Python reference), and
     /// `dyn Database` means "any type that implements the `Database` trait".
     backend: Arc<dyn Database>,
-    /// Where the database is, for `repr()`: a file path, later a server address.
+    /// Where the database is, for `repr()`: a file path, or a server's address and database name.
     location: String,
 }
 
@@ -99,6 +100,31 @@ impl PythonDatabase {
             return Err(error);
         }
         let backend = opened.map_err(to_python_error)?;
+        Ok(PythonDatabase {
+            backend: Arc::new(backend),
+            location,
+        })
+    }
+
+    /// Opens a pool of connections to a Postgres server.
+    ///
+    /// `connection` is a URL (`"postgresql://user:password@localhost:5432/app"`)
+    /// or libpq's `key=value` words (`"host=localhost dbname=app user=django"`).
+    /// `pool_size` is the most connections open at once. `time_zone` is
+    /// the session's time zone (`SET TIME ZONE`), like Django sets it.
+    ///
+    /// It opens one connection right away, so wrong settings fail here.
+    #[staticmethod]
+    #[pyo3(signature = (connection, *, pool_size = 10, time_zone = None))]
+    fn postgres(py: Python<'_>, connection: String, pool_size: usize, time_zone: Option<String>) -> PyResult<Self> {
+        let mut settings = PostgresSettings::new(connection);
+        settings.pool_size = pool_size;
+        settings.time_zone = time_zone;
+        let location = settings.describe();
+        // Connecting waits for the network: `detach` lets other Python threads run meanwhile.
+        let backend = py
+            .detach(|| PostgresDatabase::open(settings))
+            .map_err(to_python_error)?;
         Ok(PythonDatabase {
             backend: Arc::new(backend),
             location,
@@ -192,8 +218,10 @@ impl PythonDatabase {
 
     /// Closes the database. Statements already sent still finish; new ones
     /// raise `DatabaseClosedError`. Closing twice does nothing.
-    fn close(&self) {
-        self.backend.close();
+    fn close(&self, py: Python<'_>) {
+        // Closing waits for the statements already sent, whose answers need
+        // the GIL: let go of it meanwhile.
+        py.detach(|| self.backend.close());
     }
 
     /// Whether `close()` was called.
@@ -202,7 +230,7 @@ impl PythonDatabase {
         self.backend.is_closed()
     }
 
-    /// The backend's short name, like `"sqlite"`.
+    /// The backend's short name: `"sqlite"` or `"postgres"`.
     #[getter]
     fn backend(&self) -> &str {
         self.backend.backend_name()
@@ -214,8 +242,8 @@ impl PythonDatabase {
     }
 
     #[pyo3(signature = (*_exception_info))]
-    fn __exit__(&self, _exception_info: &Bound<'_, PyTuple>) {
-        self.backend.close();
+    fn __exit__(&self, py: Python<'_>, _exception_info: &Bound<'_, PyTuple>) {
+        self.close(py);
     }
 
     fn __repr__(&self) -> String {
@@ -270,7 +298,7 @@ impl RowStream {
 pub struct Executed {
     /// How many rows the statement inserted, changed or deleted.
     rows_affected: u64,
-    /// The id of the last inserted row (SQLite's `rowid`).
+    /// The id of the last inserted row (SQLite's `rowid`; always 0 on Postgres, which uses `RETURNING`).
     last_insert_id: i64,
 }
 

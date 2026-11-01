@@ -21,7 +21,7 @@ use std::panic::AssertUnwindSafe;
 use djox_core::{Error, Result, Value};
 use rusqlite::functions::{Aggregate, Context, FunctionFlags};
 
-use super::connection::{SqliteConnection, from_sqlite, to_djox_error};
+use super::connection::{SqliteConnection, from_sqlite, to_djox_error, typed_to_sqlite};
 
 /// The running state of one aggregate, for one group of rows.
 ///
@@ -103,6 +103,7 @@ fn to_sqlite_value(value: Value) -> rusqlite::types::Value {
         Value::Real(number) => rusqlite::types::Value::Real(number),
         Value::Text(text) => rusqlite::types::Value::Text(text),
         Value::Blob(bytes) => rusqlite::types::Value::Blob(bytes),
+        typed => typed_to_sqlite(&typed),
     }
 }
 

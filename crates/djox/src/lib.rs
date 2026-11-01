@@ -9,11 +9,12 @@
 //! | Folder      | Backend                                                         |
 //! |-------------|-----------------------------------------------------------------|
 //! | `sqlite/`   | [`sqlite::SqliteDatabase`]: one writer thread, a few reader threads |
-//! | `postgres/` | (later) a pool of async connections                              |
+//! | `postgres/` | [`postgres::PostgresDatabase`]: a pool of async connections        |
 //!
 //! The shared types and the trait come from the `djox-core` crate and are
 //! re-exported here, so `use djox::Value` works.
 
+pub mod postgres;
 pub mod sqlite;
 
 pub use djox_core::{ChunkRequests, Database, Error, Executed, Reply, ReplySender, Result, RowStream, Rows, Value};

@@ -6,8 +6,8 @@ use crate::{ChunkRequests, Executed, ReplySender, Rows, Value};
 ///
 /// A *trait* is a list of methods a type promises to have, like a Python
 /// `Protocol` or an abstract base class. The Python layer only knows this
-/// trait, so it works the same with every backend: SQLite today
-/// (`djox::sqlite::SqliteDatabase`), Postgres later.
+/// trait, so it works the same with every backend: SQLite
+/// (`djox::sqlite::SqliteDatabase`) and Postgres (`djox::postgres::PostgresDatabase`).
 ///
 /// The rules every backend follows:
 ///
@@ -16,14 +16,17 @@ use crate::{ChunkRequests, Executed, ReplySender, Rows, Value};
 ///   SQLite, `$1` for Postgres). `%%` is a literal `%`.
 /// - **Methods never block.** Each one sends the statement right away and
 ///   returns; the answer comes later through the [`ReplySender`], exactly
-///   once. Statements sent in order reach the database in order.
+///   once. A statement sent after an earlier one was answered sees what the
+///   earlier one did. Statements sent at the same moment may run at the same
+///   time (on SQLite's readers, or on two connections of a Postgres pool), so
+///   wait for one before sending the next when their order matters.
 /// - **Writes are never lost to a busy database.** The backend queues or pools
 ///   connections so callers don't see "database is locked" errors under load.
 ///
 /// `Send + Sync` means one database can be used from many threads at once
 /// (Python objects always can; Rust asks you to say so).
 pub trait Database: Send + Sync {
-    /// The backend's short name, like `"sqlite"`.
+    /// The backend's short name: `"sqlite"` or `"postgres"`.
     fn backend_name(&self) -> &str;
 
     /// Runs a query and returns all its rows.

@@ -23,10 +23,24 @@ Parameter: TypeAlias = (
     | datetime.time
     | decimal.Decimal
     | uuid.UUID
+    | datetime.timedelta
     | None
 )
-# What a row value can be: SQLite's storage classes.
-RowValue: TypeAlias = int | float | str | bytes | None
+# What a row value can be: SQLite's storage classes, and the typed values Postgres returns.
+RowValue: TypeAlias = (
+    int
+    | float
+    | str
+    | bytes
+    | bool
+    | decimal.Decimal
+    | datetime.datetime
+    | datetime.date
+    | datetime.time
+    | datetime.timedelta
+    | uuid.UUID
+    | None
+)
 # A row, as `fetch_all()` and the cursors return it.
 Row: TypeAlias = tuple[RowValue, ...]
 # The parameters of one statement, for a `Cursor`: `%s` with a sequence, `%(name)s` with a mapping.
@@ -43,8 +57,9 @@ class Database:
     SQL uses Django's `%s` placeholders; write `%%` for a literal `%`.
 
     The query methods send the statement right away and return an
-    `asyncio.Future` to await, so statements reach the database in the order
-    the methods were called. Await it, or pass it to `asyncio.gather()`; to
+    `asyncio.Future` to await. Statements sent at the same moment may run at
+    the same time (on SQLite's readers, or a Postgres pool's connections):
+    await one before sending the next when their order matters. Await it, or pass it to `asyncio.gather()`; to
     run it as a task, use `asyncio.ensure_future()` (not `create_task()`,
     which only takes coroutines).
     """
@@ -68,6 +83,17 @@ class Database:
         `prepare`, if given, is called with each new connection before it
         starts working, to register SQL functions or run `PRAGMA`s. The
         connection is only lent: it can't be used after `prepare` returns.
+        """
+
+    @staticmethod
+    def postgres(connection: str, *, pool_size: int = 10, time_zone: str | None = None) -> Database:
+        """Open a pool of connections to a Postgres server.
+
+        `connection` is a URL (`"postgresql://user:password@localhost:5432/app"`)
+        or libpq's `key=value` words (`"host=localhost dbname=app"`). At most
+        `pool_size` connections are open at once; each statement runs on a
+        free one. `time_zone` sets the session's time zone, like Django does.
+        One connection opens right away, so wrong settings fail here.
         """
 
     def fetch_all(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[list[Row]]:
@@ -101,7 +127,7 @@ class Database:
 
     @property
     def backend(self) -> str:
-        """The backend's short name, like `"sqlite"`."""
+        """The backend's short name: `"sqlite"` or `"postgres"`."""
 
     def __enter__(self) -> Self: ...
     def __exit__(
@@ -135,7 +161,7 @@ class Executed:
 
     @property
     def last_insert_id(self) -> int:
-        """The id of the last inserted row (SQLite's `rowid`)."""
+        """The id of the last inserted row (SQLite's `rowid`; 0 on Postgres)."""
 
 class AggregateClass(Protocol):
     """What `Connection.create_aggregate()` takes: a class whose instances

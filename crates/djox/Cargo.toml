@@ -1,6 +1,6 @@
 [package]
 name = "djox"
-description = "The djox backends: run SQL for async Python without blocking it. SQLite today, Postgres later"
+description = "The djox backends: run SQL for async Python without blocking it. SQLite and Postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,10 +8,24 @@ repository.workspace = true
 
 [dependencies]
 djox-core = { path = "../djox-core" }
+# Dates and times, the types inside `Value`.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+uuid = "1"
 # SQLite backend
 crossbeam-channel = "0.5"
 # `functions`: SQL functions written in Rust or Python (Django needs ~40). `limits`: read SQLite's limits.
 rusqlite = { version = "0.41", features = ["bundled", "functions", "limits"] }
+
+# Postgres backend
+# A pool of connections that reconnects broken ones and caches prepared statements.
+deadpool-postgres = "0.14"
+# The async Postgres driver; `with-chrono` and `with-uuid` read dates and UUIDs.
+tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid-1"] }
+# The async runtime the Postgres connections run on.
+tokio = { version = "1.54", features = ["rt-multi-thread", "time"] }
+# `TaskTracker`: waits for the statements already sent when the database closes.
+tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
 
 [dev-dependencies]
 tempfile = "3"

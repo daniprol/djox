@@ -1,7 +1,7 @@
 # djox
 
 A truly async Django ORM with a Rust core. Fast and readable, with hooks for
-library authors. SQLite first.
+library authors. SQLite and Postgres.
 
 !!! warning "Status: early"
     djox has its engine (`djox.Database` runs SQL from async code on

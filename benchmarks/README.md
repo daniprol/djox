@@ -118,3 +118,63 @@ A get on `djox.Database` took 120 µs before, and 66 µs now (same VM):
 
 These numbers come from one small cloud VM, where waking a thread is slow.
 Expect lower numbers on a laptop; the proportions are what matter.
+
+## Postgres
+
+The same queries on Postgres, through Django's own Postgres `ENGINE`
+(psycopg), djox's (`djox.backends.postgresql`), psycopg by hand, and
+`djox.Database.postgres()`:
+
+```bash
+cd benchmarks && DJOX_POSTGRES_URL=postgresql://postgres:postgres@localhost/postgres \
+    uv run --reinstall-package djox python postgres.py   # writes results/postgres.json
+```
+
+It creates a database `djox_benchmarks` on that server (dropping it first)
+with 10,000 books. Every contender uses the same database: Postgres is a
+server, so the drivers are simply different clients.
+
+| Name | What runs |
+|------|-----------|
+| django sync | Django's ORM, normal sync methods, on Django's Postgres `ENGINE` |
+| djox.Manager sync | The same sync methods on `djox.Manager()` and djox's `ENGINE`: still psycopg, with the fast lane |
+| psycopg | psycopg's sync connection with hand-written SQL. The floor |
+| django async | Django's async methods, which run the sync ORM on a worker thread |
+| djox safe lane | The async methods on `djox.Manager()`, fast lane off, on djox's Rust pool |
+| djox.Manager | The same, with the fast lane |
+| psycopg async | One psycopg `AsyncConnection` with hand-written SQL (one statement at a time, so no "at once" rows) |
+| djox | `djox.Database.postgres()` with the same hand-written SQL |
+
+Microseconds per call, lower is better. Linux x86_64 (4-core cloud VM),
+Python 3.13, Django 6.1, Postgres 16 on the same VM.
+
+| | django sync | djox.Manager sync | psycopg | django async | djox safe lane | djox.Manager | psycopg async | djox |
+|---|---|---|---|---|---|---|---|---|
+| get one book by id | 511 | 275 | 103 | 917 | 497 | 258 | 127 | 142 |
+| fetch 20 books | 913 | 410 | 218 | 1,478 | 840 | 375 | 162 | 209 |
+| fetch 1,000 books | 5,357 | 2,685 | 2,150 | 6,350 | 6,409 | 3,467 | 1,622 | 2,064 |
+| count | 1,011 | 670 | 675 | 2,338 | 996 | 761 | 587 | 840 |
+| update one book | 893 | 965 | 427 | 1,318 | 764 | 763 | 475 | 379 |
+| insert one book | 944 | 1,130 | 456 | 1,288 | 744 | 906 | 670 | 484 |
+| two inserts in a transaction | 1,680 | 1,998 | 742 | 1,893 | 2,772 | 3,249 | 1,034 | n/a |
+| get or create (exists) | 558 | 270 | n/a | 924 | 497 | 264 | n/a | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | 1,485 | 1,649 | 2,073 | n/a | n/a |
+| 100 gets at once | n/a | n/a | n/a | 612 | 318 | 158 | n/a | 53 |
+| 100 get or create at once | n/a | n/a | n/a | 647 | 414 | 132 | n/a | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | 1,430 | 1,400 | 1,301 | n/a | n/a |
+
+Each query is a network round trip here, so numbers move by 20 to 30% from
+one run to the next; compare within one table.
+
+- **Raw djox is as fast as psycopg's async connection, and it has a pool.**
+  One query at a time, `djox.Database.postgres()` is within noise of
+  psycopg's `AsyncConnection`. A hundred gets at once take 53 µs each,
+  because they run on ten connections at the same time.
+- **An async `aget()` is 3.5 times faster than Django's** (258 against
+  917 µs), and faster than Django's sync `get()`. A hundred at once are four
+  times faster than Django's, which queues every call for one worker thread.
+- **The fast lane helps Django's sync code on Postgres too**: a sync `get()`
+  on `djox.Manager` takes half the time, though it still runs on psycopg.
+- **Transactions pay djox's thread round trips**, as on SQLite: a short
+  `djox.atomic()` block is slower than one `sync_to_async()` around a sync
+  `atomic()`. With many at once, they are as fast as Django's.

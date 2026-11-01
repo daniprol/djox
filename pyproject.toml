@@ -38,6 +38,7 @@ dev = [
     "maturin>=1.9",
     "mypy>=2.0",
     "prek>=0.5.7",
+    "psycopg[binary]>=3.2",  # Django's sync ORM on Postgres (djox.backends.postgresql)
     "pyrefly>=1.0",
     "pytest>=8",
     "pytest-asyncio>=1.4.0",
@@ -51,7 +52,7 @@ line-length = 120
 target-version = "py311"
 src = ["src", "tests"]
 # Django's own tests, copied as they are (tests/django_suite/README.md), keep Django's style.
-extend-exclude = ["tests/django_suite/backends", "tests/django_suite/db_functions", "tests/django_suite/transactions", "tests/django_suite/async", "tests/django_suite/basic", "tests/django_suite/lookup", "tests/django_suite/ordering", "tests/django_suite/select_related", "tests/django_suite/select_related_onetoone", "tests/django_suite/select_related_regress", "tests/django_suite/prefetch_related"]
+extend-exclude = ["tests/django_suite/*/"]  # every app folder; conftest.py is djox's own
 force-exclude = true  # also when prek passes those files by name
 
 [tool.ruff.lint]
@@ -86,6 +87,7 @@ markers = [
     "django_ported(source): a test copied from Django's test suite; `source` is its id there (see tests/django_suite/README.md)",
     "django_adapted(reason): a ported Django test changed to fit djox; `reason` says what changed and why",
     "django_unsupported(reason): a ported Django test for a feature djox doesn't support yet; expected to fail",
+    "sqlite_only(reason): a test of something only djox's SQLite backend does; skipped on other databases",
 ]
 DJANGO_SETTINGS_MODULE = "tests.settings"
 pythonpath = ["."]  # so `tests.settings` can be imported
@@ -107,14 +109,48 @@ files = ["src", "tests", "docs/examples"]
 mypy_path = "src"
 explicit_package_bases = true
 # Django's own tests, copied as they are, have no type hints.
-exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/", "tests/django_suite/basic/", "tests/django_suite/lookup/", "tests/django_suite/ordering/", "tests/django_suite/select_related/", "tests/django_suite/select_related_onetoone/", "tests/django_suite/select_related_regress/", "tests/django_suite/prefetch_related/"]
+exclude = ["tests/django_suite/[^/]+/"]  # a regular expression: every app folder
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
 # The apps of Django's ported tests, which mypy doesn't check (see `exclude`).
 # Django's plugin still looks for them, as models of installed apps.
 [[tool.mypy.overrides]]
-module = ["async.*", "backends.*", "basic.*", "db_functions.*", "lookup.*", "ordering.*", "prefetch_related.*", "select_related.*", "select_related_onetoone.*", "select_related_regress.*", "transactions.*"]
+module = [
+    "aggregation.*",
+    "aggregation_regress.*",
+    "annotations.*",
+    "async.*",
+    "backends.*",
+    "basic.*",
+    "bulk_create.*",
+    "custom_managers.*",
+    "dates.*",
+    "datetimes.*",
+    "db_functions.*",
+    "defer.*",
+    "delete.*",
+    "expressions.*",
+    "expressions_case.*",
+    "from_db_value.*",
+    "get_earliest_or_latest.*",
+    "get_or_create.*",
+    "lookup.*",
+    "many_to_many.*",
+    "many_to_one.*",
+    "null_queries.*",
+    "or_lookups.*",
+    "ordering.*",
+    "prefetch_related.*",
+    "queries.*",
+    "reverse_lookup.*",
+    "select_related.*",
+    "select_related_onetoone.*",
+    "select_related_regress.*",
+    "transactions.*",
+    "update.*",
+    "update_only_fields.*",
+]
 ignore_missing_imports = true
 
 [tool.django-stubs]
@@ -122,5 +158,5 @@ django_settings_module = "tests.settings"
 
 [tool.pyrefly]
 project-includes = ["src", "tests", "docs/examples"]
-project-excludes = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "tests/django_suite/transactions/", "tests/django_suite/async/", "tests/django_suite/basic/", "tests/django_suite/lookup/", "tests/django_suite/ordering/", "tests/django_suite/select_related/", "tests/django_suite/select_related_onetoone/", "tests/django_suite/select_related_regress/", "tests/django_suite/prefetch_related/"]
+project-excludes = ["tests/django_suite/*/"]
 search-path = ["src", "."]

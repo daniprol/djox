@@ -90,6 +90,7 @@ async def fetch_models(database: djox.Database, queryset: QuerySet[ModelType]) -
     return instances
 
 
+@pytest.mark.sqlite_only("runs Django's SQLite SQL on a database of its own")
 async def test_runs_a_filter_from_djangos_compiler(library: djox.Database) -> None:
     books = await fetch_models(library, Book.objects.filter(pages__gt=300, title__startswith="Du"))
 

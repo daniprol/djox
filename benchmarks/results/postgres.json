@@ -1,0 +1,95 @@
+{
+  "machine": "Linux x86_64, Python 3.13.18, Django 6.1.2",
+  "book_count": 10000,
+  "microseconds_per_call": {
+    "django sync": {
+      "get one book by id": 510.7097280001654,
+      "fetch 20 books": 912.8922079999029,
+      "fetch 1,000 books": 5357.195499997639,
+      "count": 1010.970693332638,
+      "update one book": 892.8607233337971,
+      "insert one book": 944.0746066654052,
+      "two inserts in a transaction": 1679.9239000010857,
+      "get or create (exists)": 558.025400000588
+    },
+    "djox.Manager sync": {
+      "get one book by id": 275.41103400017164,
+      "fetch 20 books": 409.8507979997521,
+      "fetch 1,000 books": 2684.666899995136,
+      "count": 670.167326667676,
+      "update one book": 964.5849200008646,
+      "insert one book": 1130.220579999938,
+      "two inserts in a transaction": 1998.059669999748,
+      "get or create (exists)": 269.5880566670894
+    },
+    "psycopg": {
+      "get one book by id": 102.56552999999258,
+      "fetch 20 books": 218.25627599992004,
+      "fetch 1,000 books": 2149.8162000019265,
+      "count": 675.2143899999888,
+      "update one book": 427.39307666579407,
+      "insert one book": 456.2411899996732,
+      "two inserts in a transaction": 741.8127500000082
+    },
+    "django async": {
+      "get one book by id": 917.1451679999336,
+      "fetch 20 books": 1478.3780540001317,
+      "fetch 1,000 books": 6349.587600000936,
+      "count": 2338.349166666376,
+      "update one book": 1318.2995333333263,
+      "insert one book": 1287.6670799990584,
+      "two inserts in a transaction": 1892.562610000823,
+      "one insert, or two in a transaction": 1484.857694999846,
+      "get or create (exists)": 923.8304799994997,
+      "100 gets at once": 611.8873000013991,
+      "100 get or create at once": 646.8524199999592,
+      "100 mixed writes at once": 1430.204399998729
+    },
+    "djox safe lane": {
+      "get one book by id": 496.9323099999201,
+      "fetch 20 books": 840.1135759995668,
+      "fetch 1,000 books": 6409.058033326195,
+      "count": 996.4791499987768,
+      "update one book": 764.4708166662895,
+      "insert one book": 744.0879799999797,
+      "two inserts in a transaction": 2772.475310000573,
+      "one insert, or two in a transaction": 1648.660875000587,
+      "get or create (exists)": 496.6216599996187,
+      "100 gets at once": 318.1601699998282,
+      "100 get or create at once": 413.81649000413745,
+      "100 mixed writes at once": 1400.3227900002457
+    },
+    "djox.Manager": {
+      "get one book by id": 257.5059999999212,
+      "fetch 20 books": 374.89830599952256,
+      "fetch 1,000 books": 3467.0178666601714,
+      "count": 760.6625100000504,
+      "update one book": 763.0771333333541,
+      "insert one book": 905.5309633337553,
+      "two inserts in a transaction": 3248.7359000015203,
+      "one insert, or two in a transaction": 2072.9910249997374,
+      "get or create (exists)": 264.0543233322508,
+      "100 gets at once": 158.13822999916738,
+      "100 get or create at once": 132.33417999799713,
+      "100 mixed writes at once": 1300.9506000025794
+    },
+    "psycopg async": {
+      "get one book by id": 127.34709799997289,
+      "fetch 20 books": 161.8830719999096,
+      "fetch 1,000 books": 1622.1684333383262,
+      "count": 587.1976566656182,
+      "update one book": 474.9003566666943,
+      "insert one book": 670.105086668021,
+      "two inserts in a transaction": 1033.8007299992569
+    },
+    "djox": {
+      "get one book by id": 142.1817989998999,
+      "fetch 20 books": 208.7612639998042,
+      "fetch 1,000 books": 2063.8836666724574,
+      "count": 840.0645066664462,
+      "update one book": 378.88403666784143,
+      "insert one book": 484.4968966669209,
+      "100 gets at once": 52.55301000033796
+    }
+  }
+}

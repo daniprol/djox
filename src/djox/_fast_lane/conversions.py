@@ -66,7 +66,11 @@ def is_django_decimal_converter(converter: Converter, expression: Any, connectio
     """Whether `converter` is the one Django's `get_decimalfield_converter()`
     makes for a model's column, rounding half to even like Rust does."""
     operations_class = type(connection.ops)
-    if operations_class.get_decimalfield_converter is not DatabaseOperations.get_decimalfield_converter:
+    # `getattr(..., None)`: only SQLite's operations have this method.
+    if (
+        getattr(operations_class, "get_decimalfield_converter", None)
+        is not DatabaseOperations.get_decimalfield_converter
+    ):
         return False
     # Django 6.1 makes the `Decimal` in `_create_decimal()` (earlier versions have none).
     django_create_decimal = getattr(DatabaseOperations, "_create_decimal", None)

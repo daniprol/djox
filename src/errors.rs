@@ -13,12 +13,12 @@
 //! ├── InterfaceError          a problem with djox itself, not the database
 //! │   └── DatabaseClosedError the database or connection was closed
 //! └── DatabaseError
-//!     ├── DataError           a value doesn't fit (PEP 249; SQLite rarely raises it)
-//!     ├── OperationalError    SQLite could not run the statement (missing table, lock timeout...)
+//!     ├── DataError           a value doesn't fit (a number out of range...; SQLite rarely raises it)
+//!     ├── OperationalError    the database could not run the statement (lock timeout, lost connection...)
 //!     ├── IntegrityError      a constraint failed (unique, foreign key, not null...)
-//!     ├── InternalError       SQLite's own state is broken (PEP 249; rare)
-//!     ├── ProgrammingError    the caller's mistake (wrong number of parameters...)
-//!     └── NotSupportedError   SQLite can't do this (PEP 249; rare)
+//!     ├── InternalError       the transaction's or database's state is wrong (a failed Postgres transaction...)
+//!     ├── ProgrammingError    the caller's mistake (wrong number of parameters, a Postgres syntax error...)
+//!     └── NotSupportedError   the database can't do this
 //! ```
 //!
 //! Invalid settings (like an in-memory database for `Database.sqlite`) raise `ValueError`.
@@ -91,6 +91,9 @@ pub fn to_python_error(error: djox::Error) -> PyErr {
         djox::Error::Programming(_) => ProgrammingError::new_err(message),
         djox::Error::Closed => DatabaseClosedError::new_err(message),
         djox::Error::Settings(_) => PyValueError::new_err(message),
+        djox::Error::Data(_) => DataError::new_err(message),
+        djox::Error::Internal(_) => InternalError::new_err(message),
+        djox::Error::NotSupported(_) => NotSupportedError::new_err(message),
         djox::Error::Database(_) => DatabaseError::new_err(message),
     }
 }

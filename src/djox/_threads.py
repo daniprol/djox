@@ -41,17 +41,23 @@ from django.db import close_old_connections
 from django.db import connections as django_connections
 
 from djox import _running, _write_turns
-from djox.backends.sqlite3.base import DatabaseWrapper
+from djox.backends.engine import runs_on_djox
 
 Result = TypeVar("Result")
 
-# Idle threads kept for the next call. More can run at once; the extra ones
-# are closed when their call ends.
-MAX_IDLE_THREADS = 8
-
-# The most pooled threads that read at once, per event loop. (Writers take
-# turns, so at most one writes.) Each thread holds a connection.
+# The most pooled threads that read at once, per event loop. Each thread
+# holds a connection.
 MAX_READING_THREADS = 8
+
+# The most pooled threads that write (or hold a `djox.atomic()` block) at
+# once, per event loop. On SQLite, writers also take turns (one at a time);
+# Postgres lets many transactions write at once, and this keeps them from
+# opening more connections than the server allows.
+MAX_WRITING_THREADS = 8
+
+# Idle threads kept for the next call: enough for all the readers and
+# writers, so a burst of calls doesn't open new connections each time.
+MAX_IDLE_THREADS = MAX_READING_THREADS + MAX_WRITING_THREADS
 
 
 async def run_django_method(alias: str, method: Callable[[], Result], writes: bool) -> Result:
@@ -66,16 +72,16 @@ async def run_django_method(alias: str, method: Callable[[], Result], writes: bo
     On a database whose `ENGINE` isn't djox's, it runs like Django's own
     async methods do (on Django's sync thread).
     """
-    if not isinstance(django_connections[alias], DatabaseWrapper):
+    if not runs_on_djox(django_connections[alias]):
         return await sync_to_async(method)()
     if transaction_thread.get() is not None or _running.open_sync_transaction(alias) is not None:
         # `thread_sensitive=True` sends it to the transaction's thread (asgiref
         # finds it from this context, like `sync_to_async()` in your own code).
         return await sync_to_async(method, thread_sensitive=True)()
     if writes:
-        async with _write_turns.transaction_alone(alias):
+        async with _write_turns.transaction_alone(alias), slots_of_this_loop(writing=True):
             return await run_on_pooled_thread(method)
-    async with reading_slots_of_this_loop():
+    async with slots_of_this_loop(writing=False):
         return await run_on_pooled_thread(method)
 
 
@@ -130,8 +136,9 @@ def give_back_idle_thread(thread: ThreadPoolExecutor) -> None:
     thread.shutdown(wait=False)
 
 
-def reading_slots_of_this_loop() -> asyncio.Semaphore:
-    """The semaphore that limits how many pooled threads read at once.
+def slots_of_this_loop(writing: bool) -> asyncio.Semaphore:
+    """The semaphore that limits how many pooled threads read at once, or
+    write at once (`writing`).
 
     An asyncio object belongs to one event loop, and a program may run several
     loops (one per thread), so each loop has its own.
@@ -140,10 +147,14 @@ def reading_slots_of_this_loop() -> asyncio.Semaphore:
     with idle_threads_lock:
         if loop not in reading_slots:
             reading_slots[loop] = asyncio.Semaphore(MAX_READING_THREADS)
+            writing_slots[loop] = asyncio.Semaphore(MAX_WRITING_THREADS)
+        if writing:
+            return writing_slots[loop]
         return reading_slots[loop]
 
 
 reading_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+writing_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
 
 
 # ---------------------------------------------------------------- connection upkeep

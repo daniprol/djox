@@ -49,3 +49,36 @@ jobs:
           enable-cache: true
       - run: uv sync --frozen
       - run: uv run --frozen --with "django~=${{ matrix.django-version }}.0" pytest
+
+  postgres:
+    # The same tests on a Postgres server: the Rust backend's own tests, the
+    # Python integration tests, and Django's ORM (djox's and Django's tests)
+    # on `djox.backends.postgresql`.
+    name: Tests on Postgres ${{ matrix.postgres-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres-version: ["15", "18"]  # the oldest Django 6.1 supports, and the newest
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres-version }}
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      DJOX_POSTGRES_URL: postgresql://postgres:postgres@localhost/postgres
+      DJOX_TEST_DATABASE: postgres
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: scripts/cargo-test.sh --workspace
+      - run: uv run --frozen pytest
