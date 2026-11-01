@@ -88,6 +88,32 @@ On a database whose `ENGINE` isn't djox's, every method is Django's own. A
 custom `QuerySet` can subclass `djox.QuerySet` and use
 `MyQuerySet.as_manager()`.
 
+### The fast lane
+
+Simple reads skip Django's query building and SQL compiler, and get their
+model instances built in Rust. They are two to three times faster than the
+same method with Django writing every query ([benchmarks](https://github.com/daniprol/djox/tree/main/benchmarks)).
+A query takes the fast lane when it is:
+
+- read with `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()`,
+  `acount()`, `aexists()` or `acontains()`;
+- filtered with `filter(name=value)` on the model's own columns (foreign keys
+  included, by instance or id), with `exact`, `gt`, `gte`, `lt`, `lte`, `in`
+  or `isnull`, and plain values (numbers, text, booleans, dates, decimals,
+  UUIDs);
+- ordered by columns (`order_by("-pages", "id")`, or the model's
+  `Meta.ordering`), reversed, and sliced (`[10:20]`).
+
+The SQL is the one Django writes for the same query: djox has Django write it
+the first time it meets each *shape* of query (the same filters, ordering and
+slice, with any values), and keeps it. Everything else (`exclude()`, `Q()`,
+`F()`, joins like `author__name`, `values()`, `annotate()`, `select_related()`,
+writes) runs as described above, with the same results. Errors are raised
+where Django raises them: a wrong field name or value still raises at
+`filter()`.
+
+To turn it off, set `DJOX_FAST_LANE = False` in the settings.
+
 ### Model methods: `djox.Model`
 
 A model's own `asave()`, `adelete()` and `arefresh_from_db()` don't go

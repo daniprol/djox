@@ -143,6 +143,45 @@ its SQL runs on that block's connection instead, so it sees the block's
 writes. djox's `DatabaseWrapper` notes each open transaction in a context
 variable, which `async_to_sync()` copies to the async code it starts.
 
+## The fast lane
+
+Most of the time of a `djox.Manager` query is Django's Python: building the
+`Query` (`filter()`), writing the SQL (the compiler) and building the
+instances. SQLite itself takes a few microseconds. For simple queries, djox
+skips most of it:
+
+```text
+  Book.objects.filter(pages__gt=500)[:20]     a note: ("pages", "gt", 500), [0:20]
+  async for book in ...:
+      shape seen before?  ── no ──►  Django builds the query and writes the SQL, once
+              │ yes
+      parameters  [500]                the field's own get_prep_value(), like Django's lookup
+      await ──────────────────────────────────────► reader runs the SELECT
+           ◄────────────────────────────────────── rows
+      InstanceBuilder (Rust)          one instance per row, with Django's converters
+```
+
+- **A note instead of a `Query`.** While a `djox.QuerySet` is only filtered
+  with plain values (`exact`, `gt`, `gte`, `lt`, `lte`, `in`, `isnull`, on the
+  model's own columns), ordered by columns and sliced, it writes down what was
+  asked (`SimpleQuery`). The values are prepared by their field right away, so
+  a wrong value raises at `filter()`, as in Django.
+- **The SQL of each shape is Django's.** Two queries that differ only in their
+  values have the same *shape*, and the same SQL. The first time djox meets a
+  shape, Django builds the query and writes the SQL; djox keeps it (and checks
+  that it computes the same parameters as Django). Writing the SQL in Rust
+  would buy nothing, since it is written once per shape, and this way the SQL
+  is exactly Django's, for every Django version and, later, every database.
+- **Rust builds the instances** (`djox.InstanceBuilder`): an empty instance,
+  its `_state`, and one attribute per column, after Django's own converters
+  (text to `datetime`, to `Decimal`...). It is what `Model.from_db()` makes,
+  without running `__init__` for every row. Models whose `__init__` or
+  `from_db()` is their own, or with `pre_init`/`post_init` receivers, are
+  built by Django.
+- **Anything else is Django's.** Asking for `queryset.query` builds Django's
+  `Query` from the note, so `exclude()`, `Q()`, joins, `values()`,
+  `select_related()`, and every sync method work exactly as in Django.
+
 ## Async transactions
 
 A transaction belongs to one connection, and Django keeps one connection per
@@ -171,7 +210,7 @@ writers.
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
 | `src/*.rs`          | The Python extension `djox._core`: `Database`, `Connection`, `Cursor` |
-| `src/djox`          | The Python package: Django's `ENGINE` in `backends/sqlite3`, `djox.Manager` and `djox.QuerySet` |
+| `src/djox`          | The Python package: Django's `ENGINE` in `backends/sqlite3`, `djox.Manager` and `djox.QuerySet`, the fast lane in `_fast_lane` |
 
 Each backend owns everything about its database. Postgres will be a new
 folder with its own connection pool, behind the same `Database` trait, and

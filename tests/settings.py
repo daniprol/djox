@@ -29,6 +29,9 @@ INSTALLED_APPS = [
     "transactions",
     "db_functions",
     "async",
+    "basic",
+    "lookup",
+    "ordering",
 ]
 DATABASES = {
     "default": {
@@ -36,10 +39,12 @@ DATABASES = {
         "NAME": Path(tempfile.gettempdir()) / "djox-tests.sqlite3",
     }
 }
-# The models djox switches over (`djox.install`): Django's `auth` app, and
-# `shelf`, whose models are written as if djox didn't exist. Not "__all__",
-# so Django's ported tests keep testing what they were ported for.
-DJOX_MODELS = ["auth", "shelf"]
+# The models djox switches over (`djox.install`): Django's `auth` app,
+# `shelf`, whose models are written as if djox didn't exist, and the models of
+# Django's own `basic`, `lookup` and `ordering` tests, so that they test
+# `djox.QuerySet` (and the fast lane's notes). Not "__all__", so the other
+# ported tests keep testing what they were ported for.
+DJOX_MODELS = ["auth", "shelf", "basic", "lookup", "ordering"]
 USE_TZ = True
 TIME_ZONE = "UTC"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

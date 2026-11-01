@@ -29,6 +29,15 @@ run Django's sync method unchanged, on one of djox's own threads
 async call in the process waits its turn. Inside a transaction, they run on
 the transaction's thread, so they join it.
 
+Simple queries take the fast lane (`djox._fast_lane`): while a `QuerySet`
+is only filtered with plain values (`filter(pages__gt=500)`), ordered by
+columns and sliced, it keeps a note of that (`SimpleQuery`) instead of
+building Django's `Query`. The reading methods (`async for`, `aget()`,
+`afirst()`, `alast()`, `acount()`, `aexists()`...) then reuse the SQL Django
+wrote for the same shape of query before, and build the objects in Rust. Any
+other method asks for `queryset.query`, which builds Django's `Query` from
+the note, so it works exactly as in Django.
+
 When the database's `ENGINE` isn't djox's, every method is Django's own.
 """
 
@@ -40,9 +49,13 @@ from django.db import NotSupportedError, connections, models
 from django.db.models.deletion import Collector
 from django.db.models.query import MAX_GET_RESULTS  # how many rows `get()` reads at most
 from django.db.models.signals import post_save, pre_save
+from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
-from djox import _threads
+from djox import _fast_lane, _threads
+from djox._fast_lane import running as fast_lane
+from djox._fast_lane.lookups import condition_for, is_simple_ordering
+from djox._fast_lane.simple_query import Condition, SimpleQuery
 from djox._results import results_from_rows
 from djox.backends.sqlite3 import compiler
 from djox.backends.sqlite3.base import DatabaseWrapper
@@ -58,6 +71,117 @@ class QuerySet(models.QuerySet[ModelType]):
     Use it like Django's: `djox.Manager()` on a model gives `QuerySet`s of
     this class, and a custom `QuerySet` can subclass it.
     """
+
+    # ------------------------------------------------------ the fast lane's note
+
+    # The note of a query simple enough for the fast lane (see the module
+    # docs), or `None` once Django's `Query` is built (or the fast lane is off).
+    _simple_query: SimpleQuery | None = None
+
+    def __init__(
+        self,
+        model: type[models.Model] | None = None,
+        query: Query | None = None,
+        using: str | None = None,
+        hints: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(model, query, using, hints)
+        # A new QuerySet without a query means "all the objects": the simplest query there is.
+        if query is None and model is not None and _fast_lane.is_enabled():
+            self._simple_query = SimpleQuery()
+
+    # `@property` makes `queryset.query` call this method, like a computed attribute.
+    @property
+    def query(self) -> Query:
+        """Django's `Query`, built from the fast lane's note the first time anyone asks for it."""
+        simple_query = self._simple_query
+        if simple_query is not None:
+            self._simple_query = None
+            simple_query.replay_on(self)
+        # Django's own property, which also applies a filter that a related manager deferred.
+        return super().query
+
+    @query.setter
+    def query(self, value: Query) -> None:
+        self._simple_query = None
+        # Django's own setter (`super()` can't reach a property's setter).
+        models.QuerySet.query.fset(self, value)  # type: ignore[attr-defined]
+
+    def _recordable_query(self) -> SimpleQuery | None:
+        """The note, if the next step can be added to it.
+
+        Not while Django's related managers set up a queryset (they filter it
+        in their own way, with `_defer_next_filter` and `_sticky_filter`).
+        """
+        if self._defer_next_filter or self._sticky_filter:  # type: ignore[attr-defined]  # Django's
+            return None
+        return self._simple_query
+
+    def _with_simple_query(self, simple_query: SimpleQuery) -> "QuerySet[ModelType]":
+        """A copy of this `QuerySet` with another note, like Django's `_clone()`,
+        but without building (and copying) Django's `Query`."""
+        # `__new__` makes an object without calling `__init__`; then every
+        # attribute is copied over, whichever ones this Django version has.
+        clone = self.__class__.__new__(self.__class__)
+        clone.__dict__.update(self.__dict__)
+        clone._query = Query(self.model)  # type: ignore[attr-defined]  # empty, until a step needs it
+        clone._result_cache = None
+        clone._prefetch_done = False  # type: ignore[attr-defined]  # Django's
+        clone._simple_query = simple_query
+        return clone
+
+    def filter(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
+        """Django's `filter()`. Plain `name=value` filters are noted for the fast lane."""
+        simple_query = self._recordable_query()
+        if simple_query is not None and not args and not simple_query.is_sliced:
+            conditions = conditions_for(self.model, kwargs)
+            if conditions is not None:
+                return self._with_simple_query(simple_query.with_filter(kwargs, conditions))
+        return super().filter(*args, **kwargs)
+
+    def order_by(self, *field_names: Any) -> "QuerySet[ModelType]":
+        """Django's `order_by()`. Ordering by the model's columns is noted for the fast lane."""
+        simple_query = self._recordable_query()
+        if simple_query is not None and not simple_query.is_sliced and is_simple_ordering(self.model, field_names):
+            return self._with_simple_query(simple_query.with_order_by(field_names))
+        return super().order_by(*field_names)
+
+    def reverse(self) -> "QuerySet[ModelType]":
+        """Django's `reverse()`, noted for the fast lane."""
+        simple_query = self._recordable_query()
+        if simple_query is not None and not simple_query.is_sliced:
+            return self._with_simple_query(simple_query.with_reversed_ordering())
+        return super().reverse()
+
+    def all(self) -> "QuerySet[ModelType]":
+        """Django's `all()`: a copy."""
+        simple_query = self._recordable_query()
+        if simple_query is not None:
+            return self._with_simple_query(simple_query)
+        return super().all()
+
+    def using(self, alias: str | None) -> "QuerySet[ModelType]":
+        """Django's `using()`: the same query, on another database alias."""
+        simple_query = self._recordable_query()
+        if simple_query is None:
+            return super().using(alias)
+        clone = self._with_simple_query(simple_query)
+        clone._db = alias  # type: ignore[attr-defined]  # Django's
+        return clone
+
+    def __getitem__(self, key: Any) -> Any:  # pyrefly: ignore[bad-override]  # one method for both of Django's overloads
+        """Django's `queryset[...]`. A plain slice like `[10:20]` is noted for the fast lane."""
+        simple_query = self._recordable_query()
+        if (
+            simple_query is not None
+            and self._result_cache is None
+            and isinstance(key, slice)
+            and key.step is None
+            and is_slice_bound(key.start)
+            and is_slice_bound(key.stop)
+        ):
+            return self._with_simple_query(simple_query.with_limits(key.start, key.stop))
+        return super().__getitem__(key)
 
     # ------------------------------------------------------------- reading rows
 
@@ -77,6 +201,11 @@ class QuerySet(models.QuerySet[ModelType]):
         """Fill the result cache, like Django's `_fetch_all()`, unless it is full already."""
         if self._result_cache is not None:
             return
+        if self._simple_query is not None and runs_on_djox(self.db):
+            results = await fast_lane.fetch_results(self)
+            if results is not None:
+                self._result_cache = results
+                return
         if self._prefetch_lookups():
             # `prefetch_related()` runs more queries after this one: Django's way.
             await self._run_django_method(self._fetch_all, writes=False)
@@ -103,24 +232,37 @@ class QuerySet(models.QuerySet[ModelType]):
             return
         if chunk_size <= 0:
             raise ValueError("Chunk size must be strictly positive.")
-        for result in await self._results_from_djox():
+        results = None
+        if self._simple_query is not None:
+            results = await fast_lane.fetch_results(self)
+        if results is None:
+            results = await self._results_from_djox()
+        for result in results:
             yield result
 
     async def aget(self, *args: Any, **kwargs: Any) -> ModelType:
         """The one object matching the filters. The same steps as Django's `get()`."""
         if not runs_on_djox(self.db):
             return await super().aget(*args, **kwargs)
-        if self.query.combinator and (args or kwargs):
-            raise NotSupportedError(
-                f"Calling QuerySet.get(...) with filters after {self.query.combinator}() is not supported."
-            )
-        clone = self._chain() if self.query.combinator else self.filter(*args, **kwargs)  # type: ignore[attr-defined]
-        if self.query.can_filter() and not self.query.distinct_fields:
-            clone = clone.order_by()
-        limit = None
-        if not clone.query.select_for_update or connections[clone.db].features.supports_select_for_update_with_limit:
+        combinator = None if self._simple_query is not None else self.query.combinator
+        if combinator and (args or kwargs):
+            raise NotSupportedError(f"Calling QuerySet.get(...) with filters after {combinator}() is not supported.")
+        clone = self._chain() if combinator else self.filter(*args, **kwargs)  # type: ignore[attr-defined]
+        limit: int | None = None
+        simple_query = clone._simple_query
+        if simple_query is not None:
+            # The fast lane's note: the same steps, without building Django's `Query`.
+            if not simple_query.is_sliced:
+                simple_query = simple_query.with_order_by(())
             limit = MAX_GET_RESULTS
-            clone.query.set_limits(high=limit)
+            clone = clone._with_simple_query(simple_query.with_limits(high=limit))
+        else:
+            if clone.query.can_filter() and not clone.query.distinct_fields:
+                clone = clone.order_by()
+            select_for_update = clone.query.select_for_update
+            if not select_for_update or connections[clone.db].features.supports_select_for_update_with_limit:
+                limit = MAX_GET_RESULTS
+                clone.query.set_limits(high=limit)
         await clone._fetch_all_on_djox()
         results = clone._result_cache
         assert results is not None, "just fetched"
@@ -140,12 +282,14 @@ class QuerySet(models.QuerySet[ModelType]):
         """The first object, or `None`. Without an ordering, ordered by primary key, like Django."""
         if not runs_on_djox(self.db):
             return await super().afirst()
-        if self.ordered or not self.query.default_ordering:
+        if self._keeps_its_ordering_for_first_and_last():
             queryset = self
         else:
-            self._check_ordering_first_last_queryset_aggregation(method="first")  # type: ignore[attr-defined]
+            if self._simple_query is None:  # (a simple query has no `GROUP BY` to check)
+                self._check_ordering_first_last_queryset_aggregation(method="first")  # type: ignore[attr-defined]
             queryset = self.order_by("pk")
-        async for result in queryset[:1]:
+        first_one: QuerySet[ModelType] = queryset[:1]
+        async for result in first_one:
             return result
         return None
 
@@ -153,14 +297,24 @@ class QuerySet(models.QuerySet[ModelType]):
         """The last object, or `None`. Without an ordering, ordered by primary key, like Django."""
         if not runs_on_djox(self.db):
             return await super().alast()
-        if self.ordered or not self.query.default_ordering:
+        if self._keeps_its_ordering_for_first_and_last():
             queryset = self.reverse()
         else:
-            self._check_ordering_first_last_queryset_aggregation(method="last")  # type: ignore[attr-defined]
+            if self._simple_query is None:
+                self._check_ordering_first_last_queryset_aggregation(method="last")  # type: ignore[attr-defined]
             queryset = self.order_by("-pk")
-        async for result in queryset[:1]:
+        first_one: QuerySet[ModelType] = queryset[:1]
+        async for result in first_one:
             return result
         return None
+
+    def _keeps_its_ordering_for_first_and_last(self) -> bool:
+        """Django's test in `first()` and `last()`: the query is ordered, or was
+        told not to be (`order_by()`). Otherwise they order by primary key."""
+        simple_query = self._simple_query
+        if simple_query is not None:
+            return simple_query.order_by is not None or bool(self.model._meta.ordering)
+        return self.ordered or not self.query.default_ordering
 
     async def aearliest(self, *fields: Any) -> ModelType:
         """The earliest object by `fields` (or the model's `get_latest_by`)."""
@@ -200,7 +354,8 @@ class QuerySet(models.QuerySet[ModelType]):
         """Whether `obj` is one of this `QuerySet`'s objects."""
         if not runs_on_djox(self.db):
             return await super().acontains(obj)
-        self._not_support_combined_queries("contains")  # type: ignore[attr-defined]
+        if self._simple_query is None:  # (a simple query is never combined)
+            self._not_support_combined_queries("contains")  # type: ignore[attr-defined]
         if self._fields is not None:  # type: ignore[attr-defined]
             raise TypeError("Cannot call QuerySet.contains() after .values() or .values_list().")
         try:
@@ -222,6 +377,10 @@ class QuerySet(models.QuerySet[ModelType]):
             return await super().acount()
         if self._result_cache is not None:
             return len(self._result_cache)
+        if self._simple_query is not None:
+            count = await fast_lane.count(self)
+            if count is not None:
+                return count
         row = await compiler.run_first_statement(self.db, lambda: self.query.get_count(using=self.db))
         # The count is the only column. No row means Django knew the answer
         # without asking (an empty filter): nothing matches.
@@ -233,6 +392,10 @@ class QuerySet(models.QuerySet[ModelType]):
             return await super().aexists()
         if self._result_cache is not None:
             return bool(self._result_cache)
+        if self._simple_query is not None:
+            exists = await fast_lane.exists(self)
+            if exists is not None:
+                return exists
         # Django's `exists()` selects `1` with `LIMIT 1`: any row means yes.
         row = await compiler.run_first_statement(self.db, lambda: self.query.has_results(using=self.db))
         return bool(row)
@@ -424,6 +587,23 @@ async def save_new_object(obj: models.Model, using: str) -> None:
     obj._state.db = using
     obj._state.adding = False
     await post_save.asend(sender=origin, instance=obj, created=True, update_fields=None, raw=False, using=using)
+
+
+def conditions_for(model: type[models.Model], keyword_arguments: dict[str, Any]) -> list[Condition] | None:
+    """The fast lane's conditions for one `filter()` call, or `None` if one of
+    them must go to Django. In the order Django uses: `Q()` sorts its keyword arguments."""
+    conditions = []
+    for name, value in sorted(keyword_arguments.items()):
+        condition = condition_for(model, name, value)
+        if condition is None:
+            return None
+        conditions.append(condition)
+    return conditions
+
+
+def is_slice_bound(bound: object) -> bool:
+    """Whether `bound` is a start or end of slice the fast lane notes (`None`, or an `int` from 0)."""
+    return bound is None or (type(bound) is int and bound >= 0)
 
 
 def runs_on_djox(alias: str) -> bool:

@@ -18,7 +18,8 @@ install it as a normal package, and uv doesn't notice changes to its Python file
 | djox sync | The same sync methods on djox's `ENGINE` (`djox.backends.sqlite3`) |
 | sqlite3 | Python's `sqlite3` with hand-written SQL. The floor: no ORM, no async |
 | django async | Django's async methods (`aget`, `async for`, `acount`, `acreate`), which run the sync ORM on a worker thread |
-| djox.Manager | The same async methods on `djox.Manager()`: Django builds the SQL and the model instances, djox runs the SQL without a worker thread. Transactions use `async with djox.atomic()` |
+| djox safe lane | The same async methods on `djox.Manager()` with the fast lane off (`DJOX_FAST_LANE = False`): Django builds the query, the SQL and the model instances, djox runs the SQL without a worker thread. Transactions use `async with djox.atomic()` |
+| djox.Manager | The same, with the fast lane (the default): simple queries reuse the SQL Django wrote for their shape, and Rust builds the model instances |
 | djox | `djox.Database` with the same hand-written SQL as sqlite3 |
 
 Every contender has its own copy of the file, and every one uses WAL mode and
@@ -29,54 +30,55 @@ Every contender has its own copy of the file, and every one uses WAL mode and
 Microseconds per call, lower is better. Linux x86_64 (4-core cloud VM),
 Python 3.13, Django 6.1.
 
-| | django sync | djox sync | sqlite3 | django async | djox.Manager | djox |
-|---|---|---|---|---|---|---|
-| get one book by id | 160 | 150 | 3 | 498 | 276 | 66 |
-| fetch 20 books | 451 | 441 | 24 | 1,031 | 613 | 97 |
-| fetch 1,000 books | 6,926 | 7,201 | 425 | 8,577 | 7,414 | 795 |
-| count | 222 | 197 | 63 | 811 | 347 | 108 |
-| insert one book | 141 | 136 | 41 | 338 | 271 | 103 |
-| two inserts in a transaction | 284 | 299 | 38 | 624 | 1,349 | n/a |
-| get or create (exists) | 158 | 175 | n/a | 606 | 300 | n/a |
-| 100 gets at once | n/a | n/a | n/a | 413 | 248 | 67 |
-| 100 get or create at once | n/a | n/a | n/a | 404 | 268 | n/a |
+| | django sync | djox sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
+|---|---|---|---|---|---|---|---|
+| get one book by id | 191 | 200 | 5 | 552 | 431 | 171 | 93 |
+| fetch 20 books | 491 | 491 | 26 | 1,000 | 781 | 333 | 126 |
+| fetch 1,000 books | 8,213 | 9,725 | 662 | 10,613 | 10,368 | 5,776 | 697 |
+| count | 298 | 277 | 64 | 671 | 514 | 201 | 149 |
+| insert one book | 169 | 173 | 43 | 495 | 401 | 451 | 143 |
+| two inserts in a transaction | 358 | 318 | 62 | 618 | 1,447 | 1,460 | n/a |
+| get or create (exists) | 259 | 215 | n/a | 526 | 425 | 176 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | 574 | 1,043 | 1,021 | n/a |
+| 100 gets at once | n/a | n/a | n/a | 495 | 408 | 154 | 104 |
+| 100 get or create at once | n/a | n/a | n/a | 497 | 365 | 188 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | 763 | 1,009 | 1,027 | n/a |
 
 This VM's speed changes by about 20% from one run to the next (every column
 moves together), so compare numbers within one table, not across runs.
 
 "Two inserts in a transaction" is `atomic()` around two `create()`s. Django
 has no async `atomic()`, so "django async" runs that sync function with
-`sync_to_async()`; "djox.Manager" is `async with djox.atomic():` around two
-`acreate()`s.
+`sync_to_async()`; the djox contenders use `async with djox.atomic():` around
+two `acreate()`s.
 
 ## What this shows
 
 - **djox's `ENGINE` costs nothing for sync code.** "djox sync" is as fast as
-  Django's own SQLite backend, often a little faster.
-- **`djox.Manager` is the fastest way to run Django's async methods here.**
-  One query at a time it takes 20 to 57% less time than Django's async
-  methods (276 µs against 498 µs for a get, 300 µs against 606 µs for an
-  `aget_or_create()` that finds its row). With 100 lookups at once it takes
-  248 µs each against 413 µs, and 100 `aget_or_create()` calls take 268 µs
-  each against 404 µs. Django's async methods all queue for one shared
-  worker thread; djox's queries don't, and `aget_or_create()` looks up on
-  djox before it takes a writer's turn.
+  Django's own SQLite backend.
+- **The fast lane makes simple reads two to three times faster.** A get by id
+  takes 171 µs against 431 µs with Django writing every query, and 552 µs
+  with Django's async `aget()`: an async get on djox is now faster than
+  Django's sync `get()`. Counts, 20 books and `aget_or_create()` that finds
+  its row gain as much. The fast lane skips Django's query building and SQL
+  compiler (the SQL of each query shape is written once, by Django), and Rust
+  builds the instances.
+- **Big results gain less, for now.** For 1,000 books, most of what is left is
+  Django's converters, which turn each stored date and decimal into a
+  `datetime` and a `Decimal` in Python (about three quarters of the time spent
+  building the instances). Doing those conversions in Rust is the next step.
+- **Writes don't take the fast lane yet.** `acreate()` and transactions are
+  the same with it or without it.
 - **A short transaction is faster as one sync function.** `djox.atomic()`
   pays a thread round trip to start the transaction, one per query, and one
   to commit: four for two inserts, against one for `sync_to_async()` around
   a sync `atomic()`. What it buys is async code inside the transaction, and
   a thread of its own, so the transaction doesn't hold up Django's worker
-  thread (shared by every other Django async call). Moving whole
-  transactions to djox's writer thread is part of the fast lane.
-- **A round trip to djox's threads costs about 65 µs.** That is "djox": raw
-  SQL with nothing else to do, against 3 µs for SQLite itself. It is close to
-  the floor of waking a thread and waking the event loop again on this VM (a
-  bare Python thread and `call_soon_threadsafe` take about 50 µs).
-- **The rest is Django's Python.** `sqlite3` runs a lookup in 3 µs; Django
-  spends about 200 µs building the query, writing the SQL and creating the
-  instance. `djox.Manager` keeps Django's code for all of that on purpose (the
-  "safe lane": results are exactly Django's). Roadmap step 6 (the fast lane)
-  moves that work to Rust for common queries.
+  thread (shared by every other Django async call).
+- **A round trip to djox's threads costs about 65 to 90 µs.** That is "djox":
+  raw SQL with nothing else to do, against 5 µs for SQLite itself. It is close
+  to the floor of waking a thread and waking the event loop again on this VM.
+  A fast-lane get spends about 80 µs on top of it, in Python.
 
 ### What made the round trip faster
 
