@@ -1,7 +1,7 @@
 """Rust's conversions give exactly what Django's SQLite converters give.
 
 Each test reads values the way SQLite hands them back (text, floats,
-integers) through `djox.InstanceBuilder` with the conversion the fast lane
+integers) through `djox.ResultBuilder` with the conversion the fast lane
 chooses, and compares with Django's own converter, value by value and type by type.
 """
 
@@ -12,13 +12,11 @@ from typing import Any
 
 import pytest
 from django.db import connection, models
-from django.db.models.base import ModelState
 from django.db.models.expressions import Col
 from django.test import override_settings
 
-from djox._core import InstanceBuilder
+from djox._core import ResultBuilder
 from djox._fast_lane.conversions import conversion_for
-from tests.e2e.library.models import Book
 
 
 def column_of(field: "models.Field[Any, Any]") -> Col:
@@ -37,14 +35,14 @@ def django_converts(field: "models.Field[Any, Any]", value: Any) -> Any:
 
 
 def rust_converts(field: "models.Field[Any, Any]", value: Any) -> Any:
-    """What `InstanceBuilder` makes of `value`, with the conversion the fast lane picks."""
+    """What `ResultBuilder` makes of `value`, with the conversion the fast lane picks."""
     column = column_of(field)
     converters = connection.ops.get_db_converters(column) + field.get_db_converters(connection)
     conversion = conversion_for(converters, column, connection)
     assert conversion is not None, "the fast lane converts this field in Rust"
-    builder = InstanceBuilder(Book, ["value"], [(converters, column)], [conversion], connection, ModelState)
-    [built] = builder.build([(value,)], "default")
-    return built.value
+    builder = ResultBuilder(["value"], [(converters, column)], [conversion], connection)
+    [(built,)] = builder.tuples([(value,)])
+    return built
 
 
 def outcome(convert: Any, field: "models.Field[Any, Any]", value: Any) -> Any:

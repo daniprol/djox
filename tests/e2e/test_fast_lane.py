@@ -479,3 +479,61 @@ def test_a_failed_update_marks_the_transaction_for_rollback() -> None:
         assert transaction.get_rollback()
         transaction.set_rollback(False)
     assert Book.objects.filter(title="Dune").count() == 1
+
+
+# ---------------------------------------------------------------- values() and values_list()
+
+VALUES_QUERYSETS: dict[str, MakeQuerySet] = {
+    "values()": lambda: Book.objects.order_by("pk").values(),
+    "values of some fields": lambda: Book.objects.filter(pages__gt=300).values("title", "price", "published"),
+    "values of a foreign key": lambda: Book.objects.order_by("title").values("author", "pk"),
+    "values_list()": lambda: Book.objects.order_by("-pages").values_list(),
+    "values_list of some fields": lambda: Book.objects.values_list("pages", "in_print").order_by("pages"),
+    "values_list flat": lambda: Book.objects.order_by("title").values_list("title", flat=True),
+    "filtered after values": lambda: Book.objects.values("title").filter(in_print=True).order_by("title")[1:],
+}
+
+
+@pytest.mark.parametrize("make_queryset", VALUES_QUERYSETS.values(), ids=VALUES_QUERYSETS.keys())
+@pytest.mark.usefixtures("library")
+def test_values_give_djangos_rows(make_queryset: MakeQuerySet) -> None:
+    def answers() -> dict[str, Any]:
+        return {
+            "list": list(make_queryset()),
+            "first": make_queryset().first(),
+            "count": make_queryset().count(),
+            "iterator": list(make_queryset().iterator()),
+        }
+
+    expected = djangos(answers)
+    assert answers() == expected
+    assert make_queryset()._simple_query is not None, "noted for the fast lane"
+    assert any(found.result_builder for found in fast_statements()), "the fast lane built the rows"
+
+
+@pytest.mark.parametrize("make_queryset", VALUES_QUERYSETS.values(), ids=VALUES_QUERYSETS.keys())
+@pytest.mark.usefixtures("library")
+async def test_async_values_give_djangos_rows(make_queryset: MakeQuerySet) -> None:
+    expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
+    assert [row async for row in make_queryset()] == expected
+    assert any(found.result_builder for found in fast_statements()), "the fast lane built the rows"
+
+
+@pytest.mark.usefixtures("library")
+def test_get_on_values_returns_a_dict() -> None:
+    assert Book.objects.values("title", "pages").get(title="Dune") == {"title": "Dune", "pages": 412}
+    assert Book.objects.values_list("pages", flat=True).get(title="Emma") == 474
+
+
+def test_values_the_fast_lane_leaves_to_django() -> None:
+    for queryset in [
+        Book.objects.values("author__name"),
+        Book.objects.values_list("title", named=True),
+        Book.objects.values(pages_twice=F("pages") * 2),
+        Book.objects.values("title", "title"),
+    ]:
+        assert queryset._simple_query is None  # type: ignore[attr-defined]  # djox.QuerySet's
+    with pytest.raises(TypeError, match="'flat' is not valid when values_list is called with more than one field"):
+        Book.objects.values_list("title", "pages", flat=True)  # type: ignore[misc]  # wrong on purpose
+    with pytest.raises(TypeError, match=r"Cannot call delete\(\) after .values\(\)"):
+        Book.objects.values("title").delete()
