@@ -111,6 +111,12 @@ exclude = ["tests/django_suite/backends/", "tests/django_suite/db_functions/", "
 strict = true
 plugins = ["mypy_django_plugin.main"]
 
+# The apps of Django's ported tests, which mypy doesn't check (see `exclude`).
+# Django's plugin still looks for them, as models of installed apps.
+[[tool.mypy.overrides]]
+module = ["async.*", "backends.*", "db_functions.*", "transactions.*"]
+ignore_missing_imports = true
+
 [tool.django-stubs]
 django_settings_module = "tests.settings"
 

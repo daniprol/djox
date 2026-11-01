@@ -20,7 +20,10 @@ if DJANGO_SUITE not in sys.path:
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",  # Django's own `backends` tests use generic relations
+    "django.contrib.auth",  # a library's models, switched to djox by DJOX_MODELS
+    "djox",
     "tests.e2e.library",
+    "tests.e2e.shelf",
     # Django's own tests, ported (see tests/django_suite/README.md)
     "backends",
     "transactions",
@@ -33,6 +36,10 @@ DATABASES = {
         "NAME": Path(tempfile.gettempdir()) / "djox-tests.sqlite3",
     }
 }
+# The models djox switches over (`djox.install`): Django's `auth` app, and
+# `shelf`, whose models are written as if djox didn't exist. Not "__all__",
+# so Django's ported tests keep testing what they were ported for.
+DJOX_MODELS = ["auth", "shelf"]
 USE_TZ = True
 TIME_ZONE = "UTC"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

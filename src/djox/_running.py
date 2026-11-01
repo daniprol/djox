@@ -36,8 +36,12 @@ if TYPE_CHECKING:
     from djox._core import Row
 
 
-async def fetch_all(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]":
-    """Run a statement and return all its rows. `sql` uses Django's `%s` placeholders."""
+async def fetch_all(alias: str, sql: str, parameters: Sequence[Any], writes: bool = False) -> "list[Row]":
+    """Run a statement and return all its rows. `sql` uses Django's `%s` placeholders.
+
+    `writes` is `True` for a statement that writes and returns rows (`INSERT
+    ... RETURNING`): it then takes part in the write turn, like `execute()`.
+    """
     started = time.perf_counter()
     transaction_wrapper = open_sync_transaction(alias)
     if transaction_wrapper is not None:
@@ -48,7 +52,11 @@ async def fetch_all(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Ro
     else:
         wrapper = django_connections[alias]
         with wrapper.wrap_database_errors:
-            rows = await djox.connections[alias].fetch_all(sql, parameters)
+            if writes:
+                async with write_turns().plain_write(alias):
+                    rows = await djox.connections[alias].fetch_all(sql, parameters)
+            else:
+                rows = await djox.connections[alias].fetch_all(sql, parameters)
         log_query(wrapper, sql, parameters, started)
     return rows
 
@@ -64,10 +72,25 @@ async def execute(alias: str, sql: str, parameters: Sequence[Any]) -> int:
     else:
         wrapper = django_connections[alias]
         with wrapper.wrap_database_errors:
-            executed = await djox.connections[alias].execute(sql, parameters)
+            # Shares the write turn with other plain writes, and waits for a
+            # transaction that has it (see `djox._write_turns`).
+            async with write_turns().plain_write(alias):
+                executed = await djox.connections[alias].execute(sql, parameters)
         rows_affected = executed.rows_affected
         log_query(wrapper, sql, parameters, started)
     return rows_affected
+
+
+def write_turns() -> Any:
+    """The `djox._write_turns` module.
+
+    Imported here, when first needed, rather than at the top of this file:
+    it needs djox's `DatabaseWrapper`, whose module imports this one, and
+    Python can't import two modules that each need the other at the top.
+    """
+    from djox import _write_turns
+
+    return _write_turns
 
 
 def open_sync_transaction(alias: str) -> Any:

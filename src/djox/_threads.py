@@ -1,21 +1,29 @@
-"""djox's own threads for Django's sync code, and the turns writers take.
+"""djox's own threads, for Django's sync code.
 
 Some work can only run as Django's sync code: a transaction (`atomic()` must
 run on one thread, with that thread's connection), and Django methods that
 djox doesn't run itself yet (`get_or_create()`, `bulk_create()`, deletes that
-cascade, `prefetch_related()`, `Model.save()`...).
+cascade, `prefetch_related()`, `Model.save()`, a related manager's `aadd()`...).
 
 Django's own async methods send all of that to one shared "sync thread", one
 call at a time, for the whole process. djox sends it to a small pool of its
 own threads instead, so these calls don't queue behind each other (or behind
-Django's other async calls). Each thread keeps its Django connections open,
-so the next call doesn't pay to open and prepare one.
+Django's other async calls).
+
+Each pooled thread keeps its Django connections open between calls, and
+looks after them the way Django looks after a request thread's connections:
+once per request (Django's `request_started` and `request_finished`
+signals), before its next call, it runs Django's `close_old_connections()`.
+That honours `CONN_MAX_AGE` (`0`, Django's default, closes the connection
+after each request; `None` keeps it) and `CONN_HEALTH_CHECKS`, and drops a
+connection that broke. A program without requests (a script) keeps them open,
+like Django does.
 
 | Function               | What it does                                                |
 |------------------------|-------------------------------------------------------------|
 | `run_django_method()`  | Run a sync Django method on a pooled thread (or in the transaction this code is in) |
 | `take_idle_thread()`, `give_back_idle_thread()` | The pool itself (`djox.atomic()` uses it too) |
-| `wait_for_write_turn()` | Writers on one SQLite file take turns, in asyncio            |
+| `tidy_connections()`   | On a pooled thread: Django's connection upkeep, once per request |
 """
 
 import asyncio
@@ -25,13 +33,14 @@ import weakref
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from asgiref.sync import sync_to_async
-from django.db import OperationalError
+from django.core.signals import request_finished, request_started
+from django.db import close_old_connections
 from django.db import connections as django_connections
 
-from djox import _running
+from djox import _running, _write_turns
 from djox.backends.sqlite3.base import DatabaseWrapper
 
 Result = TypeVar("Result")
@@ -40,8 +49,8 @@ Result = TypeVar("Result")
 # are closed when their call ends.
 MAX_IDLE_THREADS = 8
 
-# The most threads that read at once, per event loop. (Writers take turns, so
-# at most one writes.) Each thread holds a connection.
+# The most pooled threads that read at once, per event loop. (Writers take
+# turns, so at most one writes.) Each thread holds a connection.
 MAX_READING_THREADS = 8
 
 
@@ -51,8 +60,8 @@ async def run_django_method(alias: str, method: Callable[[], Result], writes: bo
     Inside a transaction (a `djox.atomic()` block, or a sync `atomic()` around
     this code), it runs on the transaction's thread, so it joins the
     transaction. Otherwise it runs on a pooled thread of its own. `writes`
-    says whether it may write: then it waits for its turn on `alias`'s file
-    first (see `wait_for_write_turn()`).
+    says whether it may write: then it waits to have the write turn of
+    `alias`'s file to itself first (see `djox._write_turns`).
 
     On a database whose `ENGINE` isn't djox's, it runs like Django's own
     async methods do (on Django's sync thread).
@@ -63,26 +72,29 @@ async def run_django_method(alias: str, method: Callable[[], Result], writes: bo
         # `thread_sensitive=True` sends it to the transaction's thread (asgiref
         # finds it from this context, like `sync_to_async()` in your own code).
         return await sync_to_async(method, thread_sensitive=True)()
+    if writes:
+        async with _write_turns.transaction_alone(alias):
+            return await run_on_pooled_thread(method)
+    async with reading_slots_of_this_loop():
+        return await run_on_pooled_thread(method)
 
-    write_turn = await wait_for_write_turn(alias) if writes else None
-    reading_slot = None if writes else reading_slots_of_this_loop()
+
+async def run_on_pooled_thread(method: Callable[[], Result]) -> Result:
+    """Run `method` on an idle pooled thread, after its connection upkeep."""
+
+    def tidy_then_run() -> Result:
+        tidy_connections()
+        return method()
+
+    thread = take_idle_thread()
     try:
-        if reading_slot is not None:
-            await reading_slot.acquire()
-        thread = take_idle_thread()
-        try:
-            # `run_in_executor()` runs `method` on `thread` and lets this task
-            # await it. `copy_context().run` runs it with this task's context
-            # variables, like `sync_to_async()` does.
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(thread, contextvars.copy_context().run, method)
-        finally:
-            give_back_idle_thread(thread)
+        # `run_in_executor()` runs the function on `thread` and lets this task
+        # await it. `copy_context().run` runs it with this task's context
+        # variables, like `sync_to_async()` does.
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(thread, contextvars.copy_context().run, tidy_then_run)
     finally:
-        if reading_slot is not None:
-            reading_slot.release()
-        if write_turn is not None:
-            write_turn.release()
+        give_back_idle_thread(thread)
 
 
 # ---------------------------------------------------------------- the pool
@@ -118,74 +130,51 @@ def give_back_idle_thread(thread: ThreadPoolExecutor) -> None:
     thread.shutdown(wait=False)
 
 
-# ---------------------------------------------------------------- turns
-
-
-async def wait_for_write_turn(alias: str) -> asyncio.Lock | None:
-    """Wait until nothing else of this event loop writes to `alias`'s SQLite
-    file from djox's threads, and return the lock to release when done (or
-    `None` if writers needn't wait).
-
-    SQLite runs one write transaction at a time. djox's `ENGINE` starts
-    transactions with `BEGIN IMMEDIATE`, which takes the write lock at once,
-    so two can't both be open. Without turns, the second `BEGIN` would wait
-    inside SQLite, which retries with growing sleeps (up to 100 ms each):
-    with many writers at once, most of the time would be spent asleep.
-    Waiting here instead, each writer starts the moment the previous one ends.
-
-    Like SQLite, it gives up after the alias's `timeout` option, with
-    "database is locked".
-    """
-    wrapper = django_connections[alias]
-    if not isinstance(wrapper, DatabaseWrapper):
-        return None  # not djox's SQLite: the database itself decides who waits
-    options = wrapper.options()
-    if options.transaction_mode not in ("IMMEDIATE", "EXCLUSIVE"):
-        return None  # a deferred transaction takes the write lock only when it writes
-    lock = locks_of_this_loop(write_turns, alias, asyncio.Lock)
-    try:
-        async with asyncio.timeout(options.timeout):
-            await lock.acquire()
-    except TimeoutError:
-        raise OperationalError(
-            f"database is locked: another write to {alias!r} lasted more than "
-            f"{options.timeout} seconds (the 'timeout' option)"
-        ) from None
-    return lock
-
-
 def reading_slots_of_this_loop() -> asyncio.Semaphore:
-    """The semaphore that limits how many pooled threads read at once."""
-    return locks_of_this_loop(reading_slots, "all", lambda: asyncio.Semaphore(MAX_READING_THREADS))
+    """The semaphore that limits how many pooled threads read at once.
 
-
-LockType = TypeVar("LockType")
-
-
-def locks_of_this_loop(
-    locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, LockType]]",
-    name: str,
-    make_lock: Callable[[], LockType],
-) -> LockType:
-    """The lock called `name` of the running event loop, made on first use.
-
-    An asyncio lock belongs to one event loop, and a program may run several
-    loops (one per thread). A `WeakKeyDictionary` forgets a loop's locks
-    once the loop is gone.
+    An asyncio object belongs to one event loop, and a program may run several
+    loops (one per thread), so each loop has its own.
     """
     loop = asyncio.get_running_loop()
-    with locks_lock:
-        if loop not in locks:
-            locks[loop] = {}
-        if name not in locks[loop]:
-            locks[loop][name] = make_lock()
-        return locks[loop][name]
+    with idle_threads_lock:
+        if loop not in reading_slots:
+            reading_slots[loop] = asyncio.Semaphore(MAX_READING_THREADS)
+        return reading_slots[loop]
 
 
-write_turns: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]" = (
-    weakref.WeakKeyDictionary()
-)
-reading_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Semaphore]]" = (
-    weakref.WeakKeyDictionary()
-)
-locks_lock = threading.Lock()
+reading_slots: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+
+
+# ---------------------------------------------------------------- connection upkeep
+
+# How many requests have started or finished in this process. A pooled
+# thread compares it with the number it saw last, to know a request went by.
+requests_seen = 0
+requests_seen_lock = threading.Lock()
+
+# Each pooled thread's own memory of `requests_seen`. A `threading.local()`
+# holds a separate value for each thread, like a dict keyed by thread.
+this_thread = threading.local()
+
+
+def note_request(**kwargs: Any) -> None:
+    """Count a request starting or finishing (receiver of Django's request signals)."""
+    global requests_seen  # `global`: this function changes the module's variable
+    with requests_seen_lock:
+        requests_seen += 1
+
+
+# `dispatch_uid` makes connecting twice (the module imported twice) harmless.
+request_started.connect(note_request, dispatch_uid="djox_note_request_started")
+request_finished.connect(note_request, dispatch_uid="djox_note_request_finished")
+
+
+def tidy_connections() -> None:
+    """On a pooled thread, before its next call: if a request went by since
+    the last time, run Django's `close_old_connections()` on this thread's
+    connections, as Django does on a request thread (see the module docs)."""
+    if getattr(this_thread, "requests_seen", None) == requests_seen:
+        return
+    this_thread.requests_seen = requests_seen
+    close_old_connections()
