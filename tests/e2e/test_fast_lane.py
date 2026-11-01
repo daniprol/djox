@@ -1,18 +1,20 @@
 """The fast lane: simple queries reuse Django's SQL per shape, and Rust builds the objects.
 
-Each test checks two things: the answer is exactly Django's (compared with
-Django's sync methods, which build the query the usual way), and the fast
-lane really ran (or really stepped aside).
+Each test checks two things: the answer is exactly Django's (computed with
+the fast lane off, `djangos()`), and the fast lane really ran (or really
+stepped aside). The fast lane serves sync methods too (`list()`, `get()`,
+`count()`...), so both kinds are tested.
 """
 
 import asyncio
 import datetime
 import decimal
 from collections.abc import Callable, Iterator
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 from asgiref.sync import async_to_sync, sync_to_async
+from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, models, transaction
 from django.db.models import F, Q
 from django.db.models.signals import post_init
@@ -68,6 +70,17 @@ def fields_of(book: models.Model) -> dict[str, Any]:
     return {**values, "db": book._state.db, "adding": book._state.adding}
 
 
+Answer = TypeVar("Answer")
+
+
+def djangos(answer: Callable[[], Answer]) -> Answer:
+    """`answer()` computed by Django alone: with the fast lane off, a new
+    queryset keeps no note, so Django builds its `Query` and its objects.
+    (Changing a setting also makes the fast lane forget its statements.)"""
+    with override_settings(DJOX_FAST_LANE=False):
+        return answer()
+
+
 def fast_statements() -> list[Statement]:
     """The statements the fast lane kept (shapes it runs itself)."""
     return [found for found in statements.statements.values() if isinstance(found, Statement)]
@@ -94,11 +107,11 @@ SIMPLE_QUERYSETS: dict[str, MakeQuerySet] = {
 @pytest.mark.parametrize("make_queryset", SIMPLE_QUERYSETS.values(), ids=SIMPLE_QUERYSETS.keys())
 @pytest.mark.usefixtures("library")
 async def test_simple_querysets_give_djangos_objects(make_queryset: MakeQuerySet) -> None:
+    expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
     queryset = make_queryset()
     assert queryset._simple_query is not None, "every step was noted for the fast lane"
     books = [book async for book in queryset]
     assert queryset._simple_query is not None, "the fast lane ran it: Django's Query was never built"
-    expected = await sync_to_async(lambda: list(make_queryset()))()
     assert [fields_of(book) for book in books] == [fields_of(book) for book in expected]
     assert len(fast_statements()) == 1
 
@@ -106,7 +119,7 @@ async def test_simple_querysets_give_djangos_objects(make_queryset: MakeQuerySet
 @pytest.mark.parametrize("make_queryset", SIMPLE_QUERYSETS.values(), ids=SIMPLE_QUERYSETS.keys())
 @pytest.mark.usefixtures("library")
 async def test_counts_and_exists_are_djangos(make_queryset: MakeQuerySet) -> None:
-    expected_count = await sync_to_async(lambda: make_queryset().count())()
+    expected_count = await sync_to_async(djangos)(lambda: make_queryset().count())
     assert await make_queryset().acount() == expected_count
     assert await make_queryset().aexists() is (expected_count > 0)
     assert len(fast_statements()) == 2, "one count and one exists statement"
@@ -114,8 +127,9 @@ async def test_counts_and_exists_are_djangos(make_queryset: MakeQuerySet) -> Non
 
 @pytest.mark.usefixtures("library")
 async def test_aget_afirst_and_alast_take_the_fast_lane() -> None:
+    expected = await sync_to_async(djangos)(lambda: Book.objects.get(title="Dune"))
     dune = await Book.objects.aget(title="Dune")
-    assert fields_of(dune) == fields_of(await sync_to_async(Book.objects.get)(title="Dune"))
+    assert fields_of(dune) == fields_of(expected)
     assert (await Book.objects.filter(pages__gt=300).order_by("pages").afirst()).title == "Dune"  # type: ignore[union-attr]
     assert (await Book.objects.order_by("pages").alast()).title == "Emma"  # type: ignore[union-attr]
     assert (await Book.objects.afirst()).title == "Dune", "no ordering: by primary key, like Django"  # type: ignore[union-attr]
@@ -133,11 +147,14 @@ async def test_aget_keeps_djangos_exceptions() -> None:
         await Book.objects.aget(author_id=herbert.id)
 
 
+PAGES = [100, 250, 300, 450]
+
+
 @pytest.mark.usefixtures("library")
 async def test_a_shape_is_written_once_and_reused_with_new_values() -> None:
-    for pages in [100, 250, 300, 450]:
-        expected = await sync_to_async(lambda pages=pages: Book.objects.filter(pages__gt=pages).count())()
-        assert await Book.objects.filter(pages__gt=pages).acount() == expected
+    expected = await sync_to_async(djangos)(lambda: [Book.objects.filter(pages__gt=pages).count() for pages in PAGES])
+    for pages, count in zip(PAGES, expected, strict=True):
+        assert await Book.objects.filter(pages__gt=pages).acount() == count
     assert len(fast_statements()) == 1, "four queries, one shape"
 
 
@@ -202,8 +219,8 @@ DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
 @pytest.mark.parametrize("make_queryset", DJANGO_QUERYSETS.values(), ids=DJANGO_QUERYSETS.keys())
 @pytest.mark.usefixtures("library")
 async def test_other_querysets_go_to_django(make_queryset: MakeQuerySet) -> None:
+    expected = await sync_to_async(djangos)(lambda: list(make_queryset().order_by("pk")))
     books = [book async for book in make_queryset().order_by("pk")]
-    expected = await sync_to_async(lambda: list(make_queryset().order_by("pk")))()
     assert [book.pk for book in books] == [book.pk for book in expected]
     assert fast_statements() == []
 
@@ -224,7 +241,8 @@ async def test_changing_a_list_after_filter_changes_nothing() -> None:
     queryset = Book.objects.filter(title__in=titles)
     titles.append("Dune")
     assert await queryset.acount() == 1
-    assert await sync_to_async(lambda: queryset.all().count())() == 1, "nor in Django's Query built from the note"
+    # `Q()` isn't noted, so Django builds its `Query` from the note.
+    assert await sync_to_async(lambda: queryset.filter(Q(pk__gt=0)).count())() == 1, "nor in Django's Query"
 
 
 @pytest.mark.usefixtures("library")
@@ -283,3 +301,69 @@ def test_sync_code_builds_djangos_query_from_the_note() -> None:
     queryset = Book.objects.filter(pages__gt=300).order_by("-pages")[:1]
     assert str(queryset.query).endswith('ORDER BY "library_book"."pages" DESC LIMIT 1')
     assert list(queryset) == []
+
+
+# ---------------------------------------------------------------- sync methods
+
+
+@pytest.mark.parametrize("make_queryset", SIMPLE_QUERYSETS.values(), ids=SIMPLE_QUERYSETS.keys())
+@pytest.mark.usefixtures("library")
+def test_sync_methods_give_djangos_answers(make_queryset: MakeQuerySet) -> None:
+    def answers() -> dict[str, Any]:
+        return {
+            "list": [fields_of(book) for book in make_queryset()],
+            "iterator": [fields_of(book) for book in make_queryset().iterator(chunk_size=1)],
+            "count": make_queryset().count(),
+            "exists": make_queryset().exists(),
+            "len": len(make_queryset()),
+            "first": fields_of(make_queryset().first()) if make_queryset().exists() else None,
+        }
+
+    expected = djangos(answers)
+    assert answers() == expected
+    assert fast_statements(), "the fast lane ran them"
+
+
+@pytest.mark.usefixtures("library")
+def test_sync_get_first_last_and_contains_take_the_fast_lane() -> None:
+    expected = djangos(lambda: fields_of(Book.objects.get(title="Dune")))
+    dune = Book.objects.get(title="Dune")
+    assert fields_of(dune) == expected
+    assert Book.objects.order_by("pages").first().title == "Persuasion"  # type: ignore[union-attr]
+    assert Book.objects.order_by("pages").last().title == "Emma"  # type: ignore[union-attr]
+    assert Book.objects.last().title == "Persuasion", "no ordering: by primary key, like Django"  # type: ignore[union-attr]
+    assert Book.objects.filter(pages__gt=300).contains(dune)
+    assert not Book.objects.filter(pages__lt=300).contains(dune)
+    queryset: Any = Book.objects.filter(pages__gt=300)
+    list(queryset)
+    assert queryset._simple_query is not None, "Django's Query was never built"
+    with pytest.raises(Book.DoesNotExist, match=r"Book matching query does not exist\."):
+        Book.objects.get(title="Ulysses")
+    with pytest.raises(Book.MultipleObjectsReturned, match=r"it returned 2!"):
+        Book.objects.get(author=dune.author)
+
+
+@pytest.mark.usefixtures("library")
+def test_sync_queries_run_djangos_sql_in_djangos_transaction() -> None:
+    with transaction.atomic():
+        Book.objects.filter(title="Dune").update(pages=1)  # only this transaction sees it
+        with CaptureQueriesContext(connection) as captured:
+            assert Book.objects.filter(pages__lt=10).count() == 1
+            assert [book.title for book in Book.objects.filter(pages__lt=10)] == ["Dune"]
+        transaction.set_rollback(True)
+    assert len(captured.captured_queries) == 2, "logged like Django's queries"
+    assert Book.objects.filter(pages__lt=10).count() == 0
+
+
+@pytest.mark.usefixtures("library")
+def test_iterator_builds_instances_chunk_by_chunk() -> None:
+    iterator = Book.objects.order_by("pk").iterator(chunk_size=3)
+    titles = [book.title for book in iterator]
+    assert titles == ["Dune", "Dune Messiah", "Emma", "Persuasion"]
+    with pytest.raises(ValueError, match="Chunk size must be strictly positive"):
+        Book.objects.iterator(chunk_size=0)
+
+
+async def test_sync_methods_refuse_to_run_in_async_code_like_djangos() -> None:
+    with pytest.raises(SynchronousOnlyOperation):
+        Book.objects.filter(pages__gt=300).count()

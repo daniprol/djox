@@ -1,7 +1,8 @@
-"""Where an async query runs: on djox's async database, or in an open sync transaction.
+"""Where a query of `djox.QuerySet` runs: on djox's async database, in an
+open sync transaction, or, for sync code, on Django's own connection.
 
 `djox.QuerySet` builds SQL with Django's compiler, then calls `fetch_all()` or
-`execute()` here to run it. Usually the SQL goes to the async `djox.Database`
+`execute()` here to run it (or `fetch_all_now()`, from sync code). Usually the SQL goes to the async `djox.Database`
 of the alias (`djox.connections[alias]`), which never blocks the event loop.
 
 There is one exception. When this code runs inside a sync transaction on the
@@ -59,6 +60,19 @@ async def fetch_all(alias: str, sql: str, parameters: Sequence[Any], writes: boo
                 rows = await djox.connections[alias].fetch_all(sql, parameters)
         log_query(wrapper, sql, parameters, started)
     return rows
+
+
+def fetch_all_now(alias: str, sql: str, parameters: Sequence[Any]) -> "list[Row]":
+    """Run a statement from sync code and return all its rows.
+
+    Like Django's sync methods: on this thread's Django connection, through
+    a Django cursor, so it joins this thread's transaction, is logged, and
+    raises Django's exceptions, all by Django's own code. (And, like them,
+    it refuses to run inside async code: `SynchronousOnlyOperation`.)
+    """
+    with django_connections[alias].cursor() as cursor:
+        cursor.execute(sql, parameters)
+        return cursor.fetchall()  # type: ignore[no-any-return]  # Django's cursor is untyped
 
 
 async def execute(alias: str, sql: str, parameters: Sequence[Any]) -> int:
