@@ -25,6 +25,7 @@ def add_dune(title: str = "Dune", pages: int = 412) -> Book:
     )
 
 
+@pytest.mark.sqlite_only("Django's sync ORM runs on psycopg on Postgres")
 @pytest.mark.django_db
 def test_djangos_connection_is_a_djox_connection() -> None:
     connection.ensure_connection()
@@ -34,6 +35,7 @@ def test_djangos_connection_is_a_djox_connection() -> None:
     assert connection.get_database_version() >= (3, 54)
 
 
+@pytest.mark.sqlite_only("SQLite's WAL files")
 @pytest.mark.django_db
 def test_the_test_database_is_a_wal_file() -> None:
     assert Path(connection.settings_dict["NAME"]).name == "test_djox-tests.sqlite3"
@@ -132,6 +134,7 @@ def test_set_autocommit_false_keeps_writes_until_commit() -> None:
     assert Book.objects.count() == 1
 
 
+@pytest.mark.sqlite_only("SQLite's single writer lock")
 @pytest.mark.django_db(transaction=True)
 def test_atomic_takes_the_write_lock_at_begin() -> None:
     queries: list[str] = []

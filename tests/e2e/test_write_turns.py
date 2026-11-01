@@ -17,7 +17,10 @@ from django.db import connections as django_connections
 import djox
 from tests.e2e.library.models import Author
 
-pytestmark = pytest.mark.django_db(transaction=True)
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.sqlite_only("write turns, for SQLite's single writer"),
+]
 
 
 async def hold_a_transaction(started: asyncio.Event, release: asyncio.Event) -> None:

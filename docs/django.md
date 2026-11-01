@@ -15,6 +15,7 @@ DATABASES = {
 Everything keeps working: the ORM, migrations, the admin, `manage.py test`,
 transactions. The difference is underneath: every query now runs on the
 SQLite bundled in djox, instead of the one inside Python's `sqlite3` module.
+On Postgres, use `"djox.backends.postgresql"` (see [Postgres](#postgres)).
 
 ## Why it matters
 
@@ -388,6 +389,61 @@ raises `ImproperlyConfigured`.
   affected: its converters parse the text, as they always did.
 - **Math functions run in SQLite.** `Power`, `Sqrt`, `ACos`... are built into
   djox's SQLite, instead of being Python functions.
+
+## Postgres
+
+djox has a Postgres `ENGINE` too:
+
+```python
+# settings.py
+DATABASES = {
+    "default": {
+        "ENGINE": "djox.backends.postgresql",  # was "django.db.backends.postgresql"
+        "NAME": "app",
+        "USER": "django",
+        "PASSWORD": "...",
+        "HOST": "localhost",
+        "PORT": 5432,
+        "OPTIONS": {"async_pool_size": 10},
+    }
+}
+```
+
+It is Django's own Postgres backend for everything sync (migrations, the
+admin, the sync ORM, `manage.py test`), still on psycopg, which you install
+as usual (`uv add "psycopg[binary]"`). Async code (`djox.Manager`,
+`djox.atomic()`, `djox.connections[alias]`) runs on a pool of connections
+that Rust owns, so `await Book.objects.aget(...)` never takes a thread. The
+two drivers are simply two clients of the same server, so, unlike with
+SQLite, they can't lose each other's writes.
+
+Everything above works the same: the fast lane, streaming `aiterator()`,
+hooks, `djox.atomic()` and queries inside a sync transaction. Writers don't
+take turns: Postgres locks rows, so it lets many transactions write at once.
+
+`OPTIONS` are psycopg's, as with Django's backend, plus one of djox's:
+
+| Option            | Default | What it does                                                  |
+|-------------------|---------|---------------------------------------------------------------|
+| `async_pool_size` | `10`    | The most connections `djox.connections[alias]` opens at once  |
+
+The async pool connects with the same `NAME`, `USER`, `PASSWORD`, `HOST`,
+`PORT` and libpq settings (`connect_timeout`, `application_name`,
+`options`, `target_session_attrs`...), and uses the same time zone as
+Django's connections. Values come back as the same Python objects psycopg
+gives Django (`Decimal`, aware `datetime`, `UUID`, JSON as text...).
+
+Not supported yet, so these raise `ImproperlyConfigured` instead of being
+quietly ignored:
+
+- **TLS.** `sslmode` must be `disable`, `allow` or `prefer` (the async pool
+  doesn't encrypt). Use it on a private network or through a local proxy
+  for now.
+- **`service`** (`pg_service.conf`) and **`assume_role`**.
+
+Reading array, range and `hstore` columns from async code isn't supported
+yet either: the query raises `ProgrammingError` ("djox can't read the
+Postgres type ... yet"). Sync queries are unaffected.
 
 ## Good to know
 

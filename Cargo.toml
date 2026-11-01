@@ -12,7 +12,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 djox = { path = "crates/djox" }
-pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
+# `chrono` and `uuid`: turn the dates and UUIDs Postgres returns into Python's `datetime` and `uuid.UUID`.
+pyo3 = { version = "0.30.1", features = ["abi3-py311", "chrono", "uuid"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [workspace]
 members = [".", "crates/djox-core", "crates/djox"]

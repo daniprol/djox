@@ -10,6 +10,7 @@ from io import StringIO
 from typing import Any
 
 import pytest
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.db.models.signals import m2m_changed, pre_save
@@ -97,6 +98,9 @@ def test_a_switched_queryset_can_be_pickled() -> None:
     assert type(again) is type(queryset)
 
 
+@pytest.mark.skipif(
+    "auth" in getattr(settings, "MIGRATION_MODULES", {}), reason="auth's migrations are off (Postgres test settings)"
+)
 def test_migrations_dont_see_djox() -> None:
     # `auth`'s `UserManager` is written down in its migrations: switching it
     # to djox must not look like a change.

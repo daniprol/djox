@@ -13,4 +13,5 @@ djox grows in small steps. Each one is useful on its own.
 | 5 | Hooks: plain functions called before and after every statement (`djox.add_hooks()`), able to watch or change it; Django's signals keep working | done |
 | 6 | The fast lane: simple reads (`aget`, `async for`, `acount`...) skip Django's query building and compiler, reusing the SQL Django wrote for the same query shape, and Rust builds the model instances | done |
 | 6b | The fast lane for sync methods, for writes (`update`, `delete`), `values()` and `values_list()`; dates, times, decimals and booleans converted in Rust; `aiterator()` streams its rows | done |
-| later | Postgres, `prefetch_related`, more of the fast lane (`F()` in `update()`, joins, `annotate()`) | |
+| 7 | Postgres: `djox.Database.postgres()` (a pool of Rust connections) and the `djox.backends.postgresql` `ENGINE` (Django's backend on psycopg for sync code, djox for async code) | done |
+| later | `prefetch_related`, TLS for Postgres, more of the fast lane (`F()` in `update()`, joins, `annotate()`) | |

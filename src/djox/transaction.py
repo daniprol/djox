@@ -57,7 +57,13 @@ from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db import connections as django_connections
 
 from djox import _running, _write_turns
-from djox._threads import give_back_idle_thread, take_idle_thread, tidy_connections, transaction_thread
+from djox._threads import (
+    give_back_idle_thread,
+    slots_of_this_loop,
+    take_idle_thread,
+    tidy_connections,
+    transaction_thread,
+)
 
 Parameters = ParamSpec("Parameters")
 Result = TypeVar("Result")
@@ -140,6 +146,7 @@ class Atomic:
         """
         steps = self.outermost_block
         await steps.enter_async_context(_write_turns.transaction_alone(alias))
+        await steps.enter_async_context(slots_of_this_loop(writing=True))
         thread = take_idle_thread()
         steps.callback(give_back_idle_thread, thread)
         await steps.enter_async_context(ThreadSensitiveContext(executor=thread))

@@ -191,6 +191,7 @@ async def test_transactions_at_once_each_commit_their_own_rows() -> None:
     assert await names() == [f"Author {number:02}!" for number in range(20)]
 
 
+@pytest.mark.sqlite_only("write turns, for SQLite's single writer")
 async def test_a_block_gives_up_waiting_for_its_turn_after_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     # SQLite has one writer, so blocks take turns. Like SQLite, a block waits
     # at most the `timeout` option for the block before it.

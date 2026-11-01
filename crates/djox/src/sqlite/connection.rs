@@ -7,6 +7,7 @@
 //! `djox.Connection` (used by Django's sync ORM) calls these methods on the
 //! caller's thread, after letting other Python threads run.
 
+use chrono::Timelike; // `.nanosecond()` on times and datetimes
 use djox_core::{ChunkRequests, Error, Executed, Result, Rows, Value};
 use rusqlite::limits::Limit;
 use rusqlite::types::{ToSqlOutput, ValueRef};
@@ -352,8 +353,55 @@ pub(super) fn to_sqlite(value: &Value) -> ToSqlOutput<'_> {
         Value::Real(number) => ValueRef::Real(*number),
         Value::Text(text) => ValueRef::Text(text.as_bytes()),
         Value::Blob(bytes) => ValueRef::Blob(bytes),
+        // The typed values have no SQLite storage class of their own: they
+        // become a new integer or text (`Owned`, since nothing holds it yet).
+        typed => return ToSqlOutput::Owned(typed_to_sqlite(typed)),
     };
     ToSqlOutput::Borrowed(borrowed)
+}
+
+/// A typed value (see `Value`) stored the way Django's SQLite backend stores
+/// it: booleans as `1` or `0`, durations as microseconds, dates, times and
+/// decimals as the text Python's `isoformat()` and `str()` write.
+pub(super) fn typed_to_sqlite(value: &Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value as Stored;
+    match value {
+        Value::Null => Stored::Null,
+        Value::Integer(number) => Stored::Integer(*number),
+        Value::Real(number) => Stored::Real(*number),
+        Value::Text(text) => Stored::Text(text.clone()),
+        Value::Blob(bytes) => Stored::Blob(bytes.clone()),
+        Value::Boolean(boolean) => Stored::Integer(i64::from(*boolean)),
+        Value::Decimal(digits) => Stored::Text(digits.clone()),
+        Value::Date(date) => Stored::Text(date.format("%Y-%m-%d").to_string()),
+        Value::Time(time) => Stored::Text(format!(
+            "{}{}",
+            time.format("%H:%M:%S"),
+            microseconds(time.nanosecond())
+        )),
+        Value::DateTime(moment) => Stored::Text(format!(
+            "{}{}",
+            moment.format("%Y-%m-%d %H:%M:%S"),
+            microseconds(moment.nanosecond())
+        )),
+        Value::DateTimeUtc(moment) => Stored::Text(format!(
+            "{}{}+00:00",
+            moment.format("%Y-%m-%d %H:%M:%S"),
+            microseconds(moment.nanosecond())
+        )),
+        Value::Duration(length) => Stored::Integer(length.num_microseconds().unwrap_or(i64::MAX)),
+        Value::Uuid(uuid) => Stored::Text(uuid.hyphenated().to_string()),
+    }
+}
+
+/// `".123456"`, or nothing for a whole second, like Python's `isoformat()`.
+fn microseconds(nanoseconds: u32) -> String {
+    let microseconds = nanoseconds / 1000;
+    if microseconds == 0 {
+        String::new()
+    } else {
+        format!(".{microseconds:06}")
+    }
 }
 
 /// A SQLite value as a djox value (this one copies, since the row it comes
