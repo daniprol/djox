@@ -47,14 +47,19 @@ from typing import Any, TypeVar
 from asgiref.sync import sync_to_async
 from django.db import NotSupportedError, connections, models, transaction
 from django.db.models.deletion import Collector
-from django.db.models.query import MAX_GET_RESULTS  # how many rows `get()` reads at most
+from django.db.models.query import (
+    MAX_GET_RESULTS,  # how many rows `get()` reads at most
+    FlatValuesListIterable,
+    ValuesIterable,
+    ValuesListIterable,
+)
 from django.db.models.signals import post_save, pre_save
 from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
 from djox import _fast_lane, _running, _threads
 from djox._fast_lane import running as fast_lane
-from djox._fast_lane.lookups import condition_for, is_simple_ordering, updates_for
+from djox._fast_lane.lookups import condition_for, is_simple_ordering, model_field, updates_for
 from djox._fast_lane.running import PreparedQuery
 from djox._fast_lane.simple_query import Condition, SimpleQuery, Update
 from djox._fast_lane.statements import Kind
@@ -171,6 +176,38 @@ class QuerySet(models.QuerySet[ModelType]):
         clone._db = alias  # type: ignore[attr-defined]  # Django's
         return clone
 
+    def values(self, *fields: Any, **expressions: Any) -> "QuerySet[Any]":
+        """Django's `values()`: dicts instead of instances. The model's own fields are noted for the fast lane."""
+        simple_query = self._recordable_query()
+        if simple_query is None or expressions or not self._are_simple_values_fields(fields):
+            return super().values(*fields, **expressions)  # type: ignore[return-value]
+        return self._with_values(simple_query, fields, ValuesIterable)
+
+    def values_list(self, *fields: Any, flat: bool = False, named: bool = False) -> "QuerySet[Any]":
+        """Django's `values_list()`: tuples instead of instances (or single
+        values, with `flat=True`). The model's own fields are noted for the fast lane."""
+        simple_query = self._recordable_query()
+        # Named tuples, and Django's errors for `flat` with other than one field, are Django's.
+        if simple_query is None or named or (flat and len(fields) != 1) or not self._are_simple_values_fields(fields):
+            return super().values_list(*fields, flat=flat, named=named)  # type: ignore[return-value]
+        return self._with_values(simple_query, fields, FlatValuesListIterable if flat else ValuesListIterable)
+
+    def _are_simple_values_fields(self, fields: tuple[Any, ...]) -> bool:
+        """Whether `values()` or `values_list()` asks for columns of the model's
+        own table only, each once (no expressions, no joins like `"author__name"`)."""
+        if len(set(fields)) != len(fields):
+            return False
+        return all(isinstance(name, str) and model_field(self.model, name) is not None for name in fields)
+
+    def _with_values(
+        self, simple_query: SimpleQuery, fields: tuple[str, ...], iterable_class: type[Any]
+    ) -> "QuerySet[Any]":
+        """A copy returning `fields`, made like Django's `_values()` makes it."""
+        clone = self._with_simple_query(simple_query.with_values(fields))
+        clone._fields = fields  # type: ignore[attr-defined]  # Django's
+        clone._iterable_class = iterable_class
+        return clone
+
     def __getitem__(self, key: Any) -> Any:  # pyrefly: ignore[bad-override]  # one method for both of Django's overloads
         """Django's `queryset[...]`. A plain slice like `[10:20]` is noted for the fast lane."""
         simple_query = self._recordable_query()
@@ -205,7 +242,7 @@ class QuerySet(models.QuerySet[ModelType]):
             return
         prepared = self._prepared_for_fast_lane("rows")
         if prepared is not None:
-            self._result_cache = prepared.instances(await prepared.fetch_rows(), self)
+            self._result_cache = prepared.results(await prepared.fetch_rows(), self)
             return
         if self._prefetch_lookups():
             # `prefetch_related()` runs more queries after this one: Django's way.
@@ -235,7 +272,7 @@ class QuerySet(models.QuerySet[ModelType]):
             raise ValueError("Chunk size must be strictly positive.")
         prepared = self._prepared_for_fast_lane("rows")
         if prepared is not None:
-            results = prepared.instances(await prepared.fetch_rows(), self)
+            results = prepared.results(await prepared.fetch_rows(), self)
         else:
             results = await self._results_from_djox()
         for result in results:
@@ -503,8 +540,8 @@ class QuerySet(models.QuerySet[ModelType]):
         signal receiver and no other model's foreign key needs to know.
         A sliced query is left to Django, which refuses it.
         """
-        if self._simple_query is None or self._simple_query.is_sliced:
-            return None
+        if self._simple_query is None or self._simple_query.is_sliced or self._fields is not None:  # type: ignore[attr-defined]
+            return None  # Django refuses those
         using = self._alias_for_write()
         if not Collector(using=using, origin=self).can_fast_delete(self):
             return None
@@ -615,7 +652,7 @@ class QuerySet(models.QuerySet[ModelType]):
         if self._result_cache is None:
             prepared = self._prepared_for_fast_lane("rows")
             if prepared is not None:
-                self._result_cache = prepared.instances(prepared.fetch_rows_now(), self)
+                self._result_cache = prepared.results(prepared.fetch_rows_now(), self)
         super()._fetch_all()  # Django's: does nothing more on a full cache
 
     def _iterator(self, use_chunked_fetch: bool, chunk_size: int | None) -> Iterator[ModelType]:
@@ -628,7 +665,7 @@ class QuerySet(models.QuerySet[ModelType]):
         rows = prepared.fetch_rows_now()
         chunk_size = chunk_size or 2000  # Django's default, without `prefetch_related()`
         for start in range(0, len(rows), chunk_size):
-            yield from prepared.instances(rows[start : start + chunk_size], self)
+            yield from prepared.results(rows[start : start + chunk_size], self)
 
     def get(self, *args: Any, **kwargs: Any) -> ModelType:
         """Django's `get()`."""

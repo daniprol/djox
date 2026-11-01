@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from django.db import models
-from django.db.models.query import ModelIterable
+from django.db.models.query import FlatValuesListIterable, ModelIterable, ValuesIterable, ValuesListIterable
 from django.db.models.signals import post_init, pre_init
 
 from djox import _running
@@ -68,13 +68,22 @@ class PreparedQuery:
             return 0
         return _running.execute_now(self.alias, self.statement.sql, self.parameters)
 
-    def instances(self, rows: "list[Row]", queryset: "models.QuerySet[Any]") -> list[Any]:
-        """The model instances of `rows` (for a query prepared as `"rows"`)."""
+    def results(self, rows: "list[Row]", queryset: "models.QuerySet[Any]") -> list[Any]:
+        """What `queryset` returns for `rows` (for a query prepared as `"rows"`):
+        model instances, or dicts for `values()`, or tuples for `values_list()`."""
         if self.statement is None:
             return []
-        assert self.statement.instance_builder is not None, "a statement for rows has one"
+        builder = self.statement.result_builder
+        assert builder is not None, "a statement for rows has one"
+        iterable_class = queryset._iterable_class
+        if iterable_class is ValuesIterable:
+            return builder.dicts(rows)
+        if iterable_class is ValuesListIterable:
+            return builder.tuples(rows)
+        if iterable_class is FlatValuesListIterable:
+            return [values[0] for values in builder.tuples(rows)]
         fetch_mode = getattr(queryset, "_fetch_mode", None)  # Django 6.1 and later
-        return self.statement.instance_builder.build(rows, self.alias, fetch_mode)
+        return builder.instances(rows, self.alias, fetch_mode)
 
     def count(self, rows: "list[Row]") -> int:
         """The count of `rows` (for a query prepared as `"count"`): `COUNT(*)` is the only column."""
@@ -91,7 +100,7 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update,
     `queryset` must have a note (`queryset._simple_query`). `updates` are the
     values an `UPDATE` sets.
     """
-    if kind == "rows" and not can_build_instances(queryset):
+    if kind == "rows" and not can_build_results(queryset):
         return None
     simple_query = queryset._simple_query  # type: ignore[attr-defined]  # djox.QuerySet's
     alias = queryset.db
@@ -106,17 +115,22 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update,
     return PreparedQuery(statement, statement.parameters(simple_query, alias, updates), alias)
 
 
-def can_build_instances(queryset: "models.QuerySet[Any]") -> bool:
-    """Whether `InstanceBuilder` makes the same instances as Django's `from_db()` would.
+def can_build_results(queryset: "models.QuerySet[Any]") -> bool:
+    """Whether `ResultBuilder` makes the same results as Django would.
 
-    It skips the model's `__init__`, so the model must not change what
+    Dicts and tuples (`values()`, `values_list()`) are simply the converted
+    values. Model instances must be what `from_db()` would make. The builder
+    skips the model's `__init__`, so the model must not change what
     `__init__` or `from_db()` do, and no one may listen to the `pre_init` and
     `post_init` signals that `__init__` sends. Some fields listen to them
     themselves (`ImageField` with `width_field`, `GenericForeignKey`).
     """
     model = queryset.model
-    if queryset._iterable_class is not ModelIterable:
-        return False
+    asks_for_values = queryset._simple_query.values_fields is not None  # type: ignore[attr-defined]  # djox.QuerySet's
+    if queryset._iterable_class in (ValuesIterable, ValuesListIterable, FlatValuesListIterable):
+        return asks_for_values
+    if asks_for_values or queryset._iterable_class is not ModelIterable:
+        return False  # `values_list(named=True)`, or a class of the program's own
     if queryset._known_related_objects:  # type: ignore[attr-defined]  # set by related managers
         return False
     fetch_mode = getattr(queryset, "_fetch_mode", None)

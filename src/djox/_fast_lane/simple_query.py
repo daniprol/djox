@@ -116,6 +116,10 @@ class SimpleQuery:
     high: int | None = None
     """Where the slice ends, or `None` for no end (Django's `high_mark`)."""
 
+    values_fields: tuple[str, ...] | None = None
+    """The fields given to `values()` or `values_list()`, like `("title", "pages")`,
+    or `None` for model instances. `()` is every field of the model."""
+
     def __deepcopy__(self, memo: dict[int, Any]) -> "SimpleQuery":
         """A note never changes, so a deep copy of a `QuerySet` can share it."""
         return self
@@ -142,7 +146,7 @@ class SimpleQuery:
         is part of the shape because Django writes `LIMIT 20` into the SQL.
         """
         conditions = tuple(condition.shape for condition in self.conditions)
-        return (conditions, self.order_by, self.reverse_ordering, self.low, self.high)
+        return (conditions, self.order_by, self.reverse_ordering, self.low, self.high, self.values_fields)
 
     @property
     def parameters(self) -> list[Any]:
@@ -173,6 +177,10 @@ class SimpleQuery:
         """This query, in the other order (like `reverse()`)."""
         return replace(self, reverse_ordering=not self.reverse_ordering)
 
+    def with_values(self, fields: tuple[str, ...]) -> "SimpleQuery":
+        """This query, returning only `fields` (like `values()` and `values_list()`)."""
+        return replace(self, values_fields=fields)
+
     def with_limits(self, low: int | None = None, high: int | None = None) -> "SimpleQuery":
         """This query, sliced further: `[low:high]` of what it returns.
 
@@ -202,3 +210,5 @@ class SimpleQuery:
             query.standard_ordering = not query.standard_ordering
         if self.is_sliced:
             query.set_limits(self.low, self.high)
+        if self.values_fields is not None:
+            query.set_values(self.values_fields)

@@ -3,9 +3,9 @@
 Two queries with the same shape (see `SimpleQuery.shape`) have the same SQL,
 with different parameters. So the first time the fast lane meets a shape, it
 lets Django build the query and write the SQL, exactly as Django's own
-methods would. It keeps the SQL, and for queries that return objects, an
-`InstanceBuilder` set up from Django's compiler (which columns go to which
-attribute, with which converters, and which of those Rust can do).
+methods would. It keeps the SQL, and for queries that return rows, a
+`ResultBuilder` set up from Django's compiler (which columns go to which
+attribute or key, with which converters, and which of those Rust can do).
 Every later query of that shape skips
 Django's query building and compiler entirely.
 
@@ -31,7 +31,7 @@ from django.core.signals import setting_changed
 from django.db import connections, models
 from django.db.models.base import ModelState
 
-from djox._core import InstanceBuilder
+from djox._core import ResultBuilder
 from djox._fast_lane.conversions import conversion_for
 from djox._fast_lane.simple_query import SimpleQuery, Update
 from djox.backends.sqlite3 import compiler
@@ -46,8 +46,8 @@ class Statement:
     sql: str
     """Django's SQL, with `%s` placeholders for the parameters."""
 
-    instance_builder: InstanceBuilder | None
-    """For `"rows"`: builds the model instances. `None` for counts and `exists`."""
+    result_builder: ResultBuilder | None
+    """For `"rows"`: builds the results (instances, tuples or dicts). `None` for the other kinds."""
 
     select_parameters: tuple[Any, ...] = ()
     """Parameters Django puts in the `SELECT` clause, before the filters' ones:
@@ -109,13 +109,13 @@ def write_statement(
     # A copy of the QuerySet with this note; asking for its `query` makes Django build it.
     django_queryset = queryset._with_simple_query(simple_query)  # type: ignore[attr-defined]  # djox.QuerySet's
     query = django_queryset.query
-    instance_builder = None
+    result_builder = None
     try:
         if kind == "rows":
             sql_compiler = query.get_compiler(using=alias)
             sql, django_parameters = sql_compiler.as_sql()
-            instance_builder = instance_builder_for(queryset.model, sql_compiler)
-            if instance_builder is None:
+            result_builder = result_builder_for(queryset.model, sql_compiler, simple_query.values_fields)
+            if result_builder is None:
                 return LEFT_TO_DJANGO
         else:
             # These methods run their statement: capture it instead.
@@ -139,7 +139,7 @@ def write_statement(
     # `exists()` selects one constant before them (`SELECT %s AS "a"`, with 1).
     select_parameters = tuple(django_parameters[:1]) if kind == "exists" else ()
     for writes_booleans_in_sql in (False, True):
-        candidate = Statement(sql, instance_builder, select_parameters, writes_booleans_in_sql)
+        candidate = Statement(sql, result_builder, select_parameters, writes_booleans_in_sql)
         if same_values(list(django_parameters), candidate.parameters(simple_query, alias, updates)):
             return candidate
     return LEFT_TO_DJANGO
@@ -156,28 +156,43 @@ def same_values(first: list[Any], second: list[Any]) -> bool:
     return True
 
 
-def instance_builder_for(model: type[models.Model], sql_compiler: Any) -> InstanceBuilder | None:
-    """An `InstanceBuilder` for the rows of `sql_compiler`'s `SELECT`, or
-    `None` if they aren't simply the model's own columns.
+def result_builder_for(
+    model: type[models.Model], sql_compiler: Any, values_fields: tuple[str, ...] | None
+) -> ResultBuilder | None:
+    """A `ResultBuilder` for the rows of `sql_compiler`'s `SELECT`, or `None`
+    if they aren't simply the model's own columns (or, for `values()`, the
+    fields asked for).
 
     After `as_sql()`, the compiler knows what it selected (`select`), which
     model the columns belong to (`klass_info`) and how Django converts each
-    one (`get_converters()`): the same things Django's `ModelIterable` reads.
+    one (`get_converters()`): the same things Django's iterable classes read.
     """
-    klass_info = sql_compiler.klass_info
     columns = [selected[0] for selected in sql_compiler.select]
-    if (
-        klass_info is None
-        or klass_info["model"] is not model
-        or klass_info.get("related_klass_infos")
-        or list(klass_info["select_fields"]) != list(range(len(columns)))
-        or sql_compiler.annotation_col_map
-        or sql_compiler.has_extra_select
-    ):
-        return None
-    attnames = [column.target.attname for column in columns]
-    if len(attnames) != len(model._meta.concrete_fields):
-        return None  # some fields are deferred (`only()`, `defer()`): Django's `from_db()` handles that
+    if sql_compiler.has_extra_select:
+        return None  # columns added only for ordering
+    if values_fields is None:
+        # Model instances: one attribute per column, every field of the model.
+        klass_info = sql_compiler.klass_info
+        if (
+            sql_compiler.annotation_col_map
+            or klass_info is None
+            or klass_info["model"] is not model
+            or klass_info.get("related_klass_infos")
+            or list(klass_info["select_fields"]) != list(range(len(columns)))
+        ):
+            return None
+        names = [column.target.attname for column in columns]
+        if len(names) != len(model._meta.concrete_fields):
+            return None  # some fields are deferred (`only()`, `defer()`): Django's `from_db()` handles that
+    else:
+        # `values()` and `values_list()`: one key (or tuple position) per field
+        # asked for, named like Django's `ValuesIterable` names them. (Django
+        # 6.1 selects them `AS` their names, which the compiler lists in
+        # `annotation_col_map`; real annotations are in `annotation_select`.)
+        query = sql_compiler.query
+        names = list(query.values_select)
+        if query.extra_select or query.annotation_select or len(names) != len(columns):
+            return None
     found_converters = sql_compiler.get_converters(columns)
     converters = []
     conversions: list[tuple[Any, ...] | None] = []
@@ -189,7 +204,9 @@ def instance_builder_for(model: type[models.Model], sql_compiler: Any) -> Instan
         else:
             functions, expression = column_converters
             conversions.append(conversion_for(functions, expression, sql_compiler.connection))
-    return InstanceBuilder(model, attnames, converters, conversions, sql_compiler.connection, ModelState)
+    if values_fields is not None:
+        return ResultBuilder(names, converters, conversions, sql_compiler.connection)
+    return ResultBuilder(names, converters, conversions, sql_compiler.connection, model, ModelState)
 
 
 def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql: bool = False) -> list[Any]:

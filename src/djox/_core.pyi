@@ -230,26 +230,34 @@ class Cursor:
     def __iter__(self) -> Iterator[Row]: ...
     def __next__(self) -> Row: ...
 
-class InstanceBuilder:
-    """Turns result rows into Django model instances, for the fast lane
-    (`djox._fast_lane`): the instances Django's `from_db()` would make, built in Rust."""
+class ResultBuilder:
+    """Turns result rows into what a `QuerySet` returns, for the fast lane
+    (`djox._fast_lane`): model instances (what Django's `from_db()` would
+    make), tuples (`values_list()`) or dicts (`values()`), built in Rust."""
 
     def __init__(
         self,
-        model: type[Any],
-        attnames: Sequence[str],
+        names: Sequence[str],
         converters: Sequence[tuple[Sequence[Callable[[Any, Any, Any], Any]], Any] | None],
         conversions: Sequence[tuple[Any, ...] | None],
         connection: Any,
-        model_state: type[Any],
+        model: type[Any] | None = None,
+        model_state: type[Any] | None = None,
     ) -> None:
-        """`attnames`: the attribute of each column. `converters`: per column,
-        `None` or `(functions, expression)`, like Django's `get_converters()`.
-        `conversions`: per column, `None` or the Rust conversion doing the same
-        (`djox._fast_lane.conversions`)."""
+        """`names`: per column, the attribute of an instance or the key of a
+        dict. `converters`: per column, `None` or `(functions, expression)`,
+        like Django's `get_converters()`. `conversions`: per column, `None` or
+        the Rust conversion doing the same (`djox._fast_lane.conversions`).
+        `model` and `model_state` are needed for `instances()` only."""
 
-    def build(self, rows: list[Row], alias: str, fetch_mode: Any = None) -> list[Any]:
-        """One instance per row, from the database `alias`."""
+    def instances(self, rows: list[Row], alias: str, fetch_mode: Any = None) -> list[Any]:
+        """One model instance per row, from the database `alias`."""
+
+    def tuples(self, rows: list[Row]) -> list[tuple[Any, ...]]:
+        """One tuple of converted values per row."""
+
+    def dicts(self, rows: list[Row]) -> list[dict[str, Any]]:
+        """One dict of converted values per row, keyed by `names`."""
 
     @property
     def column_count(self) -> int:
