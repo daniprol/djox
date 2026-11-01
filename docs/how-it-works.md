@@ -76,6 +76,51 @@ change: the connection is a `djox.Connection`, which runs on djox's SQLite.
   Transactions start with `BEGIN IMMEDIATE`, so a writer that finds the lock
   taken waits (up to `timeout`) instead of failing.
 
+## Django's async queries
+
+Django's own async methods (`aget()`, `acount()`...) run the whole sync
+method on a worker thread, and every one of them shares the same thread.
+`djox.Manager` hands out `djox.QuerySet`s, whose async methods split the work:
+
+```text
+  event loop thread                                   djox's threads
+  ─────────────────                                   ──────────────
+  Book.objects.filter(pages__gt=400)    build the query (Django)
+  compiler.as_sql()                     write the SQL (Django)
+  await ──────────────────────────────────────────────► reader runs the SELECT
+       ◄────────────────────────────────────────────── rows
+  ModelIterable(rows)                   build the Book objects (Django)
+```
+
+The SQL and the objects are exactly Django's: djox only takes over the moment
+the SQL runs. How it gets that moment out of Django's code depends on the
+method:
+
+- **Reading rows** (`async for`, `aget()`, `afirst()`...): djox compiles the
+  `SELECT` itself, awaits the rows, then hands Django's iterable class
+  (`ModelIterable`, `ValuesIterable`...) the compiler with the rows already
+  in it. Nothing is compiled twice.
+- **First statement** (`acount()`, `aexists()`, `aupdate()`, fast
+  `adelete()`): djox runs Django's sync method. When it reaches its
+  statement, djox's compiler stops it (it raises `StatementNeeded`) and djox
+  awaits the statement. What is left of the method is a line or two (`count()`
+  returns the first column), which djox does itself.
+- **Replay** (`aaggregate()`): the same, then Django's method runs a second
+  time and gets the answer handed to it, so Django shapes the result. It only
+  builds a query before running it, so running it twice is safe.
+- **`acreate()`**: `save()` sends signals and fills defaults (`auto_now`
+  dates), which must happen once. djox sends the signals with `asend()`, runs
+  Django's `_save_table()` once, takes the `INSERT` from it, and awaits it.
+
+Methods that need a transaction (`aget_or_create()`, `abulk_create()`,
+deletes that cascade) and `prefetch_related()` still use Django's worker
+thread, until async transactions exist (roadmap step 4).
+
+When async code runs inside a sync `atomic()` block (Django's `TestCase`),
+its SQL runs on that block's connection instead, so it sees the block's
+writes. djox's `DatabaseWrapper` notes each open transaction in a context
+variable, which `async_to_sync()` copies to the async code it starts.
+
 ## The code
 
 | Path                | What it is                                                          |
@@ -83,7 +128,7 @@ change: the connection is a `djox.Connection`, which runs on djox's SQLite.
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
 | `src/*.rs`          | The Python extension `djox._core`: `Database`, `Connection`, `Cursor` |
-| `src/djox`          | The Python package, with Django's `ENGINE` in `backends/sqlite3`      |
+| `src/djox`          | The Python package: Django's `ENGINE` in `backends/sqlite3`, `djox.Manager` and `djox.QuerySet` |
 
 Each backend owns everything about its database. Postgres will be a new
 folder with its own connection pool, behind the same `Database` trait, and

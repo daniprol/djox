@@ -10,12 +10,13 @@ settings as djox (WAL mode, `synchronous=NORMAL`), so writes compare fairly.
 Contenders:
 
 - django sync:   Django's ORM, the normal sync methods (`get`, `list(...)`, `count`).
+- djox sync:     the same sync methods, with `"ENGINE": "djox.backends.sqlite3"`.
+- sqlite3:       Python's `sqlite3` with SQL written by hand. The floor: no ORM at all.
 - django async:  Django's async methods (`aget`, `async for`, `acount`), which run
                  the sync code on a worker thread.
-- sqlite3:       Python's `sqlite3` with SQL written by hand. The floor: no ORM at all.
-- djox:          `djox.Database` with the same hand-written SQL.
-- django + djox: Django builds the SQL and the model instances, djox runs the SQL.
-                 A preview of `djox.Manager` (roadmap step 3), wired by hand here.
+- djox.Manager:  the same async methods on `djox.Manager()`: Django builds the SQL
+                 and the model instances, djox runs the SQL without a worker thread.
+- djox:          `djox.Database` with the same hand-written SQL as sqlite3.
 """
 
 import asyncio
@@ -45,7 +46,14 @@ settings.configure(
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": FOLDER / "django.sqlite3",
             "OPTIONS": {"init_command": "PRAGMA synchronous = NORMAL"},
-        }
+        },
+        # djox's ENGINE on its own copy of the file: Django's ENGINE uses
+        # Python's `sqlite3`, and two copies of SQLite must not share a file.
+        "djox": {
+            "ENGINE": "djox.backends.sqlite3",
+            "NAME": FOLDER / "djox_engine.sqlite3",
+            "OPTIONS": {"init_command": "PRAGMA synchronous = NORMAL"},
+        },
     },
     INSTALLED_APPS=[],
     USE_TZ=True,
@@ -64,6 +72,7 @@ class Book(models.Model):
     published = models.DateTimeField()
 
     objects = models.Manager()
+    djox_objects = djox.Manager()
 
     class Meta:
         app_label = "shelf"
@@ -84,7 +93,7 @@ def create_database() -> None:
         for number in range(BOOK_COUNT)
     )
     connection.close()
-    for name in ["sqlite3", "djox", "django_djox"]:
+    for name in ["sqlite3", "djox", "djox_engine"]:
         shutil.copy(FOLDER / "django.sqlite3", FOLDER / f"{name}.sqlite3")
 
 
@@ -155,56 +164,33 @@ def make_djox() -> dict[str, Callable[[], Awaitable[object]]]:
     }
 
 
-def make_django_and_djox() -> dict[str, Callable[[], Awaitable[object]]]:
-    database = djox.Database.sqlite(FOLDER / "django_djox.sqlite3")
+def make_djox_sync() -> dict[str, Callable[[], object]]:
+    books = Book.objects.db_manager("djox")
+    return {
+        "get one book by id": lambda: books.get(id=7),
+        "fetch 20 books": lambda: list(books.filter(pages__gt=500).order_by("-pages", "id")[:20]),
+        "fetch 1,000 books": lambda: list(books.order_by("id")[:1000]),
+        "count": lambda: books.filter(pages__gt=500).count(),
+        "insert one book": lambda: books.create(
+            title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
+        ),
+    }
+
+
+def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
+    books = Book.djox_objects.db_manager("djox")
 
     async def fetch(queryset: models.QuerySet) -> list:
-        """Django writes the SQL and builds the instances; djox runs the SQL."""
-        compiler = queryset.query.get_compiler(using=queryset.db)
-        sql, parameters = compiler.as_sql()
-        rows = await database.fetch_all(sql, parameters)
-        select, klass_info = compiler.select, compiler.klass_info
-        first, last = klass_info["select_fields"][0], klass_info["select_fields"][-1] + 1
-        field_names = [column[0].target.attname for column in select[first:last]]
-        fetch_mode = {"fetch_mode": queryset._fetch_mode} if hasattr(queryset, "_fetch_mode") else {}
-        return [
-            Book.from_db(queryset.db, field_names, row[first:last], **fetch_mode)
-            for row in compiler.results_iter(results=[rows])
-        ]
-
-    async def count(queryset: models.QuerySet) -> int:
-        """`SELECT COUNT(*)` with the QuerySet's filters, like Django's `count()` writes it."""
-        query = queryset.query.chain()
-        query.clear_ordering(force=True)
-        query.default_cols = False
-        query.add_annotation(models.Count("*"), alias="__count")
-        query.set_annotation_mask(["__count"])
-        sql, parameters = query.get_compiler(using=queryset.db).as_sql()
-        rows = await database.fetch_all(sql, parameters)
-        return rows[0][0]
-
-    async def get(**filters: object) -> Book:
-        books = await fetch(Book.objects.filter(**filters)[:21])
-        return books[0]
-
-    async def create() -> Book:
-        book = Book(
-            title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
-        )
-        fields = [field for field in Book._meta.concrete_fields if not field.primary_key]
-        values = [field.get_db_prep_save(field.pre_save(book, add=True), connection) for field in fields]
-        columns = ", ".join(connection.ops.quote_name(field.column) for field in fields)
-        placeholders = ", ".join(["%s"] * len(fields))
-        executed = await database.execute(f'INSERT INTO "shelf_book" ({columns}) VALUES ({placeholders})', values)
-        book.id = executed.last_insert_id
-        return book
+        return [book async for book in queryset]
 
     return {
-        "get one book by id": lambda: get(id=7),
-        "fetch 20 books": lambda: fetch(Book.objects.filter(pages__gt=500).order_by("-pages", "id")[:20]),
-        "fetch 1,000 books": lambda: fetch(Book.objects.order_by("id")[:1000]),
-        "count": lambda: count(Book.objects.filter(pages__gt=500)),
-        "insert one book": create,
+        "get one book by id": lambda: books.aget(id=7),
+        "fetch 20 books": lambda: fetch(books.filter(pages__gt=500).order_by("-pages", "id")[:20]),
+        "fetch 1,000 books": lambda: fetch(books.order_by("id")[:1000]),
+        "count": lambda: books.filter(pages__gt=500).acount(),
+        "insert one book": lambda: books.acreate(
+            title="New book", pages=100, price=decimal.Decimal("9.99"), published=datetime.datetime.now(datetime.UTC)
+        ),
     }
 
 
@@ -261,7 +247,11 @@ def main() -> None:
     results: dict[str, dict[str, float]] = {}
 
     # Sync code must run outside the event loop (Django refuses sync queries inside it).
-    for name, operations in [("django sync", make_django_sync()), ("sqlite3", make_sqlite3())]:
+    for name, operations in [
+        ("django sync", make_django_sync()),
+        ("djox sync", make_djox_sync()),
+        ("sqlite3", make_sqlite3()),
+    ]:
         results[name] = {
             scenario: time_sync(operation, REPEATS[scenario]) for scenario, operation in operations.items()
         }
@@ -270,8 +260,8 @@ def main() -> None:
     async def run_async_contenders() -> None:
         for name, operations in [
             ("django async", make_django_async()),
+            ("djox.Manager", make_djox_manager()),
             ("djox", make_djox()),
-            ("django + djox", make_django_and_djox()),
         ]:
             results[name] = {}
             for scenario, operation in operations.items():

@@ -5,10 +5,10 @@ library authors. SQLite first.
 
 !!! warning "Status: early"
     djox has its engine (`djox.Database` runs SQL from async code on
-    connections that Rust owns) and a Django `ENGINE` that puts Django's own
-    queries on the same SQLite. The Django-style API (`await
-    Book.objects.aget(...)` running on djox) comes next; see the
-    [roadmap](roadmap.md).
+    connections that Rust owns), a Django `ENGINE` that puts Django's own
+    queries on the same SQLite, and `djox.Manager`, which runs Django's async
+    QuerySet methods (`await Book.objects.aget(...)`) on djox. Async
+    transactions come next; see the [roadmap](roadmap.md).
 
 ## Why
 

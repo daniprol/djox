@@ -22,4 +22,6 @@ migrations, the admin, the test runner) works as usual.
 | `dbapi.py`    | What Django looks up on a driver: exceptions and the SQLite version |
 | `features.py` | Feature flags that depend on djox's SQLite version                |
 | `creation.py` | Test databases: files instead of memory, so async code can share them |
+| `operations.py` | Points Django at djox's compilers                               |
+| `compiler.py` | Django's compilers, able to hand a statement to async code (`djox.QuerySet`) |
 """

@@ -8,6 +8,8 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
   `sqlite3.Connection`.
 - `"ENGINE": "djox.backends.sqlite3"` makes Django use djox's SQLite too, and
   `djox.connections["default"]` gives the async database for a Django alias.
+- `djox.Manager` (with `djox.QuerySet`) runs Django's async QuerySet methods
+  (`aget()`, `acount()`, `async for`...) on djox.
 
 ```python
 import djox
@@ -20,6 +22,8 @@ Use djox's `ENGINE` whenever djox and Django share a database file: Python's
 `sqlite3` bundles a second copy of SQLite, and two copies in one process
 can't see each other's locks, so writes can get lost.
 """
+
+from typing import TYPE_CHECKING, Any
 
 from djox._connections import connections
 from djox._core import (
@@ -40,6 +44,29 @@ from djox._core import (
     sqlite_version,
 )
 
+if TYPE_CHECKING:
+    from djox.manager import Manager
+    from djox.query import QuerySet
+
+
+def __getattr__(name: str) -> Any:
+    """Import `djox.Manager` and `djox.QuerySet` the first time they are used.
+
+    Python calls a module's `__getattr__` for names the module doesn't have.
+    Importing them lazily keeps `import djox` working without Django, or
+    before Django's settings are ready (in `settings.py` itself).
+    """
+    if name == "Manager":
+        from djox.manager import Manager
+
+        return Manager
+    if name == "QuerySet":
+        from djox.query import QuerySet
+
+        return QuerySet
+    raise AttributeError(f"module 'djox' has no attribute {name!r}")
+
+
 __all__ = [
     "Connection",
     "Cursor",
@@ -52,9 +79,11 @@ __all__ = [
     "IntegrityError",
     "InterfaceError",
     "InternalError",
+    "Manager",
     "NotSupportedError",
     "OperationalError",
     "ProgrammingError",
+    "QuerySet",
     "connections",
     "sqlite_version",
 ]

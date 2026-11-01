@@ -74,6 +74,11 @@ them, and it should teach them both along the way.
   thread gets a `djox.Connection` (sqlite3-shaped, runs on the caller's
   thread); `djox.connections[alias]` is the async `Database` for the same
   settings. Both are prepared by `prepare_connection()`.
+- **`djox.Manager`** (`src/djox/query.py`): Django's `QuerySet`, with its
+  `a`-methods running on djox (the "safe lane": Django writes the SQL, djox
+  runs it). Rows are turned into results by Django's own iterable classes
+  (`_results.py`); single-statement methods are replayed with the answer
+  (`backends/sqlite3/compiler.py`); `_running.py` decides where the SQL runs.
 - **Rust does the heavy, repetitive work** (running SQL, converting rows,
   later compiling common queries). Python keeps the Django-facing API small
   and readable.
@@ -93,6 +98,14 @@ them, and it should teach them both along the way.
   GIL and waiting for a connection, while the connection's thread runs a
   Python SQL function (which needs the GIL), would wait forever. Every
   `djox.Connection` method does `py.detach(...)` before `lock()`.
+- **Replay only side-effect-free methods.** `compiler.replay()` runs a Django
+  method again once its statement is answered. A method that sends signals or
+  computes defaults (`save()`) must use `compiler.capture()` instead, or it
+  would do them twice.
+- **Async code inside a sync transaction must run in it.** djox's
+  `DatabaseWrapper.set_autocommit()` notes the open transaction in a context
+  variable; `async_to_sync()` copies it to the async code, which then runs its
+  SQL on that connection (`_running.open_sync_transaction()`).
 - **Django's compiler internals change between releases** (Django 6.1 added a
   `fetch_mode` argument to `from_db()`). Test against every supported Django.
 
@@ -101,11 +114,12 @@ them, and it should teach them both along the way.
 0. Benchmarks (done: `benchmarks/`).
 1. The Rust SQLite engine and `djox.Database` (done).
 2. djox as Django's SQLite `ENGINE`, with Django's SQL functions registered (done).
-3. `djox.Manager`: Django's QuerySet `a`-methods running on djox. Anything not
-   supported yet falls back to Django's own method, so nothing breaks. A query
-   inside a sync `atomic()` block (like Django's `TestCase`) must run on that
-   block's connection, or it can't see the block's writes.
-4. Async `atomic()`, savepoints, `on_commit`.
+3. `djox.Manager`: Django's QuerySet `a`-methods running on djox (done).
+   Anything not supported yet falls back to Django's own method, so nothing
+   breaks. A query inside a sync `atomic()` block (like Django's `TestCase`)
+   runs on that block's connection, or it couldn't see the block's writes.
+4. Async `atomic()`, savepoints, `on_commit` (next). Then `aget_or_create`,
+   `abulk_create`, cascading `adelete` and model `asave` can run on djox too.
 5. Hooks, in the style of pyox-agents: plain functions (sync or async) called
    at fixed points (`before_query`, `after_query`...), returning `None` to
    change nothing or a new value to replace it. Django's signals keep working
