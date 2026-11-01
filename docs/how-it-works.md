@@ -47,6 +47,11 @@ The event loop never waits.
   for readers.
 - **`synchronous = NORMAL`**: safe with WAL and much faster than Django's
   default; a power cut can lose the last commits, never corrupt the file.
+- **Streams get a connection of their own.** `stream_rows()` (behind
+  `aiterator()`) opens a reader connection on a thread of its own, which
+  reads the next chunk each time Python asks for it. A slow loop holds only
+  that connection, never one of the shared readers, and the thread ends with
+  the stream.
 
 ## Django's own queries
 
@@ -158,7 +163,7 @@ skips most of it:
       parameters  [500]                the field's own get_prep_value(), like Django's lookup
       await ──────────────────────────────────────► reader runs the SELECT
            ◄────────────────────────────────────── rows
-      InstanceBuilder (Rust)          one instance per row, with Django's converters
+      ResultBuilder (Rust)            one instance (or dict, or tuple) per row
 ```
 
 - **A note instead of a `Query`.** While a `djox.QuerySet` is only filtered
@@ -172,15 +177,43 @@ skips most of it:
   that it computes the same parameters as Django). Writing the SQL in Rust
   would buy nothing, since it is written once per shape, and this way the SQL
   is exactly Django's, for every Django version and, later, every database.
-- **Rust builds the instances** (`djox.InstanceBuilder`): an empty instance,
-  its `_state`, and one attribute per column, after Django's own converters
-  (text to `datetime`, to `Decimal`...). It is what `Model.from_db()` makes,
-  without running `__init__` for every row. Models whose `__init__` or
-  `from_db()` is their own, or with `pre_init`/`post_init` receivers, are
-  built by Django.
+- **Rust builds the results** (`ResultBuilder`, `src/results.rs`): for a
+  model, an empty instance, its `_state`, and one attribute per column. It is
+  what `Model.from_db()` makes, without running `__init__` for every row.
+  Models whose `__init__` or `from_db()` is their own, or with
+  `pre_init`/`post_init` receivers, are built by Django. For `values()` and
+  `values_list()`, a dict or a tuple per row.
+- **Rust converts the values** (`src/conversions.rs`): text to `datetime`,
+  `date` and `time`, a stored number to a `Decimal` rounded like Django
+  rounds it, `0`/`1` to `bool`. Only when the column's converter is exactly
+  Django's own (`_fast_lane/conversions.py` checks), and any value Rust
+  doesn't handle goes to Django's converter. A field's own `from_db_value()`
+  always runs.
+- **Writes too.** `update(name=value)` and a `delete()` Django would do in one
+  statement keep a statement per shape too, captured from Django's own
+  `update()` and `_raw_delete()`.
+- **Sync methods too.** `for`, `get()`, `count()`, `update()`... use the same
+  statements, run through a Django cursor on the thread's connection, so
+  they behave like Django's in every way but speed.
 - **Anything else is Django's.** Asking for `queryset.query` builds Django's
-  `Query` from the note, so `exclude()`, `Q()`, joins, `values()`,
-  `select_related()`, and every sync method work exactly as in Django.
+  `Query` from the note, so `exclude()`, `Q()`, joins, `annotate()` and
+  `select_related()` work exactly as in Django.
+
+## Hooks
+
+Every statement passes through one of two doors, and both run the hooks
+(`djox/hooks.py`):
+
+- **Sync code** goes through Django's cursors, which call every function in
+  the connection's `execute_wrappers` around each statement (Django's own
+  `connection.execute_wrapper()`). djox's `DatabaseWrapper` adds one that
+  runs the hooks.
+- **Async code** (`djox.QuerySet`'s methods, the fast lane) goes through
+  `djox/_running.py`, which runs them around each `await`.
+
+The list of hooks is a tuple, replaced (never changed) when hooks are added
+or removed, so a query running on another thread keeps the list it started
+with, without a lock.
 
 ## Async transactions
 
@@ -209,7 +242,7 @@ writers.
 |---------------------|---------------------------------------------------------------------|
 | `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
 | `crates/djox`       | The backends, one folder each: `sqlite/` today, `postgres/` later    |
-| `src/*.rs`          | The Python extension `djox._core`: `Database`, `Connection`, `Cursor` |
+| `src/*.rs`          | The Python extension `djox._core`: `Database`, `RowStream`, `Connection`, `Cursor`, `ResultBuilder` and its conversions |
 | `src/djox`          | The Python package: Django's `ENGINE` in `backends/sqlite3`, `djox.Manager` and `djox.QuerySet`, the fast lane in `_fast_lane` |
 
 Each backend owns everything about its database. Postgres will be a new

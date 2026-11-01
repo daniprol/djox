@@ -56,7 +56,8 @@ and the event loop never waits for a thread.
 
 | Method | Runs on |
 |--------|---------|
-| `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()`, `aearliest()`, `alatest()` | djox |
+| `async for`, `aget()`, `afirst()`, `alast()`, `aearliest()`, `alatest()` | djox |
+| `aiterator(chunk_size=2000)` | djox, a chunk of rows at a time (below) |
 | `acount()`, `aexists()`, `acontains()`, `aaggregate()` | djox |
 | `acreate()` | djox (signals are sent with `asend()`) |
 | `aupdate()` | djox |
@@ -88,29 +89,60 @@ On a database whose `ENGINE` isn't djox's, every method is Django's own. A
 custom `QuerySet` can subclass `djox.QuerySet` and use
 `MyQuerySet.as_manager()`.
 
+### Streaming with `aiterator()`
+
+`async for book in Book.objects.aiterator(chunk_size=2000)` reads the rows
+from the database a chunk at a time: the next chunk is read when the loop
+has used the previous one, so a query with a million rows never holds them
+all in memory. The stream reads on a connection of its own, so other
+queries (and writes) never wait for it, even while the loop is halfway
+through. It sees the database as it was when it started.
+
+Inside a sync transaction (below), the rows are read all at once on the
+transaction's connection, the only one that sees its writes.
+
 ### The fast lane
 
-Simple reads skip Django's query building and SQL compiler, and get their
-model instances built in Rust. They are two to three times faster than the
-same method with Django writing every query ([benchmarks](https://github.com/daniprol/djox/tree/main/benchmarks)).
+Simple queries skip Django's query building and SQL compiler, and get their
+results built in Rust. They are two to four times faster than the same
+method with Django writing every query, sync or async
+([benchmarks](https://github.com/daniprol/djox/tree/main/benchmarks)).
 A query takes the fast lane when it is:
 
-- read with `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()`,
-  `acount()`, `aexists()` or `acontains()`;
 - filtered with `filter(name=value)` on the model's own columns (foreign keys
   included, by instance or id), with `exact`, `gt`, `gte`, `lt`, `lte`, `in`
   or `isnull`, and plain values (numbers, text, booleans, dates, decimals,
   UUIDs);
 - ordered by columns (`order_by("-pages", "id")`, or the model's
-  `Meta.ordering`), reversed, and sliced (`[10:20]`).
+  `Meta.ordering`), reversed, and sliced (`[10:20]`);
+- optionally narrowed to some of the model's own columns with `values(...)`
+  or `values_list(...)` (`flat=True` included);
+- and then read or written with one of these methods:
+
+| Kind | Async | Sync |
+|------|-------|------|
+| Rows | `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()` | `for`, `list()`, `iterator()`, `get()`, `first()`, `last()`, `queryset[3]` |
+| Answers | `acount()`, `aexists()`, `acontains()` | `count()`, `exists()`, `contains()` |
+| Writes | `aupdate(name=value)`, `adelete()` | `update(name=value)`, `delete()` |
+
+`update()` takes plain values for the model's own columns (no `F()`
+expressions). `delete()` takes the fast lane when Django would delete with
+one statement too: no `on_delete` work and no delete signal receivers.
 
 The SQL is the one Django writes for the same query: djox has Django write it
-the first time it meets each *shape* of query (the same filters, ordering and
-slice, with any values), and keeps it. Everything else (`exclude()`, `Q()`,
-`F()`, joins like `author__name`, `values()`, `annotate()`, `select_related()`,
-writes) runs as described above, with the same results. Errors are raised
-where Django raises them: a wrong field name or value still raises at
-`filter()`.
+the first time it meets each *shape* of query (the same filters, ordering,
+slice and columns, with any values), and keeps it. Rust then builds the
+results: model instances, dicts or tuples, converting dates, times,
+decimals and booleans the way Django's converters do (and leaving any value
+it doesn't handle to Django's converter). Everything else (`exclude()`,
+`Q()`, `F()`, joins like `author__name`, `annotate()`, `select_related()`,
+models with parent models) runs as described above, with the same results.
+Errors are raised where Django raises them: a wrong field name or value
+still raises at `filter()`.
+
+Sync methods on the fast lane run on the thread's Django connection, like
+Django's own: they join its transaction, appear in its query log, and refuse
+to run in async code (`SynchronousOnlyOperation`).
 
 To turn it off, set `DJOX_FAST_LANE = False` in the settings.
 
@@ -252,6 +284,54 @@ Errors are Django's (`django.db.IntegrityError`...), and queries appear in
 sync transaction, they are logged on that transaction's connection, so
 `assertNumQueries()` around `async_to_sync(...)` counts them.
 
+## Hooks
+
+Hooks are your functions, called around every SQL statement that runs on
+djox's `ENGINE`: Django's sync ORM, every `djox.QuerySet` method (the fast
+lane included), from sync or async code. A hook can watch the statements
+(time them, log them, count them per request) or change them (add a comment
+for tracing, block writes to a read-only replica):
+
+```python
+import logging
+
+import djox
+
+logger = logging.getLogger(__name__)
+
+
+def tag_with_service(query: djox.Query) -> djox.Query:
+    return query.with_sql(f"/* service: shop */ {query.sql}")
+
+
+def warn_if_slow(query: djox.Query, finished: djox.QueryFinished) -> None:
+    if finished.seconds > 0.1:
+        logger.warning("slow query (%.3fs): %s", finished.seconds, query.sql)
+
+
+djox.add_hooks(djox.Hooks(before_query=tag_with_service, after_query=warn_if_slow))
+```
+
+| Hook | When | Returns |
+|------|------|---------|
+| `before_query(query)` | before each statement | `None` to change nothing, or a new `djox.Query` to run instead |
+| `after_query(query, finished)` | after each statement, also when it failed (`finished.error`) | `None` |
+
+A `djox.Query` has the `alias`, the `sql` (with `%s` placeholders), the
+`parameters`, and `many` (for `executemany()`); `query.with_sql(...)` and
+`query.with_parameters(...)` make a changed copy. Hooks run in the order
+they were added, each `before_query` seeing what the previous one returned.
+Raising in `before_query` stops the statement, and the caller gets the
+error. `djox.add_hooks()` takes `djox.Hooks(...)` or any object with
+`before_query` and/or `after_query` methods; `djox.remove_hooks()` takes it
+away again.
+
+Hooks are plain functions, not `async def`: they run inside every query,
+also in sync code, where nothing can be awaited. A streamed `aiterator()` is
+one statement: the hooks see it once, when its first chunk arrives.
+Django's signals (`pre_save`, `post_delete`...) keep working as always, and
+`djox.connections[alias]` (the layer below the ORM) has no hooks.
+
 ## The async database of an alias
 
 `djox.connections["default"]` gives the async [`djox.Database`](index.md) for
@@ -297,7 +377,11 @@ raises `ImproperlyConfigured`.
 - **Test databases are files.** Django tests SQLite on an in-memory database,
   which only one connection can see. djox's test database is
   `test_db.sqlite3` next to `NAME` (or `djox_test_<alias>.sqlite3` in the temp
-  folder when `NAME` is `":memory:"`). `TEST["NAME"]` still wins.
+  folder when `NAME` is `":memory:"`). `TEST["NAME"]` still wins. With WAL
+  mode and `synchronous = NORMAL`, a commit doesn't wait for the disk, so a
+  file costs little: djox's own test suite runs about 10% faster with its
+  test database in memory (a RAM disk, `TEST = {"NAME":
+  "/dev/shm/test_db.sqlite3"}` on Linux) than on disk.
 - **Raw cursors return SQLite's own types.** `cursor.execute("SELECT
   published FROM ...")` gives the stored text, not a `datetime` (Django's
   backend asks Python's `sqlite3` to parse some column types). The ORM is not

@@ -15,11 +15,12 @@ install it as a normal package, and uv doesn't notice changes to its Python file
 | Name | What runs |
 |------|-----------|
 | django sync | Django's ORM, normal sync methods (`get`, `list(...)`, `count`, `create`), on Django's own SQLite `ENGINE` |
-| djox sync | The same sync methods on djox's `ENGINE` (`djox.backends.sqlite3`) |
+| djox sync | The same sync methods on djox's `ENGINE` (`djox.backends.sqlite3`), with Django's own manager |
+| djox.Manager sync | The same sync methods on `djox.Manager()`: simple queries take the fast lane |
 | sqlite3 | Python's `sqlite3` with hand-written SQL. The floor: no ORM, no async |
 | django async | Django's async methods (`aget`, `async for`, `acount`, `acreate`), which run the sync ORM on a worker thread |
 | djox safe lane | The same async methods on `djox.Manager()` with the fast lane off (`DJOX_FAST_LANE = False`): Django builds the query, the SQL and the model instances, djox runs the SQL without a worker thread. Transactions use `async with djox.atomic()` |
-| djox.Manager | The same, with the fast lane (the default): simple queries reuse the SQL Django wrote for their shape, and Rust builds the model instances |
+| djox.Manager | The same, with the fast lane (the default): simple queries reuse the SQL Django wrote for their shape, and Rust builds the model instances, converting dates and decimals itself |
 | djox | `djox.Database` with the same hand-written SQL as sqlite3 |
 
 Every contender has its own copy of the file, and every one uses WAL mode and
@@ -30,19 +31,20 @@ Every contender has its own copy of the file, and every one uses WAL mode and
 Microseconds per call, lower is better. Linux x86_64 (4-core cloud VM),
 Python 3.13, Django 6.1.
 
-| | django sync | djox sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
-|---|---|---|---|---|---|---|---|
-| get one book by id | 191 | 200 | 5 | 552 | 431 | 171 | 93 |
-| fetch 20 books | 491 | 491 | 26 | 1,000 | 781 | 333 | 126 |
-| fetch 1,000 books | 8,213 | 9,725 | 662 | 10,613 | 10,368 | 5,776 | 697 |
-| count | 298 | 277 | 64 | 671 | 514 | 201 | 149 |
-| insert one book | 169 | 173 | 43 | 495 | 401 | 451 | 143 |
-| two inserts in a transaction | 358 | 318 | 62 | 618 | 1,447 | 1,460 | n/a |
-| get or create (exists) | 259 | 215 | n/a | 526 | 425 | 176 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | 574 | 1,043 | 1,021 | n/a |
-| 100 gets at once | n/a | n/a | n/a | 495 | 408 | 154 | 104 |
-| 100 get or create at once | n/a | n/a | n/a | 497 | 365 | 188 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | 763 | 1,009 | 1,027 | n/a |
+| | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
+|---|---|---|---|---|---|---|---|---|
+| get one book by id | 187 | 247 | 58 | 7 | 605 | 436 | 214 | 89 |
+| fetch 20 books | 518 | 474 | 204 | 47 | 1,088 | 831 | 371 | 139 |
+| fetch 1,000 books | 8,478 | 10,469 | 4,693 | 1,314 | 12,824 | 9,844 | 4,667 | 1,187 |
+| count | 293 | 248 | 87 | 105 | 775 | 668 | 237 | 142 |
+| update one book | 121 | 158 | 54 | 16 | 495 | 443 | 215 | 108 |
+| insert one book | 176 | 228 | 169 | 56 | 533 | 594 | 522 | 128 |
+| two inserts in a transaction | 334 | 452 | 352 | 70 | 696 | 1,907 | 1,694 | n/a |
+| get or create (exists) | 186 | 243 | 65 | n/a | 588 | 512 | 159 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 632 | 1,175 | 1,097 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 559 | 444 | 186 | 77 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 478 | 500 | 215 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 661 | 1,349 | 1,247 | n/a |
 
 This VM's speed changes by about 20% from one run to the next (every column
 moves together), so compare numbers within one table, not across runs.
@@ -54,21 +56,22 @@ two `acreate()`s.
 
 ## What this shows
 
-- **djox's `ENGINE` costs nothing for sync code.** "djox sync" is as fast as
+- **djox's `ENGINE` alone costs about nothing for sync code.** "djox sync"
+  (Django's own manager on djox's `ENGINE`) is within this VM's noise of
   Django's own SQLite backend.
-- **The fast lane makes simple reads two to three times faster.** A get by id
-  takes 171 µs against 431 µs with Django writing every query, and 552 µs
-  with Django's async `aget()`: an async get on djox is now faster than
-  Django's sync `get()`. Counts, 20 books and `aget_or_create()` that finds
-  its row gain as much. The fast lane skips Django's query building and SQL
-  compiler (the SQL of each query shape is written once, by Django), and Rust
-  builds the instances.
-- **Big results gain less, for now.** For 1,000 books, most of what is left is
-  Django's converters, which turn each stored date and decimal into a
-  `datetime` and a `Decimal` in Python (about three quarters of the time spent
-  building the instances). Doing those conversions in Rust is the next step.
-- **Writes don't take the fast lane yet.** `acreate()` and transactions are
-  the same with it or without it.
+- **The fast lane makes sync code three times faster.** With `djox.Manager`,
+  a sync `get()` takes 58 µs against 187 µs on Django, `count()` 87 against
+  293, `update()` 54 against 121, and 1,000 books are built in half the
+  time. The fast lane skips Django's query building and SQL compiler (the
+  SQL of each query shape is written once, by Django), and Rust builds the
+  instances and converts their dates and decimals.
+- **Async code gains as much, plus no worker thread.** An async `aget()`
+  takes 214 µs against 605 µs with Django's `aget()`, and 1,000 books 4.7 ms
+  against 12.8 ms. What is left over the sync numbers is the round trip to
+  djox's threads (below).
+- **Inserts and transactions don't take the fast lane.** `acreate()` and
+  `atomic()` blocks run Django's own code, so they are the same with it or
+  without it.
 - **A short transaction is faster as one sync function.** `djox.atomic()`
   pays a thread round trip to start the transaction, one per query, and one
   to commit: four for two inserts, against one for `sync_to_async()` around
