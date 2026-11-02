@@ -191,7 +191,7 @@ urlpatterns = [
 
 wsgi_app = get_wsgi_application()
 if STACK == "djox":
-    from djox.asgi import get_asgi_application as get_djox_asgi_application  # noqa: E402
+    from djox.asgi import get_asgi_application as get_djox_asgi_application
 
     asgi_app = get_djox_asgi_application()
 else:
