@@ -18,10 +18,11 @@ machine that costs about 1 ms, more than the view itself.
 This handler sends the same signals, with the same receivers, at the same
 moments. It only runs them on the event loop's own thread when that can't
 block it (`djox._request_signals` says when): every receiver is one of
-Django's own, and the request has no open sync database connection for
-`close_old_connections()` to close. An async view that uses djox (or no
-database) is in that case. A sync view, sync middleware or a receiver of
-your own makes the handler hop to a thread, exactly like Django's.
+Django's own (or djox's), and the request ran no sync code, whose thread
+would hold the sync database connections `close_old_connections()` closes.
+An async view that uses djox (or no database) is in that case. A sync
+view, sync middleware or a receiver of your own makes the handler hop to a
+thread, exactly like Django's.
 
 Everything else is Django's `ASGIHandler`: reading the body, middleware,
 views, sending the response, a client that disconnects early.

@@ -57,7 +57,7 @@ class Book(models.Model):
 
 A model's own `asave()`, `adelete()` and `arefresh_from_db()` don't go
 through its manager. Inherit from `djox.Model` to run them on djox's threads
-too:
+too (and `asave()` of a new object on djox itself, like `acreate()`):
 
 ```python
 class Author(djox.Model):

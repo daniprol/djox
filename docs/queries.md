@@ -24,13 +24,14 @@ count = await Book.objects.filter(author__name="Frank Herbert").acount()
 | `async for`, `aget()`, `afirst()`, `alast()`, `aearliest()`, `alatest()` | djox |
 | `aiterator(chunk_size=2000)` | djox, a chunk at a time ([Streaming](streaming.md)) |
 | `acount()`, `aexists()`, `acontains()`, `aaggregate()` | djox |
-| `acreate()` | djox (signals are sent with `asend()`) |
+| `acreate()` | djox, on the [fast lane](fast-lane.md#new-objects) (signals are sent with `asend()`); a djox thread for models with their own `save()`, or sync `pre_save`/`post_save` receivers |
 | `aupdate()` | djox |
 | `adelete()` | djox when Django can delete with one statement (no `on_delete` work, no delete signal receivers); else a djox thread |
 | `aget_or_create()` | djox for the lookup, a djox thread to create |
 | `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | a djox thread |
 | `prefetch_related()` | a djox thread ([Related objects](related-objects.md)) |
 | `acreate()`, `aupdate()` on models with parent models (multi-table inheritance) | a djox thread |
+| `asave()` of a new object, on a `djox.Model` | djox, like `acreate()` |
 | `asave()`, `adelete()`, `arefresh_from_db()` on an instance | a djox thread ([Choose the models](models.md)) |
 | related managers: `author.books.acreate()`, `pizza.toppings.aadd()`, `aremove()`, `aclear()`, `aset()`... | a djox thread (their queries, like `author.books.filter(...)`, run on djox) |
 

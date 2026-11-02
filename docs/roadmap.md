@@ -1,6 +1,6 @@
 # Roadmap
 
-djox grows in small steps, each useful on its own. Everything below is in
+djox grows in small steps, each useful on its own. Steps 0 to 8 are in
 0.1.0.
 
 | Step | What |
@@ -14,11 +14,12 @@ djox grows in small steps, each useful on its own. Everything below is in
 | 6 | The fast lane: simple queries, sync and async, reads and writes, skip Django's compiler; Rust builds the results; streamed `aiterator()` |
 | 7 | Postgres: `djox.Database.postgres()` and `djox.backends.postgresql` |
 | 8 | Related objects: `select_related()` on the fast lane, `prefetch_related()` off the event loop |
+| 9 | Speed (unreleased): `djox.asgi`, quick SQLite reads, `Q()`, `exclude()` and joins through foreign keys on the fast lane, `create()` and `asave()` too |
 
 ## Next
 
 - **Postgres**: reading arrays, ranges and `hstore` from async code.
-- **More of the fast lane**: `F()` in `update()`, joins in `filter()`,
-  `annotate()`, the prefetching queries themselves.
+- **More of the fast lane**: `F()` in `update()`, `annotate()`, the
+  prefetching queries themselves.
 
 Need something else? [Open an issue](https://github.com/daniprol/djox/issues).

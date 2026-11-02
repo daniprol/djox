@@ -12,6 +12,7 @@ The same endpoints three times, and the same code on both stacks:
 `ENGINE`, and `"djox"` in `INSTALLED_APPS`, which switches every model to djox
 (`DJOX_MODELS`). `DATABASE` is `sqlite` or `postgres` (`DJOX_POSTGRES_URL`).
 `SERVER` (`wsgi` or `asgi`) picks how connections are kept between requests.
+Under ASGI, djox serves with its own handler (`djox.asgi`), as its docs advise.
 
 `python app.py setup` creates the tables and fills them: 100 authors, 10,000 books.
 """
@@ -189,7 +190,12 @@ urlpatterns = [
 ]
 
 wsgi_app = get_wsgi_application()
-asgi_app = get_asgi_application()
+if STACK == "djox":
+    from djox.asgi import get_asgi_application as get_djox_asgi_application  # noqa: E402
+
+    asgi_app = get_djox_asgi_application()
+else:
+    asgi_app = get_asgi_application()
 
 
 # ---------------------------------------------------------------- setup

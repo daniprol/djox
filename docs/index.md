@@ -88,6 +88,7 @@ async def buy(request, book_id):
 | To... | Read |
 |---|---|
 | See which methods run on djox | [Async queries](queries.md) |
+| Serve requests without thread hops | [Serve with ASGI](asgi.md) |
 | Switch only some models, or none | [Choose the models](models.md) |
 | Make simple queries faster | [The fast lane](fast-lane.md) |
 | Write transactions in async code | [Transactions](transactions.md) |

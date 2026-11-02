@@ -47,6 +47,16 @@ The event loop never waits.
   for readers.
 - **`synchronous = NORMAL`**: safe with WAL and much faster than Django's
   default; a power cut can lose the last commits, never corrupt the file.
+- **Quick reads.** The trip to a reader and back to the event loop costs 60
+  to 80 µs; SQLite answers a small read in about 5. So `fetch_all()` first
+  tries the read right on the calling thread, on one more reader connection
+  kept for that (`quick_reads.rs`). SQLite stops it after `quick_read_limit`
+  (1 ms, with a progress handler), and it runs on a reader instead: nothing
+  is lost but that moment. A read that ran out of time skips this for its
+  next 100 runs, then gets another chance (twice as many skipped each time
+  it runs out again). If another thread is using that connection, the read
+  doesn't wait: it goes to a reader. The same connection tells which
+  statements write, so an `INSERT ... RETURNING` goes straight to the writer.
 - **Streams get a connection of their own.** `stream_rows()` (behind
   `aiterator()`) opens a reader connection on a thread of its own, which
   reads the next chunk each time Python asks for it. A slow loop holds only
@@ -205,9 +215,12 @@ skips most of it:
 
 - **A note instead of a `Query`.** While a `djox.QuerySet` is only filtered
   with plain values (`exact`, `gt`, `gte`, `lt`, `lte`, `in`, `isnull`, on the
-  model's own columns), ordered by columns and sliced, it writes down what was
-  asked (`SimpleQuery`). The values are prepared by their field right away, so
-  a wrong value raises at `filter()`, as in Django.
+  model's columns or through foreign keys), ordered by columns and sliced, it
+  writes down what was asked (`SimpleQuery`). Each `filter()` or `exclude()`
+  call is noted with its structure: its conditions and `Q` objects, joined by
+  `AND` or `OR`, maybe negated, since that decides the SQL. The values are
+  prepared by their field right away, so a wrong value raises at `filter()`,
+  as in Django.
 - **The SQL of each shape is Django's.** Two queries that differ only in their
   values have the same *shape*, and the same SQL. The first time djox meets a
   shape, Django builds the query and writes the SQL; djox keeps it (and checks
@@ -239,11 +252,18 @@ skips most of it:
 - **Writes too.** `update(name=value)` and a `delete()` Django would do in one
   statement keep a statement per shape too, captured from Django's own
   `update()` and `_raw_delete()`.
+- **New objects too.** `create()`, `acreate()` and `asave()` keep the
+  `INSERT` Django wrote for a model's first new object, and compute the next
+  ones' values like Django's compiler (`pre_save()`, then
+  `get_db_prep_save()`). The rest of `save()` (the related objects' check,
+  the signals) is Django's methods, called in Django's order
+  (`djox/_saving.py`).
 - **Sync methods too.** `for`, `get()`, `count()`, `update()`... use the same
   statements, run through a Django cursor on the thread's connection, so
   they behave like Django's in every way but speed.
 - **Anything else is Django's.** Asking for `queryset.query` builds Django's
-  `Query` from the note, so `exclude()`, `Q()`, joins, `annotate()` and
+  `Query` from the note (the same `Q` objects, through Django's own
+  `filter()` code), so `F()`, relations to many rows, `annotate()` and
   `only()` work exactly as in Django.
 
 ## Hooks
