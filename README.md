@@ -47,14 +47,15 @@ The same Django app on stock Django and on djox: one worker process, SQLite, req
 
 | | Django | djox |
 |---|---:|---:|
-| Sync view, get one book | 1,629 | **2,451** (1.5x) |
-| Async view, get one book | 168 | **416** (2.5x) |
-| Async view, a page of 20 books with their authors | 76 | **235** (3.1x) |
+| Sync view, get one book | 1,875 | **3,438** (1.8x) |
+| Async view, get one book | 200 | **1,733** (8.7x) |
+| Async view, a page of 20 books with their authors | 88 | **1,161** (13.3x) |
 | DRF viewset, get one book | 809 | **1,026** (1.3x) |
 
-- **Async views gain the most:** 1.4 to 3.1 times the requests, on SQLite and Postgres.
+- **Async views gain the most:** 2.9 to 13.3 times the requests, on SQLite and Postgres, served with djox's
+  [ASGI handler](https://daniprol.github.io/djox/asgi/).
 - **One ORM call** ([all of them](https://daniprol.github.io/djox/benchmarks/#orm-calls-on-sqlite)): `await Book.objects.aget()` takes
-  132 µs against Django's 507, and a sync `get()` 61 against 216.
+  51 µs against Django's 517, and a sync `get()` 64 against 218.
 - **DRF gains less** (1.0 to 1.3 times): most of a DRF request is DRF's own code.
 
 ## Quickstart
@@ -105,6 +106,14 @@ async def buy(request, book_id):
     return JsonResponse({"ok": True})
 ```
 
+Serving async views? Use djox's ASGI handler too, one line in `asgi.py`:
+
+```python
+from djox.asgi import get_asgi_application  # was: from django.core.asgi import ...
+
+application = get_asgi_application()
+```
+
 Anything djox doesn't run itself falls back to Django's own method, so nothing breaks. Next:
 [the documentation](https://daniprol.github.io/djox/).
 
@@ -113,7 +122,8 @@ Anything djox doesn't run itself falls back to Django's own method, so nothing b
 | | |
 |---|---|
 | [Async QuerySets](https://daniprol.github.io/djox/queries/) | `aget`, `acount`, `async for`, `acreate`, `aupdate`, `adelete`, `aget_or_create`... on djox |
-| [The fast lane](https://daniprol.github.io/djox/fast-lane/) | Simple queries, sync or async, reuse the SQL Django wrote once, and Rust builds the results |
+| [The fast lane](https://daniprol.github.io/djox/fast-lane/) | Queries (`Q()`, `exclude()`, joins) and `create()`, sync or async, reuse the SQL Django wrote once, and Rust builds the results |
+| [ASGI](https://daniprol.github.io/djox/asgi/) | `djox.asgi`: Django's ASGI handler without its thread hops per request |
 | [Existing models](https://daniprol.github.io/djox/models/) | `DJOX_MODELS` switches any model, `User` included, without touching its code |
 | [Async transactions](https://daniprol.github.io/djox/transactions/) | `async with djox.atomic():` and `djox.on_commit()` |
 | [Streaming](https://daniprol.github.io/djox/streaming/) | `aiterator()` reads big results a chunk at a time |
