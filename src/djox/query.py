@@ -31,7 +31,8 @@ async call in the process waits its turn. Inside a transaction, they run on
 the transaction's thread, so they join it.
 
 Simple queries take the fast lane (`djox._fast_lane`): while a `QuerySet`
-is only filtered with plain values (`filter(pages__gt=500)`), ordered by
+is only filtered with plain values (`filter(pages__gt=500)`, `exclude()`,
+`Q` objects, names through foreign keys like `author__name`), ordered by
 columns and sliced, it keeps a note of that (`SimpleQuery`) instead of
 building Django's `Query`. The reading methods (`async for`, `aget()`,
 `afirst()`, `alast()`, `acount()`, `aexists()`...) then reuse the SQL Django
@@ -61,9 +62,9 @@ from django.db.models.sql.constants import MULTI
 
 from djox import _fast_lane, _running, _threads
 from djox._fast_lane import running as fast_lane
-from djox._fast_lane.lookups import condition_for, is_simple_ordering, model_field, updates_for
+from djox._fast_lane.lookups import is_simple_ordering, model_field, updates_for, where_for
 from djox._fast_lane.running import PreparedQuery
-from djox._fast_lane.simple_query import Condition, SimpleQuery, Update
+from djox._fast_lane.simple_query import SimpleQuery, Update
 from djox._fast_lane.statements import Kind
 from djox._results import results_from_rows
 from djox.backends import engine
@@ -148,13 +149,36 @@ class QuerySet(models.QuerySet[ModelType]):
         return clone
 
     def filter(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
-        """Django's `filter()`. Plain `name=value` filters are noted for the fast lane."""
+        """Django's `filter()`. Filters the fast lane understands are noted for it."""
         simple_query = self._recordable_query()
-        if simple_query is not None and not args and not simple_query.is_sliced:
-            conditions = conditions_for(self.model, kwargs)
-            if conditions is not None:
-                return self._with_simple_query(simple_query.with_filter(kwargs, conditions))
+        if simple_query is not None:
+            filtered = self._with_filter_noted(simple_query, args, kwargs, negated=False)
+            if filtered is not None:
+                return self._with_simple_query(filtered)
         return super().filter(*args, **kwargs)
+
+    def exclude(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
+        """Django's `exclude()`. Filters the fast lane understands are noted for it."""
+        simple_query = self._recordable_query()
+        if simple_query is not None:
+            filtered = self._with_filter_noted(simple_query, args, kwargs, negated=True)
+            if filtered is not None:
+                return self._with_simple_query(filtered)
+        return super().exclude(*args, **kwargs)
+
+    def _with_filter_noted(
+        self, simple_query: SimpleQuery, args: tuple[Any, ...], kwargs: dict[str, Any], negated: bool
+    ) -> SimpleQuery | None:
+        """`simple_query` with one more `filter()` call (`exclude()`, if
+        `negated`), or `None` if Django should take the call."""
+        if not args and not kwargs:
+            return simple_query  # Django adds nothing for an empty call
+        if simple_query.is_sliced:
+            return None  # Django refuses to filter a slice: let it say so
+        where = where_for(self.model, args, kwargs, negated)
+        if where is None:
+            return None
+        return simple_query.with_filter(where)
 
     def order_by(self, *field_names: Any) -> "QuerySet[ModelType]":
         """Django's `order_by()`. Ordering by the model's columns is noted for the fast lane."""
@@ -368,15 +392,11 @@ class QuerySet(models.QuerySet[ModelType]):
         `get()` (filter, no ordering, at most `MAX_GET_RESULTS` rows), noted
         without building Django's `Query`. `None` if it isn't that simple."""
         simple_query = self._recordable_query()
-        if simple_query is None or args:
+        if simple_query is None:
             return None
-        if kwargs:
-            if simple_query.is_sliced:
-                return None  # Django refuses to filter a slice: let it say so
-            conditions = conditions_for(self.model, kwargs)
-            if conditions is None:
-                return None
-            simple_query = simple_query.with_filter(kwargs, conditions)
+        simple_query = self._with_filter_noted(simple_query, args, kwargs, negated=False)
+        if simple_query is None:
+            return None
         if not simple_query.is_sliced:
             simple_query = simple_query.with_order_by(())
         return self._with_simple_query(simple_query.with_limits(high=MAX_GET_RESULTS))
@@ -865,18 +885,6 @@ async def save_new_object(obj: models.Model, using: str) -> None:
     obj._state.db = using
     obj._state.adding = False
     await post_save.asend(sender=origin, instance=obj, created=True, update_fields=None, raw=False, using=using)
-
-
-def conditions_for(model: type[models.Model], keyword_arguments: dict[str, Any]) -> list[Condition] | None:
-    """The fast lane's conditions for one `filter()` call, or `None` if one of
-    them must go to Django. In the order Django uses: `Q()` sorts its keyword arguments."""
-    conditions = []
-    for name, value in sorted(keyword_arguments.items()):
-        condition = condition_for(model, name, value)
-        if condition is None:
-            return None
-        conditions.append(condition)
-    return conditions
 
 
 def is_slice_bound(bound: object) -> bool:

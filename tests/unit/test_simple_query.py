@@ -4,11 +4,12 @@ import itertools
 from typing import Any
 
 import pytest
+from django.db import models
 from django.db.models import Q
 from django.db.models.sql import Query
 
-from djox._fast_lane.lookups import condition_for
-from djox._fast_lane.simple_query import Condition, SimpleQuery
+from djox._fast_lane.lookups import condition_for, where_for
+from djox._fast_lane.simple_query import SimpleQuery
 from djox.query import QuerySet
 from tests.e2e.library.models import Book
 
@@ -30,11 +31,16 @@ def test_a_slice_of_a_slice_ends_where_djangos_does(
     assert simple_query.matches_nothing == django_query.is_empty()
 
 
+def noted_filter(*args: Any, negated: bool = False, **kwargs: Any) -> SimpleQuery:
+    """A note of `Book.objects.filter(*args, **kwargs)` (or `exclude()`)."""
+    where = where_for(Book, args, kwargs, negated)
+    assert where is not None
+    return SimpleQuery().with_filter(where)
+
+
 def test_queries_that_differ_only_in_values_have_the_same_shape() -> None:
     def pages_over(pages: int) -> SimpleQuery:
-        condition = condition_for(Book, "pages__gt", pages)
-        assert condition is not None
-        return SimpleQuery().with_filter({"pages__gt": pages}, [condition])
+        return noted_filter(pages__gt=pages)
 
     assert pages_over(500).shape == pages_over(7).shape
     assert pages_over(500).parameters == [500]
@@ -49,9 +55,22 @@ def test_the_number_of_in_values_is_part_of_the_shape() -> None:
     assert two.shape != three.shape
 
 
-def test_in_without_values_matches_nothing() -> None:
-    condition = Condition(Book._meta.get_field("pages"), "in", ())
-    assert SimpleQuery().with_filter({"pages__in": []}, [condition]).matches_nothing
+def test_the_structure_of_the_filters_is_part_of_the_shape() -> None:
+    either = noted_filter(Q(pages__gt=1) | Q(title="Dune"))
+    both = noted_filter(Q(pages__gt=1) & Q(title="Dune"))
+    neither = noted_filter(Q(pages__gt=1) | Q(title="Dune"), negated=True)
+    assert len({either.shape, both.shape, neither.shape}) == 3
+    assert either.shape == noted_filter(Q(pages__gt=500) | Q(title="Emma")).shape
+    # A join through another relation is other SQL, though it ends at the same field.
+    assert noted_filter(author__name="Jane").shape != noted_filter(author__id=1).shape
+
+
+def test_in_without_values_matches_nothing_where_it_decides_the_answer() -> None:
+    assert noted_filter(pages__in=[]).matches_nothing
+    assert noted_filter(Q(pages__in=[]) & Q(title="Dune")).matches_nothing
+    assert noted_filter(Q(pages__in=[]) | Q(title__in=[])).matches_nothing
+    assert not noted_filter(Q(pages__in=[]) | Q(title="Dune")).matches_nothing
+    assert not noted_filter(pages__in=[], negated=True).matches_nothing, "excluding nothing keeps everything"
 
 
 def test_replay_builds_the_query_django_would_build() -> None:
@@ -65,6 +84,20 @@ def test_replay_builds_the_query_django_would_build() -> None:
     django_query.set_limits(2, 5)
     assert str(noted.query) == str(django_query)
     assert noted._simple_query is None, "asking for the query built it"
+
+
+def test_replay_builds_djangos_q_objects_exclude_and_joins() -> None:
+    def make_queryset(model_queryset: Any) -> Any:
+        return (
+            model_queryset.filter(Q(pages__gt=100) | ~Q(author__name="Jane"), in_print=True)
+            .exclude(title__in=["Dune", "Emma"], author__isnull=True)
+            .order_by("author__name")
+        )
+
+    noted = make_queryset(QuerySet(Book))
+    assert noted._simple_query is not None, "every step was noted"
+    django_queryset = make_queryset(models.QuerySet(Book))
+    assert str(noted.query) == str(django_queryset.query)
 
 
 def test_select_related_adds_to_the_relations_given_before() -> None:

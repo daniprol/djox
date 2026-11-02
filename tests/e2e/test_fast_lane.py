@@ -16,7 +16,7 @@ import pytest
 from asgiref.sync import async_to_sync, sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, models, transaction
-from django.db.models import F, Q
+from django.db.models import F
 from django.db.models.signals import post_init
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -206,10 +206,7 @@ async def test_numbers_too_big_for_the_column_are_left_to_django() -> None:
 
 # Querysets the fast lane leaves to Django, which still gives the right answer.
 DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
-    "Q": lambda: Book.objects.filter(Q(pages__gt=300) | Q(title="Persuasion")),
-    "exclude": lambda: Book.objects.exclude(in_print=True),
     "F": lambda: Book.objects.filter(pages__gt=F("id")),
-    "a join": lambda: Book.objects.filter(author__name="Jane Austen"),
     "icontains": lambda: Book.objects.filter(title__icontains="dune"),
     "select_related, then only": lambda: Book.objects.select_related("author").only("title", "author__name"),
     "only": lambda: Book.objects.only("title"),
@@ -251,8 +248,8 @@ async def test_changing_a_list_after_filter_changes_nothing() -> None:
     queryset = Book.objects.filter(title__in=titles)
     titles.append("Dune")
     assert await queryset.acount() == 1
-    # `Q()` isn't noted, so Django builds its `Query` from the note.
-    assert await sync_to_async(lambda: queryset.filter(Q(pk__gt=0)).count())() == 1, "nor in Django's Query"
+    # `F()` isn't noted, so Django builds its `Query` from the note.
+    assert await sync_to_async(lambda: queryset.filter(pk__gt=F("pages") - 1000).count())() == 1, "nor in Django's"
 
 
 @pytest.mark.usefixtures("library")

@@ -1,15 +1,22 @@
-"""Understanding `filter()`, `order_by()` and `update()` arguments, the way Django would.
+"""Understanding `filter()`, `exclude()`, `order_by()` and `update()` arguments, the way Django would.
 
 `condition_for(Book, "pages__gt", 500)` finds the field (`pages`) and the
 lookup (`gt`), and prepares the value with the field's own
 `get_prep_value()`, which is what Django does when `filter()` runs. So a
 wrong value raises the same error, at the same moment, as in Django.
+`where_for()` does the same for a whole `filter()` or `exclude()` call,
+`Q` objects included (`Q(pages__gt=500) | ~Q(in_print=True)`).
+
+A name may follow foreign keys and one-to-one fields forward, to any depth
+(`author__name`, `edition__book__author__name__in`): each points to one row,
+so Django joins its table and the query stays one plain `SELECT`.
 
 Anything this file doesn't fully understand returns `None`: the `QuerySet`
-then hands the call to Django right away. That covers joins
-(`author__name`), transforms (`published__year`), other lookups
-(`icontains`), expressions (`F("pages")`), subqueries, and values of a type
-the field doesn't usually get (`filter(pages=7.5)`).
+then hands the call to Django right away. That covers relations that point
+to many rows (`books__title`, a many-to-many field), transforms
+(`published__year`), other lookups (`icontains`), expressions
+(`F("pages")`, `Exists(...)`), `XOR`, and values of a type the field
+doesn't usually get (`filter(pages=7.5)`).
 
 The SQL itself always comes from Django (`djox._fast_lane.statements`). This
 file only has to say which queries share their SQL, and compute the
@@ -24,11 +31,11 @@ from typing import Any
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models
-from django.db.models import lookups
+from django.db.models import Q, lookups
 from django.db.models.constants import LOOKUP_SEP
 from django.db.models.fields import related_lookups
 
-from djox._fast_lane.simple_query import Condition, Update
+from djox._fast_lane.simple_query import Condition, Update, Where
 
 # The lookup classes the fast lane knows, by lookup name: Django's plain ones,
 # the integer ones (which refuse numbers too big for the column) and the ones
@@ -86,6 +93,37 @@ VALUE_TYPES: dict[str, tuple[type, ...]] = {
 NOT_SIMPLE = object()
 
 
+def where_for(model: type[models.Model], args: tuple[Any, ...], kwargs: dict[str, Any], negated: bool) -> Where | None:
+    """The fast lane's note of one `filter(*args, **kwargs)` call (or
+    `exclude()`, `negated`), or `None` if Django should handle it.
+
+    Django turns the call into `Q(*args, **kwargs)`, whose children are the
+    `Q` objects first, then the keyword arguments sorted by name; the note
+    keeps them in that order, which is the order of the SQL's parameters.
+    """
+    children = [*args, *sorted(kwargs.items())]
+    return node_for(model, children, Q.AND, negated)
+
+
+def node_for(model: type[models.Model], children: list[Any], connector: str, negated: bool) -> Where | None:
+    """The `Where` for the children of a `Q` (or of a `filter()` call), or `None`."""
+    if connector not in (Q.AND, Q.OR) or not children:
+        return None  # `XOR` has SQL of its own on some databases; an empty `Q()` adds nothing
+    noted: list[Condition | Where] = []
+    for child in children:
+        node: Condition | Where | None = None
+        # A `Q` exactly: a subclass may build its filters its own way.
+        if type(child) is Q:
+            node = node_for(model, child.children, child.connector, child.negated)
+        elif type(child) is tuple and len(child) == 2 and isinstance(child[0], str):
+            node = condition_for(model, child[0], child[1])
+        # Anything else (an expression like `Exists(...)`) leaves `node` at `None`.
+        if node is None:
+            return None
+        noted.append(node)
+    return Where(tuple(noted), connector, negated)
+
+
 def condition_for(model: type[models.Model], name: str, value: Any) -> Condition | None:
     """The `Condition` for one `filter()` argument, like `pages__gt=500`, or
     `None` if Django should handle it."""
@@ -93,19 +131,29 @@ def condition_for(model: type[models.Model], name: str, value: Any) -> Condition
     if found is None:
         return None
     field, lookup, lookup_class = found
+    # A copy of a list or set (`title__in=titles`): Django reads the values
+    # when `filter()` runs, so changing `titles` afterwards changes nothing.
+    given = type(value)(value) if type(value) in (list, set) else value
     if lookup == "isnull":
         if type(value) is not bool:  # Django raises for anything else
             return None
-        return Condition(field, "isnull", (), detail=value)
+        return Condition(name, given, field, "isnull", (), detail=value)
     if value is None:
         # Django reads `exact=None` as `isnull=True`, and refuses `None` for the other lookups.
-        return Condition(field, "isnull", (), detail=True) if lookup == "exact" else None
+        return Condition(name, given, field, "isnull", (), detail=True) if lookup == "exact" else None
     if lookup == "in":
-        return in_condition(field, value)
+        prepared_values = prepare_in_values(field, value)
+        if prepared_values is None:
+            return None
+        # Under `exclude()`, Django writes `OR "column" IS NULL` when the values include `None`.
+        includes_none = any(item is None for item in value)
+        return Condition(name, given, field, "in", prepared_values, detail=(len(prepared_values), includes_none))
     prepared = prepare(field, value)
     if prepared is NOT_SIMPLE:
         return None
     return Condition(
+        name,
+        given,
         field,
         lookup,
         (prepared,),
@@ -114,9 +162,9 @@ def condition_for(model: type[models.Model], name: str, value: Any) -> Condition
     )
 
 
-def in_condition(field: "models.Field[Any, Any]", values: Any) -> Condition | None:
-    """`field__in=[...]`. Like Django, the values are prepared one by one,
-    then `None` and repeated values are dropped."""
+def prepare_in_values(field: "models.Field[Any, Any]", values: Any) -> tuple[Any, ...] | None:
+    """The values of `field__in=[...]`, prepared, or `None`. Like Django, the
+    values are prepared one by one, then `None` and repeated values are dropped."""
     if type(values) not in (list, tuple, set, frozenset):
         return None
     prepared_values = []
@@ -129,10 +177,9 @@ def in_condition(field: "models.Field[Any, Any]", values: Any) -> Condition | No
         prepared_values.append(prepared)
     try:
         # `dict.fromkeys()` drops repeated values and keeps the order, like Django's `OrderedSet`.
-        unique_values = tuple(dict.fromkeys(prepared_values))
+        return tuple(dict.fromkeys(prepared_values))
     except TypeError:  # a value that can't be hashed: Django keeps them all too
-        unique_values = tuple(prepared_values)
-    return Condition(field, "in", unique_values, detail=len(unique_values))
+        return tuple(prepared_values)
 
 
 def prepare(field: "models.Field[Any, Any]", value: Any) -> Any:
@@ -164,22 +211,49 @@ def field_and_lookup(
     model: type[models.Model], name: str
 ) -> "tuple[models.Field[Any, Any], str, type[lookups.Lookup[Any]]] | None":
     """The field, the lookup name and Django's lookup class for a `filter()`
-    name like `"pages__gt"`, `"pk"` or `"author"`, or `None`.
+    name like `"pages__gt"`, `"pk"`, `"author"` or `"author__name__in"`, or `None`.
 
     Cached per model and name: models don't change while the program runs.
     (`@lru_cache` remembers what a function returned for each argument.)
     """
     parts = name.split(LOOKUP_SEP)
-    if len(parts) > 2:
+    found = field_at_path(model, parts)
+    if found is None:
         return None
-    lookup = parts[1] if len(parts) == 2 else "exact"
-    field = model_field(model, parts[0])
-    if field is None or lookup not in KNOWN_LOOKUP_CLASSES:
+    field, lookup_parts = found
+    if len(lookup_parts) > 1:
+        return None  # a transform, like `published__year__gt`
+    lookup = lookup_parts[0] if lookup_parts else "exact"
+    if lookup not in KNOWN_LOOKUP_CLASSES:
         return None
     lookup_class = field.get_lookup(lookup)
     if lookup_class not in KNOWN_LOOKUP_CLASSES[lookup]:
         return None
     return field, lookup, lookup_class
+
+
+def field_at_path(model: type[models.Model], parts: list[str]) -> "tuple[models.Field[Any, Any], list[str]] | None":
+    """The field the start of `parts` names, following relations, and the
+    parts left after it (the lookup). `None` if a part isn't a field
+    `model_field()` accepts.
+
+    `["author", "name", "in"]` on `Book` gives `Author.name` and `["in"]`.
+    Like Django, a part is a field name if the model has such a field, and
+    a lookup otherwise: only a relation (a foreign key or a one-to-one
+    field) leads to another model's fields.
+    """
+    field = model_field(model, parts[0])
+    if field is None:
+        return None
+    position = 1
+    while position < len(parts) and field.is_relation:
+        # `related_model` is the model the relation points to (`Author` for `Book.author`).
+        next_field = model_field(field.related_model, parts[position])  # type: ignore[arg-type]  # a relation has one
+        if next_field is None:
+            break  # not a field of the related model: a lookup on the relation, like `author__in`
+        field = next_field
+        position += 1
+    return field, parts[position:]
 
 
 def model_field(model: type[models.Model], name: str) -> "models.Field[Any, Any] | None":
@@ -204,14 +278,16 @@ def model_field(model: type[models.Model], name: str) -> "models.Field[Any, Any]
 
 
 def is_simple_ordering(model: type[models.Model], names: tuple[Any, ...]) -> bool:
-    """Whether every `order_by()` argument is the name of one of the model's
-    columns, like `"-pages"` or `"pk"`. Expressions, `"?"` (random) and joins
-    (`"author__name"`) are left to Django."""
+    """Whether every `order_by()` argument names a column, like `"-pages"`,
+    `"pk"`, or one reached through relations (`"author__name"`), the way
+    `filter()` names them. Expressions, `"?"` (random) and transforms are
+    left to Django."""
     for name in names:
         if not isinstance(name, str):
             return False
-        if model_field(model, name.removeprefix("-")) is None:
-            return False
+        found = field_at_path(model, name.removeprefix("-").split(LOOKUP_SEP))
+        if found is None or found[1]:
+            return False  # not a field, or something after it (a transform)
     return True
 
 
