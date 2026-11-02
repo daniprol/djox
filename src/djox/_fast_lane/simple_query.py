@@ -24,7 +24,7 @@ A note is never changed: each step (`with_filter()`, `with_order_by()`...)
 returns a new one, the way each `QuerySet` method returns a new `QuerySet`.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -128,6 +128,20 @@ class SimpleQuery:
         """A note never changes, so a deep copy of a `QuerySet` can share it."""
         return self
 
+    def changed(self, **changes: Any) -> "SimpleQuery":
+        """A copy of this note with some fields changed, like `dataclasses.replace()`.
+
+        `replace()` checks every field each time, which made it the slowest
+        step of a simple query (2.5 µs, three times per `get()`). Here the
+        copy is made directly: a new object without `__init__` (`__new__`),
+        then its attributes (`__dict__`) copied over and changed. A frozen
+        dataclass only refuses changes made with `note.field = value`.
+        """
+        copy = object.__new__(SimpleQuery)
+        copy.__dict__.update(self.__dict__)
+        copy.__dict__.update(changes)
+        return copy
+
     @property
     def is_sliced(self) -> bool:
         """Whether a slice was taken (then Django refuses `filter()` and `order_by()`)."""
@@ -175,19 +189,18 @@ class SimpleQuery:
         snapshot = {}
         for name, value in keyword_arguments.items():
             snapshot[name] = type(value)(value) if type(value) in (list, set) else value
-        return replace(
-            self,
+        return self.changed(
             filter_calls=(*self.filter_calls, snapshot),
             conditions=(*self.conditions, *conditions),
         )
 
     def with_order_by(self, names: tuple[str, ...]) -> "SimpleQuery":
         """This query, ordered by `names` instead (like `order_by()`, which replaces any ordering)."""
-        return replace(self, order_by=names)
+        return self.changed(order_by=names)
 
     def with_reversed_ordering(self) -> "SimpleQuery":
         """This query, in the other order (like `reverse()`)."""
-        return replace(self, reverse_ordering=not self.reverse_ordering)
+        return self.changed(reverse_ordering=not self.reverse_ordering)
 
     def with_values(self, fields: tuple[str, ...]) -> "SimpleQuery":
         """This query, returning only `fields` (like `values()` and `values_list()`).
@@ -195,17 +208,17 @@ class SimpleQuery:
         Without its `select_related()`, like Django's `values()`: dicts and
         tuples have no related objects to cache.
         """
-        return replace(self, values_fields=fields, select_related=())
+        return self.changed(values_fields=fields, select_related=())
 
     def with_select_related(self, names: tuple[str, ...]) -> "SimpleQuery":
         """This query, also fetching the objects of the relations `names` (like
         `select_related()`, which adds to the relations given before)."""
         added = tuple(name for name in names if name not in self.select_related)
-        return replace(self, select_related=(*self.select_related, *added))
+        return self.changed(select_related=(*self.select_related, *added))
 
     def without_select_related(self) -> "SimpleQuery":
         """This query, without related objects (like `select_related(None)`)."""
-        return replace(self, select_related=())
+        return self.changed(select_related=())
 
     def with_limits(self, low: int | None = None, high: int | None = None) -> "SimpleQuery":
         """This query, sliced further: `[low:high]` of what it returns.
@@ -218,7 +231,7 @@ class SimpleQuery:
             new_high = min(new_high, new_low + high) if new_high is not None else new_low + high
         if low is not None:
             new_low = min(new_high, new_low + low) if new_high is not None else new_low + low
-        return replace(self, low=new_low, high=new_high)
+        return self.changed(low=new_low, high=new_high)
 
     def replay_on(self, queryset: "QuerySet[Model]") -> None:
         """Build Django's `Query` of `queryset` from this note, with Django's own methods.

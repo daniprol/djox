@@ -107,6 +107,7 @@ class QuerySet(models.QuerySet[ModelType]):
         simple_query = self._simple_query
         if simple_query is not None:
             self._simple_query = None
+            self._query = Query(self.model)  # pyrefly: ignore[missing-attribute]  # Django's; empty, for the replay
             simple_query.replay_on(self)
         # Django's own property, which also applies a filter that a related manager deferred.
         return super().query
@@ -140,7 +141,7 @@ class QuerySet(models.QuerySet[ModelType]):
         # attribute is copied over, whichever ones this Django version has.
         clone = self.__class__.__new__(self.__class__)
         clone.__dict__.update(self.__dict__)
-        clone._query = Query(self.model)  # type: ignore[attr-defined]  # empty, until a step needs it
+        clone._query = None  # type: ignore[assignment]  # Django's; built from the note when asked for (`query`)
         clone._result_cache = None
         clone._prefetch_done = False  # type: ignore[attr-defined]  # Django's
         clone._simple_query = simple_query
@@ -366,15 +367,19 @@ class QuerySet(models.QuerySet[ModelType]):
         """What `get()` runs, on the fast lane: the same steps as Django's
         `get()` (filter, no ordering, at most `MAX_GET_RESULTS` rows), noted
         without building Django's `Query`. `None` if it isn't that simple."""
-        if self._simple_query is None or args:
+        simple_query = self._recordable_query()
+        if simple_query is None or args:
             return None
-        clone = self.filter(**kwargs)
-        simple_query = clone._simple_query
-        if simple_query is None:
-            return None
+        if kwargs:
+            if simple_query.is_sliced:
+                return None  # Django refuses to filter a slice: let it say so
+            conditions = conditions_for(self.model, kwargs)
+            if conditions is None:
+                return None
+            simple_query = simple_query.with_filter(kwargs, conditions)
         if not simple_query.is_sliced:
             simple_query = simple_query.with_order_by(())
-        return clone._with_simple_query(simple_query.with_limits(high=MAX_GET_RESULTS))
+        return self._with_simple_query(simple_query.with_limits(high=MAX_GET_RESULTS))
 
     def _only_result(self, results: list[Any] | None, limit: int | None) -> ModelType:
         """The one result `get()` found, or Django's error for none or several."""
@@ -881,4 +886,4 @@ def is_slice_bound(bound: object) -> bool:
 
 def runs_on_djox(alias: str) -> bool:
     """Whether the Django database `alias` uses one of djox's `ENGINE`s."""
-    return engine.runs_on_djox(connections[alias])
+    return engine.alias_runs_on_djox(alias)

@@ -7,6 +7,7 @@ on djox?" with one `isinstance()`, and open the alias's async database
 without knowing which database it is.
 """
 
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -35,3 +36,29 @@ class DjoxEngine:
 def runs_on_djox(wrapper: Any) -> bool:
     """Whether `wrapper` (a Django `DatabaseWrapper`) belongs to a djox `ENGINE`."""
     return isinstance(wrapper, DjoxEngine)
+
+
+def alias_runs_on_djox(alias: str) -> bool:
+    """Whether the Django database `alias` uses one of djox's `ENGINE`s.
+
+    The same answer as `runs_on_djox(connections[alias])`, from the alias's
+    settings rather than its connection. Django keeps a connection per thread
+    (in asgiref's `Local`, a thread-local that also follows async code), and
+    finding this thread's one costs a few microseconds: more than this check
+    is worth, when every query of `djox.QuerySet` makes it.
+    """
+    from django.db import connections
+
+    settings_dict = connections.settings.get(alias)
+    if settings_dict is None:
+        return runs_on_djox(connections[alias])  # Django raises its own error for an unknown alias
+    return engine_runs_on_djox(settings_dict["ENGINE"])
+
+
+# `@cache` remembers the answer for each argument, like a dict filled on first use.
+@cache
+def engine_runs_on_djox(engine: str) -> bool:
+    """Whether the `ENGINE` named `engine` is one of djox's."""
+    from django.db.utils import load_backend
+
+    return issubclass(load_backend(engine).DatabaseWrapper, DjoxEngine)

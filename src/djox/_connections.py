@@ -23,6 +23,7 @@ the next lookup closes the old database and opens a new one.
 
 import threading
 from dataclasses import dataclass
+from typing import Any
 
 from djox._core import Database
 
@@ -34,6 +35,10 @@ class OpenDatabase:
     name: str
     time_zone: str
     database: Database
+
+    def is_open_for(self, name: str, time_zone: str) -> bool:
+        """Whether this database is still open, for this `NAME` and time zone."""
+        return (self.name, self.time_zone) == (name, time_zone) and not self.database.closed
 
 
 class Connections:
@@ -57,20 +62,26 @@ class Connections:
                 f"djox.connections[{alias!r}] needs settings.DATABASES[{alias!r}]['ENGINE'] to be "
                 f"'djox.backends.sqlite3' or 'djox.backends.postgresql', not {wrapper.settings_dict['ENGINE']!r}."
             )
+        return self.database_for(wrapper)
+
+    def database_for(self, wrapper: Any) -> Database:
+        """The async database of `wrapper`'s alias, for code that has the
+        alias's Django `DatabaseWrapper` already (one of a djox `ENGINE`)."""
         name = str(wrapper.settings_dict["NAME"])
         time_zone = wrapper.timezone_name
+        # Usually the database is open already. Reading a dict needs no lock
+        # (the GIL makes `dict.get()` safe); only opening one does.
+        opened = self._open.get(wrapper.alias)
+        if opened is not None and opened.is_open_for(name, time_zone):
+            return opened.database
         with self._lock:
-            opened = self._open.get(alias)
-            if (
-                opened is not None
-                and (opened.name, opened.time_zone) == (name, time_zone)
-                and not opened.database.closed
-            ):
-                return opened.database
+            opened = self._open.get(wrapper.alias)
+            if opened is not None and opened.is_open_for(name, time_zone):
+                return opened.database  # another thread opened it meanwhile
             if opened is not None:
                 opened.database.close()
-            database = wrapper.open_async_database()
-            self._open[alias] = OpenDatabase(name, time_zone, database)
+            database: Database = wrapper.open_async_database()
+            self._open[wrapper.alias] = OpenDatabase(name, time_zone, database)
             return database
 
     def close(self, alias: str) -> None:
