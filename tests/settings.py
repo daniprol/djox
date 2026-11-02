@@ -49,8 +49,12 @@ DJANGO_QUERY_APPS = [
     "many_to_one",
     "null_queries",
     "or_lookups",
+    "prefetch_related",
     "queries",
     "reverse_lookup",
+    "select_related",
+    "select_related_onetoone",
+    "select_related_regress",
     "update",
     "update_only_fields",
 ]

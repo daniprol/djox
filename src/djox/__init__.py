@@ -13,6 +13,8 @@ djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
   model's own `asave()`, `adelete()` and `arefresh_from_db()`.
 - `djox.atomic()` and `djox.on_commit()` are Django's transactions, for
   async code (`async with djox.atomic(): ...`).
+- `djox.aprefetch_related_objects()` is Django's prefetching, for async
+  code, on djox's own threads (`djox.prefetch`).
 - `djox.add_hooks(djox.Hooks(before_query=..., after_query=...))` calls your
   functions around every SQL statement (`djox.hooks`).
 
@@ -54,6 +56,7 @@ from djox.hooks import Hooks, Query, QueryFinished, add_hooks, remove_hooks
 if TYPE_CHECKING:
     from djox.manager import Manager
     from djox.models import Model
+    from djox.prefetch import aprefetch_related_objects
     from djox.query import QuerySet
     from djox.transaction import atomic, on_commit
 
@@ -81,6 +84,10 @@ def __getattr__(name: str) -> Any:
         from djox.transaction import atomic
 
         return atomic
+    if name == "aprefetch_related_objects":
+        from djox.prefetch import aprefetch_related_objects
+
+        return aprefetch_related_objects
     if name == "on_commit":
         from djox.transaction import on_commit
 
@@ -111,6 +118,7 @@ __all__ = [
     "QuerySet",
     "RowStream",
     "add_hooks",
+    "aprefetch_related_objects",
     "atomic",
     "connections",
     "on_commit",

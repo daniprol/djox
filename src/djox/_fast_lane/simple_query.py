@@ -120,6 +120,10 @@ class SimpleQuery:
     """The fields given to `values()` or `values_list()`, like `("title", "pages")`,
     or `None` for model instances. `()` is every field of the model."""
 
+    select_related: tuple[str, ...] = ()
+    """The relations given to `select_related()`, like `("author", "author__publisher")`,
+    in the order given. `()` for none."""
+
     def __deepcopy__(self, memo: dict[int, Any]) -> "SimpleQuery":
         """A note never changes, so a deep copy of a `QuerySet` can share it."""
         return self
@@ -146,7 +150,15 @@ class SimpleQuery:
         is part of the shape because Django writes `LIMIT 20` into the SQL.
         """
         conditions = tuple(condition.shape for condition in self.conditions)
-        return (conditions, self.order_by, self.reverse_ordering, self.low, self.high, self.values_fields)
+        return (
+            conditions,
+            self.order_by,
+            self.reverse_ordering,
+            self.low,
+            self.high,
+            self.values_fields,
+            self.select_related,
+        )
 
     @property
     def parameters(self) -> list[Any]:
@@ -178,8 +190,22 @@ class SimpleQuery:
         return replace(self, reverse_ordering=not self.reverse_ordering)
 
     def with_values(self, fields: tuple[str, ...]) -> "SimpleQuery":
-        """This query, returning only `fields` (like `values()` and `values_list()`)."""
-        return replace(self, values_fields=fields)
+        """This query, returning only `fields` (like `values()` and `values_list()`).
+
+        Without its `select_related()`, like Django's `values()`: dicts and
+        tuples have no related objects to cache.
+        """
+        return replace(self, values_fields=fields, select_related=())
+
+    def with_select_related(self, names: tuple[str, ...]) -> "SimpleQuery":
+        """This query, also fetching the objects of the relations `names` (like
+        `select_related()`, which adds to the relations given before)."""
+        added = tuple(name for name in names if name not in self.select_related)
+        return replace(self, select_related=(*self.select_related, *added))
+
+    def without_select_related(self) -> "SimpleQuery":
+        """This query, without related objects (like `select_related(None)`)."""
+        return replace(self, select_related=())
 
     def with_limits(self, low: int | None = None, high: int | None = None) -> "SimpleQuery":
         """This query, sliced further: `[low:high]` of what it returns.
@@ -208,6 +234,8 @@ class SimpleQuery:
             query.add_ordering(*self.order_by)
         if self.reverse_ordering:
             query.standard_ordering = not query.standard_ordering
+        if self.select_related:
+            query.add_select_related(self.select_related)
         if self.is_sliced:
             query.set_limits(self.low, self.high)
         if self.values_fields is not None:

@@ -76,23 +76,26 @@ Postgres:
 
 ## ORM calls on SQLite
 
-The same queries through each contender, on a SQLite file with 10,000 books ([`run.py`](run.py)). Microseconds
-per call, median of 5 rounds, lower is better.
+The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters
+([`run.py`](run.py)). Microseconds per call, median of 5 rounds, lower is better.
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
-| get one book by id | 187 | 247 | 58 | 7 | 605 | 436 | 214 | 89 |
-| fetch 20 books | 518 | 474 | 204 | 47 | 1,088 | 831 | 371 | 139 |
-| fetch 1,000 books | 8,478 | 10,469 | 4,693 | 1,314 | 12,824 | 9,844 | 4,667 | 1,187 |
-| count | 293 | 248 | 87 | 105 | 775 | 668 | 237 | 142 |
-| update one book | 121 | 158 | 54 | 16 | 495 | 443 | 215 | 108 |
-| insert one book | 176 | 228 | 169 | 56 | 533 | 594 | 522 | 128 |
-| two inserts in a transaction | 334 | 452 | 352 | 70 | 696 | 1,907 | 1,694 | n/a |
-| get or create (exists) | 186 | 243 | 65 | n/a | 588 | 512 | 159 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 632 | 1,175 | 1,097 | n/a |
-| 100 gets at once | n/a | n/a | n/a | n/a | 559 | 444 | 186 | 77 |
-| 100 get or create at once | n/a | n/a | n/a | n/a | 478 | 500 | 215 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | n/a | 661 | 1,349 | 1,247 | n/a |
+| get one book by id | 216 | 186 | 61 | 4 | 507 | 371 | 132 | 63 |
+| fetch 20 books | 543 | 460 | 120 | 26 | 957 | 753 | 216 | 99 |
+| fetch 1,000 books | 7,515 | 7,662 | 2,469 | 622 | 9,864 | 8,920 | 3,055 | 693 |
+| count | 283 | 278 | 95 | 67 | 584 | 420 | 177 | 127 |
+| update one book | 138 | 110 | 54 | 9 | 304 | 261 | 157 | 73 |
+| insert one book | 159 | 149 | 167 | 45 | 331 | 346 | 365 | 104 |
+| two inserts in a transaction | 325 | 318 | 305 | 51 | 535 | 1,091 | 1,247 | n/a |
+| get or create (exists) | 194 | 195 | 61 | n/a | 482 | 341 | 147 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 481 | 871 | 926 | n/a |
+| 20 chapters with their book | 694 | 802 | 176 | n/a | 1,195 | 1,006 | 293 | n/a |
+| 1,000 chapters with their book | 13,441 | 13,830 | 4,901 | n/a | 15,413 | 14,336 | 5,661 | n/a |
+| 20 books with their chapters | 1,884 | 1,812 | 1,303 | n/a | 2,368 | 2,340 | 1,723 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 426 | 331 | 142 | 58 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 407 | 268 | 118 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 460 | 779 | 773 | n/a |
 
 | Contender | What runs |
 |---|---|
@@ -102,13 +105,16 @@ per call, median of 5 rounds, lower is better.
 | djox safe lane | `djox.Manager()` with `DJOX_FAST_LANE = False`: Django builds everything, djox runs the SQL |
 | sqlite3 / djox | Hand-written SQL on Python's `sqlite3` / on `djox.Database`. The floors |
 
-- **The fast lane makes sync code 2 to 3 times faster**: `get()` 58 µs against 187, `count()` 87 against 293.
-- **Async `aget()` is 3 times faster** than Django's (214 µs against 605), and so are 1,000 rows.
+- **The fast lane makes sync code 3 times faster**: `get()` 61 µs against 216, `count()` 95 against 283.
+- **Async `aget()` is 4 times faster** than Django's (132 µs against 507), and 1,000 books 3 times.
+- **`select_related()` takes the fast lane too**: 20 chapters with their book take 176 µs sync against 694, and
+  293 µs async against 1,195. Django writes the join once; Rust builds both objects of each row.
+- **`prefetch_related()` gains less** (1.7 ms against 2.4 ms async): the prefetching query still runs Django's code.
 - **djox's `ENGINE` alone costs about nothing**: "djox sync" is within noise of Django.
 - **Inserts and `atomic()` blocks run Django's own code**, so the fast lane doesn't change them.
 - **A short `djox.atomic()` block is slower** than one `sync_to_async()` around a sync `atomic()`: it pays a
   thread round trip per statement. What it buys is async code inside the transaction.
-- **A round trip to djox's threads costs 65 to 90 µs** on this VM ("djox" column), against 5 µs for SQLite itself.
+- **A round trip to djox's threads costs 60 to 90 µs** on this VM ("djox" column), against 4 µs for SQLite itself.
 
 <details>
 <summary>What made the round trip faster (120 µs to 66 µs)</summary>

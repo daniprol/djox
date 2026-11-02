@@ -19,6 +19,20 @@
 //! book.title = converted(row[1])         # Django's own converters
 //! ```
 //!
+//! With `select_related("author")`, each row also holds the columns of the
+//! book's author (Django joins the tables). The builder then makes the author
+//! the same way, from its own columns, and links the two with Django's own
+//! setters, like Django's `RelatedPopulator` does:
+//!
+//! ```python
+//! author = make_instance(Author, row[7:9])   # the author's columns
+//! set_on_parent(book, author)                # book.author is now cached
+//! set_on_related(author, book)               # for a one-to-one, the way back
+//! ```
+//!
+//! A nullable foreign key may have no author: its columns are all `NULL`
+//! (a `LEFT OUTER JOIN`), and the book gets `None` instead.
+//!
 //! Python decides when this is allowed (`djox._fast_lane`): no signal
 //! receivers, no custom `__init__` or `from_db()`. The converters (text to
 //! `datetime`, a float to `Decimal`...) are the ones Django's compiler
@@ -50,6 +64,69 @@ pub struct ResultBuilder {
     model_state: Option<Py<PyAny>>,
     /// `object.__new__`, which makes an instance without calling `__init__`.
     new_object: Py<PyAny>,
+    /// For `instances()`: the models `select_related()` adds to each
+    /// instance, like a book's author. Empty without `select_related()`.
+    related: Vec<Py<RelatedModel>>,
+}
+
+/// A model that `select_related()` adds to each instance, like the author of
+/// a book: where its columns are in the row, and how to link it to the
+/// instance it belongs to. Made in Python from what Django's compiler says
+/// (`klass_info`, the same description Django's `RelatedPopulator` reads).
+///
+/// `frozen`: it never changes after it is made, so any thread can use it.
+#[pyclass(module = "djox", frozen)]
+pub struct RelatedModel {
+    /// The model class, like `Author`.
+    model: Py<PyAny>,
+    /// The position of its first column in the row.
+    first_column: usize,
+    /// The position just after its last column (like `row[first:end]` in Python).
+    end_column: usize,
+    /// The position of its primary key in the row: `NULL` there means there
+    /// is no related object (a nullable foreign key that is empty).
+    primary_key_column: usize,
+    /// Django's function that caches the related object on its parent, like
+    /// `book.author`: called as `set_on_parent(book, author_or_none)`.
+    set_on_parent: Py<PyAny>,
+    /// Django's function that caches the parent on the related object, for
+    /// a one-to-one: called as `set_on_related(author, book)`. For other
+    /// relations Django's function does nothing.
+    set_on_related: Py<PyAny>,
+    /// The models `select_related()` adds to this one in turn, like the
+    /// author's publisher in `select_related("author__publisher")`.
+    related: Vec<Py<RelatedModel>>,
+}
+
+#[pymethods]
+impl RelatedModel {
+    /// The Python constructor, `RelatedModel(...)`; see the fields above.
+    #[new]
+    #[pyo3(signature = (model, first_column, end_column, primary_key_column, set_on_parent, set_on_related, related = Vec::new()))]
+    fn new(
+        model: Py<PyAny>,
+        first_column: usize,
+        end_column: usize,
+        primary_key_column: usize,
+        set_on_parent: Py<PyAny>,
+        set_on_related: Py<PyAny>,
+        related: Vec<Py<RelatedModel>>,
+    ) -> PyResult<Self> {
+        if first_column >= end_column || primary_key_column < first_column || primary_key_column >= end_column {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "a related model needs first_column <= primary_key_column < end_column",
+            ));
+        }
+        Ok(RelatedModel {
+            model,
+            first_column,
+            end_column,
+            primary_key_column,
+            set_on_parent,
+            set_on_related,
+            related,
+        })
+    }
 }
 
 /// What Python passes for one column's converters: `None`, or
@@ -83,10 +160,16 @@ impl ResultBuilder {
     /// `conversions` has one entry per column too: `None`, or the Rust
     /// conversion that does the same as the column's converters (see
     /// `conversions.rs`). `model` and `model_state` are needed for `instances()` only.
+    /// `related` lists the models `select_related()` adds (see `RelatedModel`):
+    /// the model's own columns come first, and end where the first related
+    /// model's columns begin.
     ///
     /// `#[new]` makes this the Python constructor, `ResultBuilder(...)`.
     #[new]
-    #[pyo3(signature = (names, converters, conversions, connection, model = None, model_state = None))]
+    #[pyo3(signature = (names, converters, conversions, connection, model = None, model_state = None, related = Vec::new()))]
+    // Clippy (Rust's linter) counts the arguments; a Python constructor with
+    // keyword arguments is clearer than a struct of options here.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         names: Vec<String>,
@@ -95,10 +178,16 @@ impl ResultBuilder {
         connection: Py<PyAny>,
         model: Option<Py<PyAny>>,
         model_state: Option<Py<PyAny>>,
+        related: Vec<Py<RelatedModel>>,
     ) -> PyResult<Self> {
         if names.len() != converters.len() || names.len() != conversions.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "names, converters and conversions must have one entry per column",
+            ));
+        }
+        if !related_columns_fit(&related, names.len()) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "a related model's columns must be within the row's columns",
             ));
         }
         let mut columns = Vec::with_capacity(names.len());
@@ -127,10 +216,12 @@ impl ResultBuilder {
             model,
             model_state,
             new_object: py.import("builtins")?.getattr("object")?.getattr("__new__")?.unbind(),
+            related,
         })
     }
 
-    /// One model instance per row, in order. `rows` is a list of tuples, as
+    /// One model instance per row, in order, with the objects of
+    /// `select_related()` cached on it. `rows` is a list of tuples, as
     /// `fetch_all()` returns them; `alias` is the database alias the rows came
     /// from. `fetch_mode` (Django 6.1 and later) is set on each instance's state.
     #[pyo3(signature = (rows, alias, fetch_mode = None))]
@@ -141,32 +232,31 @@ impl ResultBuilder {
         alias: &Bound<'py, PyString>,
         fetch_mode: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyList>> {
-        // `let (Some(a), Some(b)) = ... else` unpacks both, or leaves the function.
-        let (Some(model), Some(model_state)) = (&self.model, &self.model_state) else {
+        // `let Some(model) = ... else` unpacks it, or leaves the function.
+        let Some(model) = &self.model else {
             return Err(pyo3::exceptions::PyTypeError::new_err(
                 "instances() needs a ResultBuilder made with a model and model_state",
             ));
+        };
+        // The model's own columns end where the first related model's begin.
+        // (`.first()` is an `Option`: the first related model, or `None`.)
+        let model_end_column = match self.related.first() {
+            Some(related) => related.get().first_column,
+            None => self.columns.len(),
         };
         let instances = PyList::empty(py);
         for row in rows.iter() {
             // `cast` checks the type, like `isinstance(row, tuple)`, and fails with a `TypeError`.
             let row = row.cast_into::<PyTuple>()?;
             self.check_length(&row)?;
-            // `.bind(py)` turns a stored Python object (`Py<...>`) into one we
-            // can call while holding the GIL (`Bound<...>`).
-            let instance = self.new_object.bind(py).call1((model.bind(py),))?;
-            let state = model_state.bind(py).call0()?;
-            // `intern!` makes each attribute name once and reuses it, like a module-level constant.
-            state.setattr(intern!(py, "adding"), false)?;
-            state.setattr(intern!(py, "db"), alias)?;
-            if let Some(fetch_mode) = fetch_mode {
-                state.setattr(intern!(py, "fetch_mode"), fetch_mode)?;
-            }
-            instance.setattr(intern!(py, "_state"), state)?;
-            for (column, value) in self.columns.iter().zip(row.iter()) {
-                let value = self.convert(py, column, value)?;
-                // `setattr`, like Django's `__init__`, so a field's descriptor (if it has one) sees the value.
-                instance.setattr(column.name.bind(py), value)?;
+            // Every column converted first, like Django's `results_iter()`:
+            // the related models read their columns from the same values.
+            let values = self.converted_values(py, &row)?;
+            // `&values[a..b]` is a slice, like `values[a:b]` in Python, without copying.
+            let instance = self.new_instance(py, model.bind(py), &values[0..model_end_column], 0, alias, fetch_mode)?;
+            for related in &self.related {
+                // `.get()` reads a frozen Python object's Rust fields.
+                self.add_related(py, related.get(), &instance, &values, alias, fetch_mode)?;
             }
             instances.append(instance)?;
         }
@@ -211,6 +301,89 @@ impl ResultBuilder {
 }
 
 impl ResultBuilder {
+    /// A new instance of `model` from `values`, the converted values of its
+    /// columns, which start at column `first_column` of the row. Made the
+    /// way `__init__` and `from_db()` leave it (see the top of this file).
+    fn new_instance<'py>(
+        &self,
+        py: Python<'py>,
+        model: &Bound<'py, PyAny>,
+        values: &[Bound<'py, PyAny>],
+        first_column: usize,
+        alias: &Bound<'py, PyString>,
+        fetch_mode: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let Some(model_state) = &self.model_state else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "instances() needs a ResultBuilder made with a model and model_state",
+            ));
+        };
+        // `.bind(py)` turns a stored Python object (`Py<...>`) into one we
+        // can call while holding the GIL (`Bound<...>`).
+        let instance = self.new_object.bind(py).call1((model,))?;
+        let state = model_state.bind(py).call0()?;
+        // `intern!` makes each attribute name once and reuses it, like a module-level constant.
+        state.setattr(intern!(py, "adding"), false)?;
+        state.setattr(intern!(py, "db"), alias)?;
+        // `if let Some(x) = ...` runs the block only when there is a value,
+        // like `if (x := ...) is not None:`.
+        if let Some(fetch_mode) = fetch_mode {
+            state.setattr(intern!(py, "fetch_mode"), fetch_mode)?;
+        }
+        instance.setattr(intern!(py, "_state"), state)?;
+        let columns = &self.columns[first_column..first_column + values.len()];
+        for (column, value) in columns.iter().zip(values) {
+            // `setattr`, like Django's `__init__`, so a field's descriptor (if it has one) sees the value.
+            instance.setattr(column.name.bind(py), value)?;
+        }
+        Ok(instance)
+    }
+
+    /// Make the related object `related` describes from the row's `values`
+    /// (and, in turn, its own related objects), and cache it on `parent`,
+    /// like Django's `RelatedPopulator.populate()`.
+    fn add_related<'py>(
+        &self,
+        py: Python<'py>,
+        related: &RelatedModel,
+        parent: &Bound<'py, PyAny>,
+        values: &[Bound<'py, PyAny>],
+        alias: &Bound<'py, PyString>,
+        fetch_mode: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<()> {
+        if values[related.primary_key_column].is_none() {
+            // No related object: an empty nullable foreign key (or no row on
+            // the other side of a one-to-one). `py.None()` is Python's `None`.
+            related.set_on_parent.bind(py).call1((parent, py.None()))?;
+            return Ok(());
+        }
+        let own_values = &values[related.first_column..related.end_column];
+        let instance = self.new_instance(
+            py,
+            related.model.bind(py),
+            own_values,
+            related.first_column,
+            alias,
+            fetch_mode,
+        )?;
+        // Its own related objects first, then the links: the order Django uses.
+        for child in &related.related {
+            self.add_related(py, child.get(), &instance, values, alias, fetch_mode)?;
+        }
+        related.set_on_parent.bind(py).call1((parent, &instance))?;
+        related.set_on_related.bind(py).call1((&instance, parent))?;
+        Ok(())
+    }
+
+    /// Every value of `row`, converted (see `convert()`).
+    fn converted_values<'py>(&self, py: Python<'py>, row: &Bound<'py, PyTuple>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let mut values = Vec::with_capacity(self.columns.len());
+        for (column, value) in self.columns.iter().zip(row.iter()) {
+            values.push(self.convert(py, column, value)?);
+        }
+        Ok(values)
+    }
+
     /// An error if `row` doesn't have one value per column.
     fn check_length(&self, row: &Bound<'_, PyTuple>) -> PyResult<()> {
         if row.len() != self.columns.len() {
@@ -240,4 +413,16 @@ impl ResultBuilder {
         }
         Ok(value)
     }
+}
+
+/// Whether every related model (and theirs, in turn) has its columns within
+/// the row's `column_count` columns, so `instances()` never reads past the end.
+fn related_columns_fit(related: &[Py<RelatedModel>], column_count: usize) -> bool {
+    for related_model in related {
+        let related_model = related_model.get();
+        if related_model.end_column > column_count || !related_columns_fit(&related_model.related, column_count) {
+            return false;
+        }
+    }
+    true
 }

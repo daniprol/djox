@@ -53,7 +53,7 @@ The same Django app on stock Django and on djox: one worker process, SQLite, req
 
 - **Async views gain the most:** 1.4 to 3.1 times the requests, on SQLite and Postgres.
 - **One ORM call** ([all of them](benchmarks/README.md#orm-calls-on-sqlite)): `await Book.objects.aget()` takes
-  214 µs against Django's 605, and a sync `get()` 58 against 187.
+  132 µs against Django's 507, and a sync `get()` 61 against 216.
 - **DRF runs at Django's speed for now:** its serializers take most of the time.
 
 ## Quickstart
