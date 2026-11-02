@@ -170,7 +170,19 @@ impl Database for SqliteDatabase {
     }
 
     fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>) {
-        self.send_to_readers(Job::FetchAll { sql, parameters, reply });
+        // A statement that writes and returns rows (`INSERT ... RETURNING`)
+        // would go to a reader, which would pass it on to the writer: one
+        // thread hop too many. The quick reader's connection can tell first.
+        // (`is_some_and` is "there is one, and the check is true".)
+        let writes = self
+            .quick_reader
+            .as_ref()
+            .is_some_and(|quick_reader| quick_reader.knows_statement_writes(&sql));
+        if writes {
+            self.send_to_writer(Job::FetchAll { sql, parameters, reply });
+        } else {
+            self.send_to_readers(Job::FetchAll { sql, parameters, reply });
+        }
     }
 
     fn fetch_all_quickly(&self, sql: &str, parameters: &[Value]) -> Option<Rows> {

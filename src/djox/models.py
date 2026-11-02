@@ -16,6 +16,7 @@ await book.asave()  # on one of djox's threads, not Django's sync thread
 
 A model's own async methods (`asave()`, `adelete()`, `arefresh_from_db()`)
 don't go through its manager, so `djox.Manager` alone can't change them.
+`asave()` of a new object inserts it on djox's fast lane, like `acreate()`.
 `djox.Model` is an abstract model (no table of its own) that gives them, and
 `objects = djox.Manager()`. Inherit from it instead of `models.Model`.
 """
@@ -25,6 +26,7 @@ from typing import Self
 
 from django.db import models, router
 
+from djox import _saving
 from djox._threads import run_django_method
 from djox.manager import Manager
 
@@ -51,8 +53,14 @@ class Model(models.Model):
         using: str | None = None,
         update_fields: Iterable[str] | None = None,
     ) -> None:
-        """Django's `save()`, on one of djox's threads."""
+        """Django's `save()`. A new object is inserted on the fast lane when it
+        can be (`djox._saving`); anything else runs on one of djox's threads."""
         alias = using or router.db_for_write(type(self), instance=self)
+        saves_here = _saving.object_saves_on_djox(self, alias, force_insert, force_update, update_fields)
+        if saves_here and _saving.signals_can_run_here(type(self)):
+            # `force_insert` is a `bool` here (`object_saves_on_djox()` checked).
+            await _saving.save_new_object(self, alias, force_insert=bool(force_insert))
+            return
 
         def save() -> None:
             self.save(force_insert=force_insert, force_update=force_update, using=using, update_fields=update_fields)

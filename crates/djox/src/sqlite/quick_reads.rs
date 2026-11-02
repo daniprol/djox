@@ -85,6 +85,17 @@ impl QuickReader {
         rows
     }
 
+    /// Whether `sql` writes (`INSERT ... RETURNING`), when that can be known
+    /// without waiting: `false` if another thread is using the connection.
+    /// Such a statement can go straight to the writer, rather than through a
+    /// reader that finds out and passes it on.
+    pub(crate) fn knows_statement_writes(&self, sql: &str) -> bool {
+        match self.connection.try_lock() {
+            Ok(mut connection) => connection.statement_writes(sql) == Ok(true),
+            Err(_) => false,
+        }
+    }
+
     /// Whether `sql` ran out of time lately and this read goes to a reader
     /// (one read fewer to skip, then).
     fn skips_slow_statement(&self, sql: &str) -> bool {
@@ -152,6 +163,18 @@ mod tests {
     fn leaves_writes_to_the_writer() {
         let (_folder, _writer, reader) = quick_reader(10, Duration::from_millis(100));
         assert!(reader.fetch_all("DELETE FROM book RETURNING id", &[]).is_none());
+    }
+
+    #[test]
+    fn knows_which_statements_write() {
+        let (_folder, _writer, reader) = quick_reader(1, Duration::from_millis(100));
+        assert!(reader.knows_statement_writes("INSERT INTO book (title) VALUES (%s) RETURNING id"));
+        assert!(!reader.knows_statement_writes("SELECT title FROM book"));
+        let _held = reader.connection.lock().unwrap();
+        assert!(
+            !reader.knows_statement_writes("DELETE FROM book"),
+            "busy: it can't tell"
+        );
     }
 
     #[test]

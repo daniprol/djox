@@ -44,6 +44,8 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
         super().__init__(*args, **kwargs)
         # djox's hooks around every statement Django's cursors run (see `djox.hooks`).
         self.execute_wrappers.append(hooks.execute_with_hooks)
+        # The `OPTIONS` last read, and what they gave (see `options()`).
+        self.options_read: tuple[dict[str, Any], SqliteOptions] | None = None
 
     def get_connection_params(self) -> dict[str, Any]:
         """Read and check the settings. Django calls this before each new connection."""
@@ -87,8 +89,15 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
         return dbapi.sqlite_version_info
 
     def options(self) -> SqliteOptions:
-        """This alias's checked `OPTIONS`."""
-        return read_options(self.alias, self.settings_dict["OPTIONS"])
+        """This alias's checked `OPTIONS`.
+
+        Every async write asks for them (`djox._write_turns`), so they are
+        read again only when they change (a test may change them).
+        """
+        options = self.settings_dict["OPTIONS"]
+        if self.options_read is None or self.options_read[0] != options:
+            self.options_read = (dict(options), read_options(self.alias, options))
+        return self.options_read[1]
 
     def open_async_database(self) -> djox.Database:
         """Open the async `djox.Database` for this alias's file, prepared like

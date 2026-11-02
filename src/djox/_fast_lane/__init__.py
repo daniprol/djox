@@ -14,7 +14,8 @@ enough, writes down what they ask for (`SimpleQuery`), and then:
    Django's converters do.
 
 It serves sync and async methods, reads (rows, `count()`, `exists()`) and
-simple writes (`update()`, `delete()`).
+simple writes (`update()`, `delete()`, and the `INSERT` of `create()` and
+`asave()`, with `inserts.py`).
 
 Anything else goes to Django, at the moment Django would see it, so results
 and errors are the same. `DJOX_FAST_LANE = False` in the settings turns it off.
@@ -22,10 +23,11 @@ and errors are the same. `DJOX_FAST_LANE = False` in the settings turns it off.
 | File              | What it does                                                          |
 |-------------------|-----------------------------------------------------------------------|
 | `simple_query.py` | `SimpleQuery`: the note a `QuerySet` keeps; building Django's `Query` from it |
-| `lookups.py`      | Understanding `filter()` and `order_by()` arguments, like Django's lookups |
+| `lookups.py`      | Understanding `filter()`, `exclude()`, `Q` and `order_by()` arguments, like Django's lookups |
 | `statements.py`   | The SQL of each shape, written once by Django and kept                |
 | `conversions.py`  | Which of Django's converters Rust can do instead                      |
 | `running.py`      | Running a simple query, sync or async, and turning its rows into results |
+| `inserts.py`      | The `INSERT` of each model's new objects, written once by Django and kept |
 """
 
 from django.conf import settings
