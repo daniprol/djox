@@ -11,10 +11,11 @@ djox removes its option before Django sees `OPTIONS`, since psycopg
 refuses names it doesn't know.
 
 The async database connects with the same `NAME`, `USER`, `PASSWORD`,
-`HOST` and `PORT`, and the `OPTIONS` that are connection settings libpq
-and djox both understand (`sslmode`, `connect_timeout`...). A few psycopg
-options change how the connection behaves in ways djox can't follow yet:
-those raise `ImproperlyConfigured` rather than being quietly dropped.
+`HOST` and `PORT`, the `OPTIONS` that are connection settings libpq and
+djox both understand (`connect_timeout`, `application_name`...), and the
+same TLS settings (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`). A few
+psycopg options change how the connection behaves in ways djox can't follow
+yet: those raise `ImproperlyConfigured` rather than being quietly dropped.
 """
 
 from collections.abc import Mapping
@@ -27,7 +28,6 @@ DJOX_OPTIONS = ("async_pool_size",)
 
 # libpq connection settings the async database passes on as they are.
 CONNECTION_OPTIONS = (
-    "sslmode",
     "connect_timeout",
     "application_name",
     "options",
@@ -43,10 +43,14 @@ CONNECTION_OPTIONS = (
 UNSUPPORTED_OPTIONS = {
     "service": "djox can't read pg_service.conf: give NAME, USER, HOST... instead",
     "assume_role": "djox's async connections can't switch roles yet",
+    "sslpassword": "djox can't read encrypted private keys yet: give sslkey an unencrypted key",
+    "sslcrl": "djox can't check certificate revocation lists yet",
+    "sslcrldir": "djox can't check certificate revocation lists yet",
 }
 
-# `sslmode` values that work without TLS (djox can't encrypt connections yet).
-SSLMODES_WITHOUT_TLS = ("disable", "allow", "prefer")
+# libpq's TLS settings, which `Database.postgres()` takes as arguments of
+# the same names (the driver can't read them in the connection text).
+TLS_OPTIONS = ("sslmode", "sslrootcert", "sslcert", "sslkey")
 
 
 @dataclass(frozen=True)
@@ -78,13 +82,6 @@ def connection_words(alias: str, settings_dict: Mapping[str, Any]) -> str:
     for name, reason in UNSUPPORTED_OPTIONS.items():
         if options.get(name):
             raise ImproperlyConfigured(f"settings.DATABASES[{alias!r}]['OPTIONS'][{name!r}]: {reason}.")
-    sslmode = options.get("sslmode")
-    if sslmode is not None and sslmode not in SSLMODES_WITHOUT_TLS:
-        raise ImproperlyConfigured(
-            f"settings.DATABASES[{alias!r}]['OPTIONS']['sslmode'] is {sslmode!r}, but djox's async "
-            f"connections can't use TLS yet. Use one of: {', '.join(SSLMODES_WITHOUT_TLS)}."
-        )
-
     settings = {
         # `NAME = None` connects to the default `postgres` database, like Django.
         "dbname": settings_dict["NAME"] or "postgres",
@@ -100,6 +97,17 @@ def connection_words(alias: str, settings_dict: Mapping[str, Any]) -> str:
         if value is not None and value != "":
             words.append(f"{name}={quoted(str(value))}")
     return " ".join(words)
+
+
+def tls_settings(options: Mapping[str, Any]) -> dict[str, str | None]:
+    """The TLS settings in `options`, as `Database.postgres()` takes them:
+    `{"sslmode": "verify-full", "sslrootcert": "/etc/ssl/rds.pem", ...}`.
+    `None` for each one not given (paths may be `Path`s: they become text)."""
+    settings: dict[str, str | None] = {}
+    for name in TLS_OPTIONS:
+        value = options.get(name)
+        settings[name] = None if value is None or value == "" else str(value)
+    return settings
 
 
 def quoted(value: str) -> str:

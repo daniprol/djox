@@ -74,26 +74,42 @@ jobs:
   postgres:
     # The same tests on a Postgres server: the Rust backend's own tests, the
     # Python integration tests, and Django's ORM (djox's and Django's tests)
-    # on `djox.backends.postgresql`.
-    name: Tests on Postgres ${{ matrix.postgres-version }}
+    # on `djox.backends.postgresql`. One server has TLS on, and then every
+    # connection is encrypted and its certificate checked (`verify-full`).
+    name: Tests on Postgres ${{ matrix.postgres-version }}${{ matrix.tls && ' with TLS' || '' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        postgres-version: ["15", "18"]  # the oldest Django 6.1 supports, and the newest
-    services:
-      postgres:
-        image: postgres:${{ matrix.postgres-version }}
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 15
+        include:
+          - postgres-version: "15"  # the oldest Django 6.1 supports
+            tls: false
+          - postgres-version: "18"
+            tls: true
     env:
       DJOX_POSTGRES_URL: postgresql://postgres:postgres@localhost/postgres
       DJOX_TEST_DATABASE: postgres
     steps:
       - uses: actions/checkout@v5
+      - name: Start Postgres
+        run: |
+          tls_settings=()
+          if [ "${{ matrix.tls }}" = "true" ]; then
+            scripts/make-test-certificates.sh "$RUNNER_TEMP/certificates"
+            # The server runs as the image's `postgres` user (999), which must own its key.
+            sudo chown 999:999 "$RUNNER_TEMP/certificates/server.key"
+            tls_settings=(-c ssl=on -c ssl_cert_file=/certificates/server.crt -c ssl_key_file=/certificates/server.key)
+            echo "DJOX_POSTGRES_ROOT_CERT=$RUNNER_TEMP/certificates/root.crt" >> "$GITHUB_ENV"
+          fi
+          docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=postgres \
+            -v "$RUNNER_TEMP/certificates:/certificates:ro" \
+            postgres:${{ matrix.postgres-version }} "${tls_settings[@]}"
+          for attempt in $(seq 1 30); do
+            docker exec postgres pg_isready -U postgres -h localhost && exit 0
+            sleep 1
+          done
+          docker logs postgres
+          exit 1
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v7

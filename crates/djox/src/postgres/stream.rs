@@ -13,7 +13,7 @@
 //! closes both when the stream ends or the caller drops its `RowStream`.
 
 use djox_core::{ChunkRequests, Error, Result, Rows, Value};
-use tokio_postgres::NoTls;
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::database::{parameter_references, rows_to_djox, wrap_parameters};
 use super::errors::to_djox_error;
@@ -26,6 +26,7 @@ use super::settings::PostgresSettings;
 /// chunk is answered with `Error::Closed`.
 pub(super) fn start_stream(
     settings: &PostgresSettings,
+    tls_connector: MakeRustlsConnect,
     sql: String,
     parameters: Vec<Value>,
     chunk_size: usize,
@@ -34,12 +35,13 @@ pub(super) fn start_stream(
     let settings = settings.clone();
     let _ = std::thread::Builder::new()
         .name("djox-postgres-stream".to_string())
-        .spawn(move || run_stream(&settings, &sql, &parameters, chunk_size, &requests));
+        .spawn(move || run_stream(&settings, tls_connector, &sql, &parameters, chunk_size, &requests));
 }
 
 /// The stream's thread: open, then answer chunk after chunk.
 fn run_stream(
     settings: &PostgresSettings,
+    tls_connector: MakeRustlsConnect,
     sql: &str,
     parameters: &[Value],
     chunk_size: usize,
@@ -62,7 +64,7 @@ fn run_stream(
             return;
         }
     };
-    let connected = runtime.block_on(config.connect(NoTls));
+    let connected = runtime.block_on(config.connect(tls_connector));
     let (mut client, connection) = match connected {
         Ok(pair) => pair,
         Err(error) => {

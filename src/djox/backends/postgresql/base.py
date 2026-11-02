@@ -28,7 +28,7 @@ from djox.backends.engine import DjoxEngine
 from djox.backends.postgresql.creation import DatabaseCreation
 from djox.backends.postgresql.errors import DatabaseErrors
 from djox.backends.postgresql.operations import DatabaseOperations
-from djox.backends.postgresql.options import connection_words, read_options, without_djox_options
+from djox.backends.postgresql.options import connection_words, read_options, tls_settings, without_djox_options
 from djox.backends.postgresql.time_zones import needs_moving, rows_in_time_zone
 
 if TYPE_CHECKING:
@@ -74,6 +74,8 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
             connection_words(self.alias, self.settings_dict),
             pool_size=options.async_pool_size,
             time_zone=self.timezone_name,
+            # The same TLS as Django's psycopg connections (`sslmode`, `sslrootcert`...).
+            **tls_settings(self.settings_dict["OPTIONS"]),
         )
 
     def rows_from_async_database(self, rows: "list[Row]") -> "list[Row]":

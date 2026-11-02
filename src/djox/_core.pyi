@@ -86,13 +86,25 @@ class Database:
         """
 
     @staticmethod
-    def postgres(connection: str, *, pool_size: int = 10, time_zone: str | None = None) -> Database:
+    def postgres(
+        connection: str,
+        *,
+        pool_size: int = 10,
+        time_zone: str | None = None,
+        sslmode: str | None = None,
+        sslrootcert: str | None = None,
+        sslcert: str | None = None,
+        sslkey: str | None = None,
+    ) -> Database:
         """Open a pool of connections to a Postgres server.
 
         `connection` is a URL (`"postgresql://user:password@localhost:5432/app"`)
         or libpq's `key=value` words (`"host=localhost dbname=app"`). At most
         `pool_size` connections are open at once; each statement runs on a
         free one. `time_zone` sets the session's time zone, like Django does.
+        `sslmode` (`"disable"`, `"prefer"`, `"require"`, `"verify-ca"`,
+        `"verify-full"`...), `sslrootcert` (a PEM file, or `"system"`),
+        `sslcert` and `sslkey` are libpq's TLS settings.
         One connection opens right away, so wrong settings fail here.
         """
 

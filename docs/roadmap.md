@@ -17,7 +17,7 @@ djox grows in small steps, each useful on its own. Everything below is in
 
 ## Next
 
-- **Postgres**: TLS; reading arrays, ranges and `hstore` from async code.
+- **Postgres**: reading arrays, ranges and `hstore` from async code.
 - **More of the fast lane**: `F()` in `update()`, joins in `filter()`,
   `annotate()`, the prefetching queries themselves.
 

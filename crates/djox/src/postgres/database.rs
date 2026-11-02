@@ -7,7 +7,8 @@ use std::time::Duration;
 use deadpool_postgres::{Manager, ManagerConfig, Pool, PoolError, RecyclingMethod};
 use djox_core::{ChunkRequests, Database, Error, Executed, ReplySender, Result, Rows, Value};
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{NoTls, Row, Statement};
+use tokio_postgres::{Row, Statement};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tokio_util::task::TaskTracker;
 
 use super::errors::to_djox_error;
@@ -28,6 +29,9 @@ pub struct PostgresDatabase {
     /// the database is closed. (`Mutex`: like `threading.Lock`.)
     running: Mutex<Option<Running>>,
     settings: PostgresSettings,
+    /// What opens TLS connections, made once (it reads certificate files)
+    /// and shared by the pool and the streams.
+    tls_connector: MakeRustlsConnect,
 }
 
 /// What an open database runs on.
@@ -60,8 +64,9 @@ impl PostgresDatabase {
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
-        // `NoTls`: plain connections (TLS comes later).
-        let manager = Manager::from_config(settings.driver_config()?, NoTls, manager_config);
+        // The TLS connector is used only when `sslmode` asks for TLS.
+        let tls_connector = settings.tls_connector()?;
+        let manager = Manager::from_config(settings.driver_config()?, tls_connector.clone(), manager_config);
         let pool = Pool::builder(manager)
             .max_size(settings.pool_size)
             .runtime(deadpool_postgres::Runtime::Tokio1)
@@ -81,6 +86,7 @@ impl PostgresDatabase {
         Ok(PostgresDatabase {
             running: Mutex::new(Some(running)),
             settings,
+            tls_connector,
         })
     }
 
@@ -135,7 +141,15 @@ impl Database for PostgresDatabase {
         if self.is_closed() {
             return; // dropping `requests` answers the first chunk with `Error::Closed`
         }
-        start_stream(&self.settings, sql, parameters, chunk_size.max(1), requests);
+        let tls_connector = self.tls_connector.clone();
+        start_stream(
+            &self.settings,
+            tls_connector,
+            sql,
+            parameters,
+            chunk_size.max(1),
+            requests,
+        );
     }
 
     fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>) {
@@ -330,6 +344,7 @@ mod tests {
     use djox_core::{Reply, RowStream};
 
     use super::*;
+    use crate::postgres::TlsMode;
 
     /// A database on the test server, with an empty table `table` of books,
     /// or `None` when no server is set.
@@ -379,6 +394,30 @@ mod tests {
         .unwrap();
         assert_eq!(rows.columns, ["title", "pages"]);
         assert_eq!(rows.rows, [[text("Dune"), Value::Integer(412)]]);
+    }
+
+    #[test]
+    fn connects_with_verified_tls() {
+        // A server with TLS, and the authority that signed its certificate
+        // (`scripts/make-test-certificates.sh`).
+        let (Ok(url), Ok(root_certificate)) = (
+            std::env::var("DJOX_POSTGRES_URL"),
+            std::env::var("DJOX_POSTGRES_ROOT_CERT"),
+        ) else {
+            eprintln!("DJOX_POSTGRES_URL or DJOX_POSTGRES_ROOT_CERT is not set: skipping a TLS test");
+            return;
+        };
+        let mut settings = PostgresSettings::new(url);
+        settings.tls.mode = Some(TlsMode::VerifyFull);
+        settings.tls.root_certificates = Some(root_certificate);
+        let database = PostgresDatabase::open(settings).unwrap();
+        let rows = fetch_all(
+            &database,
+            "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+            vec![],
+        )
+        .unwrap();
+        assert_eq!(rows.rows, [[Value::Boolean(true)]]);
     }
 
     #[test]

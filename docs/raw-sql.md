@@ -11,6 +11,9 @@
 - **Open it**: `djox.Database.sqlite(path, readers=4)` (one writer, a few
   readers) or `djox.Database.postgres(url, pool_size=10)` (a pool). Use it in a
   `with` block, or call `close()`.
+- **TLS on Postgres**: libpq's settings, as arguments:
+  `djox.Database.postgres(url, sslmode="verify-full", sslrootcert="ca.pem")`
+  (see [Postgres](postgres.md#tls)).
 - **Methods**: `execute()`, `execute_many()`, `fetch_all()`, `fetch_one()`.
 - **Placeholders are Django's**: `%s` (`%%` for a literal `%`).
 - **Futures**: each method sends the statement right away and returns an
