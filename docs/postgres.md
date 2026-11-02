@@ -1,8 +1,16 @@
 # Postgres
 
 ```bash
-uv add djox "psycopg[binary]"
+uv add "djox[postgres]"  # or: pip install "djox[postgres]"
 ```
+
+The `postgres` extra installs psycopg 3 for Django's sync code. psycopg2 isn't
+supported: djox raises `ImproperlyConfigured` without psycopg 3.
+
+!!! warning "No TLS yet"
+    djox's async connections don't encrypt yet, so a server that requires TLS
+    (most hosted Postgres) can't be used from async code. See
+    [Not supported yet](#not-supported-yet).
 
 ```python
 # settings.py

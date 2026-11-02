@@ -27,6 +27,8 @@ The first release.
   `djox.aprefetch_related_objects()` off the event loop.
 - **Hooks**: `djox.add_hooks()` calls plain functions before and after every statement.
 - **Raw SQL**: `djox.Database.sqlite()` and `djox.Database.postgres()`, and `djox.connections[alias]`.
+- **`djox[postgres]`**: the extra that installs psycopg 3 for Django's sync code on Postgres (psycopg2 isn't
+  supported). djox's async Postgres connections don't support TLS yet.
 - Tested on Django 5.2, 6.0 and 6.1, Python 3.11 to 3.14, SQLite and Postgres 15+, with 2,395 of Django's own
   ORM tests ported (2,390 pass).
 

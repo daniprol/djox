@@ -42,6 +42,11 @@ python-source = "src"
 [tool.uv]
 cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "crates/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
 
+[project.optional-dependencies]
+# `uv add "djox[postgres]"`: psycopg 3 for Django's sync code on Postgres, as
+# Django's own Postgres backend needs it (djox's async code doesn't).
+postgres = ["psycopg[binary]>=3.1.8"]
+
 [dependency-groups]
 dev = [
     "django>=5.2",  # tests run SQL written by Django's compiler
