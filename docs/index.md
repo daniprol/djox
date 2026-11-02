@@ -4,11 +4,10 @@ A truly async Django ORM with a Rust core. Fast and readable, with hooks for
 library authors. SQLite and Postgres.
 
 !!! warning "Status: early"
-    djox has its engine (`djox.Database` runs SQL from async code on
-    connections that Rust owns), a Django `ENGINE` that puts Django's own
-    queries on the same SQLite, and `djox.Manager`, which runs Django's async
-    QuerySet methods (`await Book.objects.aget(...)`) on djox. Async
-    transactions come next; see the [roadmap](roadmap.md).
+    djox runs Django's QuerySet methods, sync and async, on SQLite and
+    Postgres, with async transactions, streams and hooks. It runs 2,395 of
+    Django's own ORM tests (2,390 pass). It is young, though: see the
+    [roadmap](roadmap.md).
 
 ## Why
 
@@ -27,7 +26,7 @@ uv add djox  # or: pip install djox  (not on PyPI yet: build from source with `u
 ## Quickstart
 
 ```python
---8 < --"docs/examples/quickstart.py"
+--8<-- "docs/examples/quickstart.py"
 ```
 
 - SQL uses Django's `%s` placeholders (`%%` for a literal `%`).

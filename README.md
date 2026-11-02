@@ -1,95 +1,148 @@
-# djox
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-wordmark-dark.svg">
+    <img alt="djox" src="docs/assets/logo-wordmark-light.svg" height="64">
+  </picture>
+</p>
 
-**Truly async Django ORM with a Rust core 🦀** Fast and readable, with hooks for library authors. SQLite and Postgres.
+<p align="center">
+  <strong>Truly async Django ORM, with a Rust core.</strong><br>
+  Keep your models, migrations and admin. Make <code>await Book.objects.aget(pk=1)</code> really async, and fast.
+</p>
 
-Django's async ORM methods (`aget`, `acreate`, `async for`...) run the sync ORM on a worker thread and wait for it.
-djox runs queries on connections that Rust owns, each on its own thread, and wakes Python only when the answer is
-ready. Django keeps doing what it does well: models, migrations, admin and the QuerySet language.
+<p align="center">
+  <a href="https://github.com/daniprol/djox/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/daniprol/djox/ci.yml?branch=main&label=CI"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB">
+  <img alt="Django 5.2 to 6.1" src="https://img.shields.io/badge/django-5.2%20%7C%206.0%20%7C%206.1-0C4B33">
+  <img alt="SQLite and Postgres" src="https://img.shields.io/badge/databases-SQLite%20%7C%20Postgres-64748B">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/daniprol/djox?color=64748B"></a>
+</p>
 
-> **Status: early.** djox has its engine, `djox.Database`, a Django `ENGINE` that runs Django's own queries on the
-> same SQLite, `djox.Manager` (Django's QuerySet methods on djox, with a fast lane for simple queries, sync and
-> async), async transactions (`djox.atomic()`), hooks, and a Postgres backend. See the [roadmap](docs/roadmap.md).
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="docs/django.md">Use with Django</a> ·
+  <a href="benchmarks/README.md">Benchmarks</a> ·
+  <a href="docs/how-it-works.md">How it works</a> ·
+  <a href="docs/roadmap.md">Roadmap</a>
+</p>
 
-## Quickstart
+---
 
-```python
-import asyncio
+Django's async ORM isn't async underneath: `aget()`, `acount()` and `async for` run the sync ORM on one worker
+thread, and every request waits its turn for it. djox runs those queries on connections that Rust owns and wakes
+Python only when the answer is ready. Django keeps doing what it does well (models, migrations, the admin, the
+QuerySet language), so your code doesn't change.
 
-import djox
-
-
-async def main() -> None:
-    with djox.Database.sqlite("app.sqlite3") as database:
-        await database.execute("CREATE TABLE IF NOT EXISTS book (id INTEGER PRIMARY KEY, title TEXT, pages INTEGER)")
-        await database.execute_many(
-            "INSERT INTO book (title, pages) VALUES (%s, %s)",
-            [["Dune", 412], ["Emma", 474], ["Beloved", 324]],
-        )
-        rows = await database.fetch_all("SELECT title FROM book WHERE pages > %s ORDER BY title", [400])
-        print(rows)  # [('Dune',), ('Emma',)]
-
-
-asyncio.run(main())
-```
-
-- **One writer, a few readers.** SQLite allows one writer at a time, so djox opens one writer connection and queues
-  every write for it: no "database is locked" errors. Reads run in parallel on read-only connections, in WAL mode.
-- **Django's SQL as is.** `%s` placeholders, values stored the way Django's SQLite backend stores them, and SQL from
-  Django's own compiler runs unchanged (including `select_related` joins).
-- **Never blocks the event loop.** A slow query keeps running on its thread while your other tasks go on.
-
-## With Django
-
-```python
-# settings.py
-DATABASES = {"default": {"ENGINE": "djox.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
-```
-
-Django's ORM, migrations, admin and tests keep working, on the SQLite bundled in djox. Give a model
-`objects = djox.Manager()` and its async methods (`aget`, `acount`, `async for`, `acreate`, `aupdate`...) run on djox
-instead of Django's worker thread: Django still writes the SQL and builds the objects. `djox.connections["default"]`
-gives the async `djox.Database` for the same file, `async with djox.atomic():` is Django's `atomic()` for async
-code, and `djox.Model` runs `asave()` and friends on djox's threads. For models you can't edit (`User`, other
-libraries'), add `"djox"` to `INSTALLED_APPS`: `DJOX_MODELS` picks which models switch to djox.
-`djox.add_hooks(djox.Hooks(before_query=..., after_query=...))` calls your functions around every statement, sync or
-async. One SQLite in the process matters: Python's `sqlite3` module has its own copy, and two copies can't see each
-other's locks. See [Use with Django](docs/django.md).
+- **Really async.** No query waits for Django's worker thread, so async views scale with concurrent requests.
+- **Faster, sync too.** Simple queries skip Django's query compiler, and Rust builds the model instances.
+- **A drop-in.** Two settings. Your models, migrations, tests and third-party apps keep working.
+- **Tested with Django's own tests.** 2,395 of Django's ORM tests are ported to djox, and 2,390 pass, on every
+  supported Django.
 
 ## Speed
 
-Microseconds per call on a 4-core cloud VM, lower is better ([method and all numbers](benchmarks/README.md)):
+The same Django app on stock Django and on djox: one worker process, SQLite, requests per second, higher is better
+([method, Postgres and every number](benchmarks/README.md#web-app-requests-per-second)).
 
-| | Django sync | `djox.Manager` sync | Django async | `djox.Manager` async | djox (raw SQL) |
-|---|---:|---:|---:|---:|---:|
-| get one book by id | 187 | 58 | 605 | 214 | 89 |
-| fetch 1,000 books | 8,478 | 4,693 | 12,824 | 4,667 | 1,187 |
-| count | 293 | 87 | 775 | 237 | 142 |
-| update one book | 121 | 54 | 495 | 215 | 108 |
-| 100 gets at once (each) | | | 559 | 186 | 77 |
+| | Django | djox |
+|---|---:|---:|
+| Sync view, get one book | 1,629 | **2,451** (1.5x) |
+| Async view, get one book | 168 | **416** (2.5x) |
+| Async view, a page of 20 books with their authors | 76 | **235** (3.1x) |
+| DRF viewset, get one book | 599 | 545 (0.9x) |
 
-`djox.Manager` runs the SQL on djox, so no async query waits for Django's single worker thread. Simple queries, sync
-or async, also take the fast lane: they reuse the SQL Django wrote for the same shape of query, and Rust builds the
-results. A sync `get()` is then three times faster than Django's, and an async `aget()` on djox is about as fast as
-Django's own sync `get()`.
+- **Async views gain the most:** 1.4 to 3.1 times the requests, on SQLite and Postgres.
+- **One ORM call** ([all of them](benchmarks/README.md#orm-calls-on-sqlite)): `await Book.objects.aget()` takes
+  132 µs against Django's 507, and a sync `get()` 61 against 216.
+- **DRF doesn't gain yet:** ids from its URLs are strings, which the fast lane doesn't take yet.
 
-## How it is built
+## Quickstart
 
-| Path                | What it is                                                          |
-|---------------------|---------------------------------------------------------------------|
-| `crates/djox-core`  | The shared types and the `Database` trait every backend implements  |
-| `crates/djox`       | The backends, one folder each: `sqlite/` and `postgres/`             |
-| `src/*.rs`          | The Python extension `djox._core` (PyO3)                             |
-| `src/djox`          | The Python package, and Django's `ENGINE` (`djox.backends.sqlite3`)  |
+djox isn't on PyPI yet. Install it from GitHub (needs a [Rust toolchain](https://rustup.rs) to build):
+
+```bash
+uv add "djox @ git+https://github.com/daniprol/djox"
+```
+
+Change two settings:
+
+```python
+# settings.py
+DATABASES = {
+    "default": {
+        "ENGINE": "djox.backends.sqlite3",  # or "djox.backends.postgresql"
+        "NAME": BASE_DIR / "db.sqlite3",
+    }
+}
+INSTALLED_APPS = [..., "djox"]  # every model's QuerySet now runs on djox
+```
+
+Then write async Django as usual:
+
+```python
+import djox
+from django.http import JsonResponse
+
+from shop.models import Book, Order
+
+
+async def book_detail(request, book_id):
+    book = await Book.objects.aget(pk=book_id)  # on djox's connections, not Django's worker thread
+    return JsonResponse({"title": book.title, "pages": book.pages})
+
+
+async def long_books(request):
+    titles = [book.title async for book in Book.objects.filter(pages__gt=400).order_by("title")]
+    return JsonResponse({"titles": titles})
+
+
+async def buy(request, book_id):
+    async with djox.atomic():  # Django's atomic(), for async code
+        book = await Book.objects.aget(pk=book_id)
+        await Order.objects.acreate(book=book)
+    return JsonResponse({"ok": True})
+```
+
+Anything djox doesn't run itself falls back to Django's own method, so nothing breaks. Next:
+[Use with Django](docs/django.md).
+
+## What you get
+
+| | |
+|---|---|
+| [Async QuerySets](docs/django.md#async-queries-djoxmanager) | `aget`, `acount`, `async for`, `acreate`, `aupdate`, `adelete`, `aget_or_create`... on djox |
+| [The fast lane](docs/django.md#the-fast-lane) | Simple queries, sync or async, reuse the SQL Django wrote once, and Rust builds the results |
+| [Existing models](docs/django.md#existing-models-djox_models) | `DJOX_MODELS` switches any model, `User` included, without touching its code |
+| [Async transactions](docs/django.md#async-transactions-djoxatomic) | `async with djox.atomic():` and `djox.on_commit()` |
+| [Streaming](docs/django.md#streaming-with-aiterator) | `aiterator()` reads big results a chunk at a time |
+| [Hooks](docs/django.md#hooks) | Plain functions called before and after every statement, sync or async |
+| [Postgres](docs/django.md#postgres) | `djox.backends.postgresql`: a pool of Rust connections for async code |
+| [Raw SQL](docs/index.md) | `djox.Database`: async SQL on SQLite or Postgres, without Django |
+
+> **Status: early.** Everything above works and is tested, but djox is young: expect rough edges, and check the
+> [roadmap](docs/roadmap.md).
+
+## How it works
+
+```text
+await Book.objects.aget(pk=1)
+  │  Django writes the SQL (once per query shape, then djox reuses it)
+  ▼
+djox ──► a Rust thread with its own connection (SQLite: one writer, a few readers; Postgres: a pool)
+  │  Rust converts the rows and builds the Book
+  ▼
+your coroutine wakes up with the answer; the event loop never blocked
+```
 
 The Rust code is written for Python developers who have never seen Rust: plain names, straight-line code, and
-comments that explain each Rust feature (and each database detail) where it appears. See
-[How it works](docs/how-it-works.md) and [AGENTS.md](AGENTS.md).
+comments that explain each Rust feature and each database detail. Start with [How it works](docs/how-it-works.md)
+and [AGENTS.md](AGENTS.md).
 
 ## Develop
 
 ```bash
 uv sync                              # builds the Rust extension
-uv run pytest                        # Python tests
+uv run pytest                        # Python tests, Django's ported tests included
 scripts/cargo-test.sh --workspace    # Rust tests
 uv run prek install                  # git hooks: ruff, mypy, pyrefly, cargo fmt, clippy, tests
 ```
