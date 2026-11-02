@@ -61,7 +61,11 @@ impl PostgresSettings {
         for host in config.get_hosts() {
             match host {
                 tokio_postgres::config::Host::Tcp(name) => hosts.push(name.clone()),
-                // A Unix socket's folder, like `/var/run/postgresql`.
+                // A Unix socket's folder, like `/var/run/postgresql`. Only Unix
+                // has those sockets, so on Windows this variant doesn't exist:
+                // `#[cfg(unix)]` keeps the line only when building for Unix,
+                // like an `if sys.platform != "win32":` that runs at compile time.
+                #[cfg(unix)]
                 tokio_postgres::config::Host::Unix(folder) => hosts.push(folder.display().to_string()),
             }
         }
