@@ -1,4 +1,4 @@
-"""djox: a truly async Django ORM with a Rust core. SQLite first.
+"""djox: a truly async Django ORM with a Rust core. SQLite and Postgres.
 
 djox runs SQL on connections that Rust owns, with the SQLite bundled in djox.
 
@@ -30,6 +30,7 @@ Use djox's `ENGINE` whenever djox and Django share a database file: Python's
 can't see each other's locks, so writes can get lost.
 """
 
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
 from djox._connections import connections
@@ -52,6 +53,9 @@ from djox._core import (
     sqlite_version,
 )
 from djox.hooks import Hooks, Query, QueryFinished, add_hooks, remove_hooks
+
+# The version as pip and PyPI write it (`0.1.0`). It comes from Cargo.toml, its one source.
+__version__ = version("djox")
 
 if TYPE_CHECKING:
     from djox.manager import Manager
@@ -117,6 +121,7 @@ __all__ = [
     "QueryFinished",
     "QuerySet",
     "RowStream",
+    "__version__",
     "add_hooks",
     "aprefetch_related_objects",
     "atomic",

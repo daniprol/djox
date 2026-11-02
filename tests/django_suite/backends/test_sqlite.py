@@ -326,7 +326,7 @@ class TestTransactionMode(SimpleTestCase):
 
         begin_query, commit_query = captured_queries
         # djox: Django expects "BEGIN" here. djox defaults to "BEGIN IMMEDIATE", so a
-        # transaction takes the write lock up front (see docs/django.md).
+        # transaction takes the write lock up front (see docs/sqlite.md).
         self.assertEqual(begin_query["sql"], "BEGIN IMMEDIATE")
         self.assertEqual(commit_query["sql"], "COMMIT")
 

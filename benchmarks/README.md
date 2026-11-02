@@ -27,7 +27,7 @@ uv run python web/load_test.py       # web app, SQLite and Postgres (~30 min)
 
 ## Web app: requests per second
 
-A small shop app ([`web/app.py`](web/app.py)): 100 authors, 10,000 books.
+A small shop app ([`web/app.py`](https://github.com/daniprol/djox/blob/main/benchmarks/web/app.py)): 100 authors, 10,000 books.
 
 - **Endpoints**, each written three ways (plain sync views, async views, a DRF `ModelViewSet`):
   - get one book (random id)
@@ -79,7 +79,7 @@ Postgres:
 ## ORM calls on SQLite
 
 The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters
-([`run.py`](run.py)). Microseconds per call, median of 5 rounds, lower is better.
+([`run.py`](https://github.com/daniprol/djox/blob/main/benchmarks/run.py)). Microseconds per call, median of 5 rounds, lower is better.
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
@@ -130,7 +130,7 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
 ## ORM calls on Postgres
 
-The same queries on Postgres ([`postgres.py`](postgres.py)), 10,000 books. Microseconds per call, lower is better.
+The same queries on Postgres ([`postgres.py`](https://github.com/daniprol/djox/blob/main/benchmarks/postgres.py)), 10,000 books. Microseconds per call, lower is better.
 
 | | django sync | djox.Manager sync | psycopg | django async | djox safe lane | djox.Manager | psycopg async | djox |
 |---|---|---|---|---|---|---|---|---|

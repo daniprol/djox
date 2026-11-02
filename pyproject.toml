@@ -1,17 +1,26 @@
 [project]
 name = "djox"
 dynamic = ["version"]  # from Cargo.toml ([workspace.package] version)
-description = "Truly async Django ORM with a Rust core. Fast and readable, with hooks for library authors. SQLite first."
+description = "Truly async Django ORM with a Rust core. Fast and readable, with hooks for library authors. SQLite and Postgres."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "daniprol" }]
-keywords = ["django", "orm", "async", "sqlite", "rust"]
+keywords = ["django", "orm", "async", "asyncio", "sqlite", "postgres", "rust"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
-    "Framework :: Django",
+    "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
+    "Framework :: Django",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Framework :: Django :: 6.1",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Database",
     "Typing :: Typed",
@@ -20,7 +29,9 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.urls]
+Documentation = "https://daniprol.github.io/djox/"
 Repository = "https://github.com/daniprol/djox"
+Changelog = "https://github.com/daniprol/djox/blob/main/CHANGELOG.md"
 Issues = "https://github.com/daniprol/djox/issues"
 
 [tool.maturin]
