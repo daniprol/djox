@@ -48,29 +48,29 @@ SQLite:
 
 | | Sync views, Django | Sync views, djox | Async views, Django | Async views, djox | DRF, Django | DRF, djox |
 |---|---:|---:|---:|---:|---:|---:|
-| get one book | 1,629 | 2,451 (1.5x) | 168 | 416 (2.5x) | 599 | 545 (0.9x) |
-| list a page, with authors | 688 | 698 (1.0x) | 76 | 235 (3.1x) | 290 | 284 (1.0x) |
-| update a book | 1,924 | 2,515 (1.3x) | 173 | 401 (2.3x) | 394 | 335 (0.9x) |
-| create a book | 1,654 | 1,545 (0.9x) | 171 | 332 (1.9x) | 423 | 483 (1.1x) |
+| get one book | 1,629 | 2,451 (1.5x) | 168 | 416 (2.5x) | 809 | 1,026 (1.3x) |
+| list a page, with authors | 688 | 698 (1.0x) | 76 | 235 (3.1x) | 415 | 400 (1.0x) |
+| update a book | 1,924 | 2,515 (1.3x) | 173 | 401 (2.3x) | 502 | 565 (1.1x) |
+| create a book | 1,654 | 1,545 (0.9x) | 171 | 332 (1.9x) | 556 | 646 (1.2x) |
 
 Postgres:
 
 | | Sync views, Django | Sync views, djox | Async views, Django | Async views, djox | DRF, Django | DRF, djox |
 |---|---:|---:|---:|---:|---:|---:|
-| get one book | 719 | 900 (1.3x) | 223 | 395 (1.8x) | 311 | 293 (0.9x) |
-| list a page, with authors | 131 | 134 (1.0x) | 135 | 201 (1.5x) | 94 | 98 (1.0x) |
-| update a book | 457 | 493 (1.1x) | 225 | 360 (1.6x) | 160 | 150 (0.9x) |
-| create a book | 400 | 376 (0.9x) | 228 | 309 (1.4x) | 193 | 191 (1.0x) |
+| get one book | 719 | 900 (1.3x) | 223 | 395 (1.8x) | 438 | 521 (1.2x) |
+| list a page, with authors | 131 | 134 (1.0x) | 135 | 201 (1.5x) | 166 | 208 (1.3x) |
+| update a book | 457 | 493 (1.1x) | 225 | 360 (1.6x) | 227 | 248 (1.1x) |
+| create a book | 400 | 376 (0.9x) | 228 | 309 (1.4x) | 252 | 263 (1.0x) |
 
 - **Async views: 1.4 to 3.1 times the requests.** Django runs every async query on its one worker thread;
   djox runs them on its own connections.
 - **Sync views: up to 1.5 times**, on simple reads and updates (the fast lane). `create()` runs Django's own
   code. The views were measured before `select_related()` joined the fast lane (#12), so the page row is
   Django's code too.
-- **DRF: no gain yet (0.9x to 1.1x).** DRF's router passes the id from the URL as a string (`pk="5"`), and the
-  fast lane only takes values of the field's own type, so these queries run Django's code. Called with an int,
-  the same `select_related().get()` takes 125 µs on djox against 433 on Django. DRF numbers were measured after
-  [#12](https://github.com/daniprol/djox/pull/12), with 5 rounds.
+- **DRF: up to 1.3 times.** DRF's router passes the id from the URL as text (`pk="5"`), which the fast lane
+  takes since [#15](https://github.com/daniprol/djox/pull/15). DRF spends most of each request in its own code
+  (serializers, permissions, rendering), so it gains less than plain views. The DRF columns come from their own
+  run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
 - **Async views are slower than sync views on both stacks.** Django's ASGI handler hops to a thread for its
   request signals: an empty async view serves about 540 requests per second on this VM.
 - **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores), so it gets
