@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from django.db import models
+from django.db import connections, models
 from django.db.models.query import FlatValuesListIterable, ModelIterable, ValuesIterable, ValuesListIterable
 from django.db.models.signals import post_init, pre_init
 
@@ -114,8 +114,10 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update,
     alias = queryset.db
     if simple_query.matches_nothing:
         return PreparedQuery(None, [], alias)
+    # This thread's Django connection: it prepares the values like Django's lookups do.
+    connection = connections[alias]
     # Checked first: Django writes no SQL (or other SQL) for such values.
-    if not values_fit_their_columns(simple_query, alias):
+    if not values_fit_their_columns(simple_query, connection):
         return None
     statement = statement_for(queryset, simple_query, kind, alias, updates)
     if statement is None:
@@ -123,7 +125,7 @@ def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update,
     for related_model in statement.related_models:
         if not builds_like_django(related_model):
             return None
-    return PreparedQuery(statement, statement.parameters(simple_query, alias, updates), alias)
+    return PreparedQuery(statement, statement.parameters(simple_query, connection, updates), alias)
 
 
 def can_build_results(queryset: "models.QuerySet[Any]") -> bool:

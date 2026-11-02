@@ -10,8 +10,10 @@ from django.core.management import call_command
 from django.db import IntegrityError, connection, connections, transaction
 from django.db.models import Count, F, StdDev
 from django.db.models.functions import ExtractYear, Power, TruncMonth
+from django.utils.connection import ConnectionDoesNotExist
 
 import djox
+from djox.backends.engine import alias_runs_on_djox, engine_runs_on_djox
 from djox.backends.sqlite3.base import DatabaseWrapper
 from tests.e2e.library.models import Author, Book
 
@@ -33,6 +35,13 @@ def test_djangos_connection_is_a_djox_connection() -> None:
     assert connection.vendor == "sqlite"
     assert isinstance(connections["default"], DatabaseWrapper)
     assert connection.get_database_version() >= (3, 54)
+
+
+def test_djox_tells_its_engines_from_others_by_the_settings() -> None:
+    assert alias_runs_on_djox("default")
+    assert not engine_runs_on_djox("django.db.backends.sqlite3")
+    with pytest.raises(ConnectionDoesNotExist):
+        alias_runs_on_djox("no-such-alias")
 
 
 @pytest.mark.sqlite_only("SQLite's WAL files")

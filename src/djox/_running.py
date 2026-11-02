@@ -64,12 +64,13 @@ async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any
         log_query(transaction_wrapper, sql, parameters, started)
     else:
         wrapper = django_connections[alias]
+        database = djox.connections.database_for(wrapper)
         with wrapper.wrap_database_errors:
             if writes:
                 async with write_turns().plain_write(alias):
-                    rows = await djox.connections[alias].fetch_all(sql, parameters)
+                    rows = await database.fetch_all(sql, parameters)
             else:
-                rows = await djox.connections[alias].fetch_all(sql, parameters)
+                rows = await database.fetch_all(sql, parameters)
         rows = as_sync_connections_return_them(wrapper, rows)
         log_query(wrapper, sql, parameters, started)
     return rows
@@ -96,7 +97,8 @@ async def stream_rows(alias: str, sql: str, parameters: Sequence[Any], chunk_siz
     started = time.perf_counter()
     try:
         with wrapper.wrap_database_errors:
-            stream = djox.connections[alias].stream_rows(query.sql, query.parameters, chunk_size=chunk_size)
+            database = djox.connections.database_for(wrapper)
+            stream = database.stream_rows(query.sql, query.parameters, chunk_size=chunk_size)
             rows = await stream.next_chunk()
     except BaseException as error:
         hooks.run_after_query(query, hooks.QueryFinished(time.perf_counter() - started, error))
@@ -164,7 +166,7 @@ async def execute_without_hooks(alias: str, sql: str, parameters: Sequence[Any])
             # Shares the write turn with other plain writes, and waits for a
             # transaction that has it (see `djox._write_turns`).
             async with write_turns().plain_write(alias):
-                executed = await djox.connections[alias].execute(sql, parameters)
+                executed = await djox.connections.database_for(wrapper).execute(sql, parameters)
         rows_affected = executed.rows_affected
         log_query(wrapper, sql, parameters, started)
     return rows_affected

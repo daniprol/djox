@@ -41,7 +41,7 @@ from django.db import close_old_connections
 from django.db import connections as django_connections
 
 from djox import _running, _write_turns
-from djox.backends.engine import runs_on_djox
+from djox.backends.engine import alias_runs_on_djox
 
 Result = TypeVar("Result")
 
@@ -72,7 +72,7 @@ async def run_django_method(alias: str, method: Callable[[], Result], writes: bo
     On a database whose `ENGINE` isn't djox's, it runs like Django's own
     async methods do (on Django's sync thread).
     """
-    if not runs_on_djox(django_connections[alias]):
+    if not alias_runs_on_djox(alias):
         return await sync_to_async(method)()
     if transaction_thread.get() is not None or _running.open_sync_transaction(alias) is not None:
         # `thread_sensitive=True` sends it to the transaction's thread (asgiref

@@ -12,13 +12,16 @@
 //! a connection kept for that. To keep the event loop responsive, SQLite
 //! stops the query once it has run for `quick_read_limit` (1 ms by
 //! default); the query then runs on a reader as usual. Nothing is lost but
-//! that moment, and the SQL is remembered as slow so it goes straight to a
-//! reader next time.
+//! that moment. The SQL is remembered as slow, and the next 100 reads of it
+//! go straight to a reader. Then it gets another chance: a query is not
+//! always slow (a cold cache, a busy machine). Each time it runs out of time
+//! again, it waits twice as long for its next chance, so a query that is
+//! really slow soon costs almost nothing.
 //!
 //! When two threads want a quick read at the same moment, the second doesn't
 //! wait for the first: it sends its query to a reader.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -30,14 +33,28 @@ use super::connection::SqliteConnection;
 /// query; past this many, the list starts over rather than growing forever.
 const MAX_SLOW_STATEMENTS: usize = 1000;
 
+/// How many reads of a statement go to a reader after it first ran out of time.
+const READS_TO_SKIP_AT_FIRST: u32 = 100;
+
+/// How many times that number doubles at most (to 100 × 2⁷ = 12,800 reads).
+const MAX_DOUBLINGS: u32 = 7;
+
+/// What the quick reader remembers of a statement that ran out of time.
+struct SlowStatement {
+    /// How many times it ran out of time.
+    times_too_slow: u32,
+    /// How many of its next reads still go to a reader, before another chance here.
+    reads_to_skip: u32,
+}
+
 /// A reader connection for quick reads (see the module docs).
 pub(crate) struct QuickReader {
     /// One thread at a time uses the connection (a `Mutex` is like `threading.Lock`).
     connection: Mutex<SqliteConnection>,
     /// The longest a quick read may run.
     time_limit: Duration,
-    /// The SQL of reads that ran out of time: they go to a reader directly.
-    slow_statements: Mutex<HashSet<String>>,
+    /// The reads that ran out of time, by SQL (a `HashMap` is like a `dict`).
+    slow_statements: Mutex<HashMap<String, SlowStatement>>,
 }
 
 impl QuickReader {
@@ -48,14 +65,14 @@ impl QuickReader {
         Ok(QuickReader {
             connection: Mutex::new(connection),
             time_limit,
-            slow_statements: Mutex::new(HashSet::new()),
+            slow_statements: Mutex::new(HashMap::new()),
         })
     }
 
     /// The rows of `sql`, if it is a read that finishes within the time
     /// limit; `None` if it should go to a reader instead.
     pub(crate) fn fetch_all(&self, sql: &str, parameters: &[Value]) -> Option<Rows> {
-        if self.slow_statements.lock().unwrap().contains(sql) {
+        if self.skips_slow_statement(sql) {
             return None;
         }
         // `try_lock` doesn't wait: if another thread is using the connection, give up.
@@ -68,12 +85,35 @@ impl QuickReader {
         rows
     }
 
+    /// Whether `sql` ran out of time lately and this read goes to a reader
+    /// (one read fewer to skip, then).
+    fn skips_slow_statement(&self, sql: &str) -> bool {
+        let mut slow_statements = self.slow_statements.lock().unwrap();
+        // `get_mut()` is like `dict.get()`, with a value we may change in place.
+        match slow_statements.get_mut(sql) {
+            Some(statement) if statement.reads_to_skip > 0 => {
+                statement.reads_to_skip -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Note that `sql` ran out of time: skip its next reads, twice as many as last time.
     fn remember_slow(&self, sql: &str) {
         let mut slow_statements = self.slow_statements.lock().unwrap();
-        if slow_statements.len() >= MAX_SLOW_STATEMENTS {
+        if slow_statements.len() >= MAX_SLOW_STATEMENTS && !slow_statements.contains_key(sql) {
             slow_statements.clear();
         }
-        slow_statements.insert(sql.to_string());
+        // `entry().or_insert()` is like `dict.setdefault()`.
+        let statement = slow_statements.entry(sql.to_string()).or_insert(SlowStatement {
+            times_too_slow: 0,
+            reads_to_skip: 0,
+        });
+        let doublings = statement.times_too_slow.min(MAX_DOUBLINGS);
+        // `<<` doubles a number that many times: `100 << 2` is 400.
+        statement.reads_to_skip = READS_TO_SKIP_AT_FIRST << doublings;
+        statement.times_too_slow += 1;
     }
 }
 
@@ -121,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn stops_a_slow_read_and_remembers_it() {
+    fn stops_a_slow_read_and_sends_the_next_ones_to_a_reader() {
         let (_folder, _writer, reader) = quick_reader(1, Duration::from_micros(50));
         // Counts to ten million: far longer than 50 µs.
         let slow = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000) \
@@ -132,9 +172,28 @@ mod tests {
             started.elapsed() < Duration::from_millis(50),
             "stopped soon after the limit"
         );
-        assert!(reader.slow_statements.lock().unwrap().contains(slow));
+        assert!(reader.skips_slow_statement(slow));
         // The same connection still answers other reads afterwards.
         assert!(reader.fetch_all("SELECT count(*) FROM book", &[]).is_some());
+    }
+
+    #[test]
+    fn gives_a_slow_read_another_chance_later() {
+        let (_folder, _writer, reader) = quick_reader(1, Duration::from_micros(50));
+        let slow = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10000000) \
+                    SELECT count(*) FROM n";
+        let skipped_reads = |reader: &QuickReader| {
+            let mut count = 0;
+            while reader.skips_slow_statement(slow) {
+                count += 1;
+            }
+            count
+        };
+        assert!(reader.fetch_all(slow, &[]).is_none());
+        assert_eq!(skipped_reads(&reader), READS_TO_SKIP_AT_FIRST);
+        // Its chance came, and it ran out of time again: twice as many reads skipped.
+        assert!(reader.fetch_all(slow, &[]).is_none());
+        assert_eq!(skipped_reads(&reader), 2 * READS_TO_SKIP_AT_FIRST);
     }
 
     #[test]

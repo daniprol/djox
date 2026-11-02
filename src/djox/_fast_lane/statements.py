@@ -63,11 +63,12 @@ class Statement:
     `WHERE "in_print" = %s` (Django 6.0 and earlier do). Then those values are
     no parameters: they are in the SQL (and in the shape)."""
 
-    def parameters(self, simple_query: SimpleQuery, alias: str, updates: tuple[Update, ...] = ()) -> list[Any]:
+    def parameters(self, simple_query: SimpleQuery, connection: Any, updates: tuple[Update, ...] = ()) -> list[Any]:
         """The parameters to run this statement with, for `simple_query`'s
-        values (and, for an `UPDATE`, the values it sets, which come first)."""
-        filter_parameters = parameters_for(simple_query, alias, self.writes_booleans_in_sql)
-        return [*self.select_parameters, *update_parameters(updates, alias), *filter_parameters]
+        values (and, for an `UPDATE`, the values it sets, which come first).
+        `connection` is the alias's Django connection (its `DatabaseWrapper`)."""
+        filter_parameters = parameters_for(simple_query, connection, self.writes_booleans_in_sql)
+        return [*self.select_parameters, *update_parameters(updates, connection), *filter_parameters]
 
 
 # Shapes the fast lane leaves to Django are remembered too, so it doesn't ask again.
@@ -147,7 +148,7 @@ def write_statement(
     select_parameters = tuple(django_parameters[:1]) if kind == "exists" else ()
     for writes_booleans_in_sql in (False, True):
         candidate = Statement(sql, result_builder, related_models, select_parameters, writes_booleans_in_sql)
-        if same_values(list(django_parameters), candidate.parameters(simple_query, alias, updates)):
+        if same_values(list(django_parameters), candidate.parameters(simple_query, connections[alias], updates)):
             return candidate
     return LEFT_TO_DJANGO
 
@@ -285,7 +286,7 @@ def whole_model_columns(klass_info: dict[str, Any], columns: list[Any]) -> tuple
     return first_column, end_column
 
 
-def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql: bool = False) -> list[Any]:
+def parameters_for(simple_query: SimpleQuery, connection: Any, writes_booleans_in_sql: bool = False) -> list[Any]:
     """The filters' parameters, computed like Django's lookups compute them.
 
     The values were prepared by their field when `filter()` ran; the database
@@ -293,7 +294,6 @@ def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql
     `writes_booleans_in_sql` leaves out `True` and `False` compared with `exact`
     (see `Statement.writes_booleans_in_sql`).
     """
-    connection = connections[alias]
     parameters: list[Any] = []
     for condition in simple_query.conditions:
         if writes_booleans_in_sql and condition.lookup == "exact" and isinstance(condition.detail, bool):
@@ -305,10 +305,9 @@ def parameters_for(simple_query: SimpleQuery, alias: str, writes_booleans_in_sql
     return parameters
 
 
-def update_parameters(updates: tuple[Update, ...], alias: str) -> list[Any]:
+def update_parameters(updates: tuple[Update, ...], connection: Any) -> list[Any]:
     """The parameters of an `UPDATE`'s `SET`, prepared like Django's `UPDATE`
     compiler prepares them (`get_db_prep_save()`). `None` has none: it is `NULL` in the SQL."""
-    connection = connections[alias]
     parameters = []
     for update in updates:
         if update.value is not None:
@@ -316,14 +315,13 @@ def update_parameters(updates: tuple[Update, ...], alias: str) -> list[Any]:
     return parameters
 
 
-def values_fit_their_columns(simple_query: SimpleQuery, alias: str) -> bool:
+def values_fit_their_columns(simple_query: SimpleQuery, connection: Any) -> bool:
     """Whether every integer fits its column, by Django's rules.
 
     Django's integer lookups know without asking that a number bigger than the
     column can hold matches nothing (`pages=2**70`), or everything (`pages__lt=2**70`),
     and run no SQL, or other SQL. The fast lane leaves those queries to Django.
     """
-    connection = connections[alias]
     for condition in simple_query.conditions:
         if not condition.checks_integer_range:
             continue
