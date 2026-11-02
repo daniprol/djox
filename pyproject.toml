@@ -1,6 +1,6 @@
 [project]
 name = "djox"
-dynamic = ["version"]  # from Cargo.toml ([workspace.package] version)
+version = "0.1.0"  # the one place it lives: bump it with `uv version --bump patch`
 description = "Truly async Django ORM with a Rust core. Fast and readable, with hooks for library authors. SQLite and Postgres."
 readme = "README.md"
 license = "MIT"

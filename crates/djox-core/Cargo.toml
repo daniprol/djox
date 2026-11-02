@@ -1,9 +1,9 @@
 [package]
 name = "djox-core"
 description = "The shared types of djox and the Database trait every backend (SQLite, later Postgres) implements"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false  # only the Python package is published
 repository.workspace = true
 
 [dependencies]

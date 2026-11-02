@@ -54,7 +54,7 @@ from djox._core import (
 )
 from djox.hooks import Hooks, Query, QueryFinished, add_hooks, remove_hooks
 
-# The version as pip and PyPI write it (`0.1.0`). It comes from Cargo.toml, its one source.
+# The version of the installed package (`0.1.0`), from pyproject.toml, its one source.
 __version__ = version("djox")
 
 if TYPE_CHECKING:
