@@ -30,15 +30,14 @@ run Django's sync method unchanged, on one of djox's own threads
 async call in the process waits its turn. Inside a transaction, they run on
 the transaction's thread, so they join it.
 
-Simple queries take the fast lane (`djox._fast_lane`): while a `QuerySet`
-is only filtered with plain values (`filter(pages__gt=500)`, `exclude()`,
-`Q` objects, names through foreign keys like `author__name`), ordered by
-columns and sliced, it keeps a note of that (`SimpleQuery`) instead of
-building Django's `Query`. The reading methods (`async for`, `aget()`,
-`afirst()`, `alast()`, `acount()`, `aexists()`...) then reuse the SQL Django
-wrote for the same shape of query before, and build the objects in Rust. Any
-other method asks for `queryset.query`, which builds Django's `Query` from
-the note, so it works exactly as in Django.
+Queries take the fast lane (`djox._fast_lane`): instead of building
+Django's `Query`, a `QuerySet` writes down the calls that make it (a
+`QueryRecipe`: `filter()`, `annotate()`, `order_by()`, slices...). Its
+methods (`async for`, `aget()`, `acount()`, `aaggregate()`, `aupdate()`...,
+sync and async) then reuse the SQL Django wrote for the same shape of query
+before, and build the results in Rust. Any other method asks for
+`queryset.query`, which builds Django's `Query` from the recipe, so it works
+exactly as in Django.
 
 When the database's `ENGINE` isn't djox's, every method is Django's own.
 """
@@ -53,6 +52,7 @@ from django.db.models.deletion import Collector
 from django.db.models.query import (
     MAX_GET_RESULTS,  # how many rows `get()` reads at most
     FlatValuesListIterable,
+    NamedValuesListIterable,
     ValuesIterable,
     ValuesListIterable,
 )
@@ -60,10 +60,10 @@ from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
 from djox import _fast_lane, _running, _saving, _threads
+from djox._fast_lane import arguments, checks
 from djox._fast_lane import running as fast_lane
-from djox._fast_lane.lookups import is_simple_ordering, model_field, updates_for, where_for
+from djox._fast_lane.recipe import QueryRecipe, Step
 from djox._fast_lane.running import PreparedQuery
-from djox._fast_lane.simple_query import SimpleQuery, Update
 from djox._fast_lane.statements import Kind
 from djox._results import results_from_rows
 from djox.backends import engine
@@ -74,6 +74,10 @@ from djox.prefetch import aprefetch_related_objects
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)
 Result = TypeVar("Result")
 
+# The two calls `get()` adds after its filter, the same for every query.
+ORDERING_CLEARED_FOR_GET = arguments.order_cleared_step()
+SLICE_FOR_GET = arguments.slice_step(None, MAX_GET_RESULTS)
+
 
 class QuerySet(models.QuerySet[ModelType]):
     """A Django `QuerySet` whose async methods run on djox (see the module docs).
@@ -82,11 +86,12 @@ class QuerySet(models.QuerySet[ModelType]):
     this class, and a custom `QuerySet` can subclass it.
     """
 
-    # ------------------------------------------------------ the fast lane's note
+    # ---------------------------------------------------- the fast lane's recipe
 
-    # The note of a query simple enough for the fast lane (see the module
-    # docs), or `None` once Django's `Query` is built (or the fast lane is off).
-    _simple_query: SimpleQuery | None = None
+    # The calls that made this query, for the fast lane (see the module docs
+    # and `djox._fast_lane.recipe`), or `None` once Django's `Query` is built
+    # (or the fast lane is off).
+    _recipe: QueryRecipe | None = None
 
     def __init__(
         self,
@@ -96,149 +101,181 @@ class QuerySet(models.QuerySet[ModelType]):
         hints: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(model, query, using, hints)
-        # A new QuerySet without a query means "all the objects": the simplest query there is.
+        # A new QuerySet without a query means "all the objects": a recipe with no calls yet.
         if query is None and model is not None and _fast_lane.is_enabled():
-            self._simple_query = SimpleQuery()
+            self._recipe = QueryRecipe()
 
     # `@property` makes `queryset.query` call this method, like a computed attribute.
     @property
     def query(self) -> Query:
-        """Django's `Query`, built from the fast lane's note the first time anyone asks for it."""
-        simple_query = self._simple_query
-        if simple_query is not None:
-            self._simple_query = None
-            self._query = Query(self.model)  # pyrefly: ignore[missing-attribute]  # Django's; empty, for the replay
-            simple_query.replay_on(self)
+        """Django's `Query`, built from the fast lane's recipe the first time anyone asks for it."""
+        recipe = self._recipe
+        if recipe is not None:
+            self._recipe = None
+            self._query = recipe.django_queryset(self.model).query  # pyrefly: ignore[missing-attribute]  # Django's
         # Django's own property, which also applies a filter that a related manager deferred.
         return super().query
 
     @query.setter
     def query(self, value: Query) -> None:
-        self._simple_query = None
+        self._recipe = None
         # Django's own setter (`super()` can't reach a property's setter).
         models.QuerySet.query.fset(self, value)  # type: ignore[attr-defined]
 
-    def _recordable_query(self) -> SimpleQuery | None:
-        """The note, if the next step can be added to it.
+    def _recordable_recipe(self) -> QueryRecipe | None:
+        """The recipe, if the next call can be added to it.
 
         Not while Django's related managers set up a queryset (they filter it
         in their own way, with `_defer_next_filter` and `_sticky_filter`).
         """
         if self._defer_next_filter or self._sticky_filter:  # type: ignore[attr-defined]  # Django's
             return None
-        return self._simple_query
+        return self._recipe
 
-    def _with_simple_query(self, simple_query: SimpleQuery) -> "QuerySet[ModelType]":
-        """A copy of this `QuerySet` with another note, like Django's `_clone()`,
+    def _with_recipe(self, recipe: QueryRecipe) -> "QuerySet[ModelType]":
+        """A copy of this `QuerySet` with another recipe, like Django's `_clone()`,
         but without building (and copying) Django's `Query`."""
         # Django (6.1 and later) can ask a `QuerySet` to change in place
         # instead of copying itself (`_avoid_cloning()`, used by related
         # managers). A copy here would keep cloning turned off for good.
         if not getattr(self, "_cloning_enabled", True):
-            self._simple_query = simple_query
+            self._recipe = recipe
             return self
         # `__new__` makes an object without calling `__init__`; then every
         # attribute is copied over, whichever ones this Django version has.
         clone = self.__class__.__new__(self.__class__)
         clone.__dict__.update(self.__dict__)
-        clone._query = None  # type: ignore[assignment]  # Django's; built from the note when asked for (`query`)
+        clone._query = None  # type: ignore[assignment]  # Django's; built from the recipe when asked for (`query`)
         clone._result_cache = None
         clone._prefetch_done = False  # type: ignore[attr-defined]  # Django's
-        clone._simple_query = simple_query
+        clone._recipe = recipe
         return clone
 
+    def _with_step(self, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> "QuerySet[ModelType] | None":
+        """A copy with one more call of names and expressions (`annotate()`,
+        `order_by()`...) in its recipe, or `None` if Django should take the call.
+
+        Django checks each new kind of call once (`djox._fast_lane.checks`),
+        so its errors come when they would without djox.
+        """
+        recipe = self._recordable_recipe()
+        if recipe is None:
+            return None
+        step = arguments.step_for(self.model, recipe, method, args, kwargs)
+        if step is None:
+            return None
+        return self._with_recipe(checks.recipe_with(self.model, recipe, step))
+
     def filter(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
-        """Django's `filter()`. Filters the fast lane understands are noted for it."""
-        simple_query = self._recordable_query()
-        if simple_query is not None:
-            filtered = self._with_filter_noted(simple_query, args, kwargs, negated=False)
+        """Django's `filter()`, noted in the recipe when the fast lane understands it."""
+        recipe = self._recordable_recipe()
+        if recipe is not None:
+            filtered = self._with_filter_noted(recipe, "filter", args, kwargs)
             if filtered is not None:
-                return self._with_simple_query(filtered)
+                return self._with_recipe(filtered)
         return super().filter(*args, **kwargs)
 
     def exclude(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
-        """Django's `exclude()`. Filters the fast lane understands are noted for it."""
-        simple_query = self._recordable_query()
-        if simple_query is not None:
-            filtered = self._with_filter_noted(simple_query, args, kwargs, negated=True)
+        """Django's `exclude()`, noted in the recipe when the fast lane understands it."""
+        recipe = self._recordable_recipe()
+        if recipe is not None:
+            filtered = self._with_filter_noted(recipe, "exclude", args, kwargs)
             if filtered is not None:
-                return self._with_simple_query(filtered)
+                return self._with_recipe(filtered)
         return super().exclude(*args, **kwargs)
 
     def _with_filter_noted(
-        self, simple_query: SimpleQuery, args: tuple[Any, ...], kwargs: dict[str, Any], negated: bool
-    ) -> SimpleQuery | None:
-        """`simple_query` with one more `filter()` call (`exclude()`, if
-        `negated`), or `None` if Django should take the call."""
+        self, recipe: QueryRecipe, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> QueryRecipe | None:
+        """`recipe` with one more `filter()` or `exclude()` call, or `None` if
+        Django should take the call."""
         if not args and not kwargs:
-            return simple_query  # Django adds nothing for an empty call
-        if simple_query.is_sliced:
+            return recipe  # Django adds nothing for an empty call
+        if recipe.is_sliced:
             return None  # Django refuses to filter a slice: let it say so
-        where = where_for(self.model, args, kwargs, negated)
-        if where is None:
+        step = arguments.filter_step(self.model, recipe, method, args, kwargs)
+        if step is None:
             return None
-        return simple_query.with_filter(where)
+        if step.needs_check:
+            return checks.recipe_with(self.model, recipe, step)
+        return recipe.with_step(step)
+
+    def annotate(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
+        """Django's `annotate()`, noted in the recipe when the fast lane understands it."""
+        noted = self._with_step("annotate", args, kwargs)
+        if noted is not None:
+            return noted
+        return super().annotate(*args, **kwargs)
+
+    def alias(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
+        """Django's `alias()`, noted in the recipe when the fast lane understands it."""
+        noted = self._with_step("alias", args, kwargs)
+        if noted is not None:
+            return noted
+        return super().alias(*args, **kwargs)
 
     def order_by(self, *field_names: Any) -> "QuerySet[ModelType]":
-        """Django's `order_by()`. Ordering by the model's columns is noted for the fast lane."""
-        simple_query = self._recordable_query()
-        if simple_query is not None and not simple_query.is_sliced and is_simple_ordering(self.model, field_names):
-            return self._with_simple_query(simple_query.with_order_by(field_names))
+        """Django's `order_by()`, noted in the recipe when the fast lane understands it."""
+        noted = self._with_step("order_by", field_names, {})
+        if noted is not None:
+            return noted
         return super().order_by(*field_names)
 
+    def distinct(self, *field_names: Any) -> "QuerySet[ModelType]":
+        """Django's `distinct()`, noted in the recipe."""
+        noted = self._with_step("distinct", field_names, {})
+        if noted is not None:
+            return noted
+        return super().distinct(*field_names)
+
     def reverse(self) -> "QuerySet[ModelType]":
-        """Django's `reverse()`, noted for the fast lane."""
-        simple_query = self._recordable_query()
-        if simple_query is not None and not simple_query.is_sliced:
-            return self._with_simple_query(simple_query.with_reversed_ordering())
+        """Django's `reverse()`, noted in the recipe."""
+        recipe = self._recordable_recipe()
+        if recipe is not None and not recipe.is_sliced:
+            return self._with_recipe(recipe.with_step(arguments.reverse_step()))
         return super().reverse()
 
     def all(self) -> "QuerySet[ModelType]":
         """Django's `all()`: a copy."""
-        simple_query = self._recordable_query()
-        if simple_query is not None:
-            return self._with_simple_query(simple_query)
+        recipe = self._recordable_recipe()
+        if recipe is not None:
+            return self._with_recipe(recipe)
         return super().all()
 
     def using(self, alias: str | None) -> "QuerySet[ModelType]":
         """Django's `using()`: the same query, on another database alias."""
-        simple_query = self._recordable_query()
-        if simple_query is None:
+        recipe = self._recordable_recipe()
+        if recipe is None:
             return super().using(alias)
-        clone = self._with_simple_query(simple_query)
+        clone = self._with_recipe(recipe)
         clone._db = alias  # type: ignore[attr-defined]  # Django's
         return clone
 
     def select_related(self, *fields: Any) -> "QuerySet[ModelType]":
         """Django's `select_related()`: fetch the related objects in the same
-        query, with a join. Relations given by name are noted for the fast lane.
+        query, with a join. Noted in the recipe when given names.
 
         `select_related()` with no names (every non-null foreign key, which
-        Django 6.1 deprecates) is Django's. So are its errors: after
-        `values()` here, and a wrong name when the query runs, like in Django.
+        Django 6.1 deprecates) is Django's.
         """
-        simple_query = self._recordable_query()
-        if simple_query is None or self._fields is not None or not fields:  # type: ignore[attr-defined]  # Django's
-            return super().select_related(*fields)
-        if fields == (None,):
-            return self._with_simple_query(simple_query.without_select_related())
-        if not all(isinstance(name, str) for name in fields):
-            return super().select_related(*fields)
-        return self._with_simple_query(simple_query.with_select_related(fields))
+        noted = self._with_step("select_related", fields, {}) if fields else None
+        if noted is not None:
+            return noted
+        return super().select_related(*fields)
 
     def prefetch_related(self, *lookups: Any) -> "QuerySet[ModelType]":
         """Django's `prefetch_related()`: after this query, fetch the related
         objects with one more query per relation (see `djox.prefetch`).
 
-        The lookups are kept on the `QuerySet`, like Django keeps them, so a
-        simple query keeps its note and still runs on the fast lane.
+        The lookups are kept on the `QuerySet`, like Django keeps them, so the
+        recipe stays and the main query still runs on the fast lane.
         """
-        simple_query = self._recordable_query()
-        if simple_query is None:
+        recipe = self._recordable_recipe()
+        if recipe is None:
             return super().prefetch_related(*lookups)
         # (Django also refuses relations of `FilteredRelation`, which only
-        # `annotate()` adds: a simple query has none.)
-        clone = self._with_simple_query(simple_query)
+        # `annotate()` adds: the fast lane leaves those to Django.)
+        clone = self._with_recipe(recipe)
         if lookups == (None,):
             clone._prefetch_related_lookups = ()  # type: ignore[attr-defined]  # Django's
         else:
@@ -246,49 +283,45 @@ class QuerySet(models.QuerySet[ModelType]):
         return clone
 
     def values(self, *fields: Any, **expressions: Any) -> "QuerySet[Any]":
-        """Django's `values()`: dicts instead of instances. The model's own fields are noted for the fast lane."""
-        simple_query = self._recordable_query()
-        if simple_query is None or expressions or not self._are_simple_values_fields(fields):
+        """Django's `values()`: dicts instead of instances. Noted in the recipe
+        when the fast lane understands it."""
+        noted = self._with_step("values", fields, expressions)
+        if noted is None:
             return super().values(*fields, **expressions)  # type: ignore[return-value]
-        return self._with_values(simple_query, fields, ValuesIterable)
+        # What Django's `values()` sets on the copy it returns.
+        noted._fields = (*fields, *expressions)  # type: ignore[attr-defined]  # Django's
+        noted._iterable_class = ValuesIterable
+        return noted
 
     def values_list(self, *fields: Any, flat: bool = False, named: bool = False) -> "QuerySet[Any]":
         """Django's `values_list()`: tuples instead of instances (or single
-        values, with `flat=True`). The model's own fields are noted for the fast lane."""
-        simple_query = self._recordable_query()
-        # Named tuples, and Django's errors for `flat` with other than one field, are Django's.
-        if simple_query is None or named or (flat and len(fields) != 1) or not self._are_simple_values_fields(fields):
+        values, with `flat=True`). Noted in the recipe when the fast lane understands it."""
+        # (`flat=True` without a field is deprecated in Django 6.1: Django warns, at its moment.)
+        noted = self._with_step("values_list", fields, {"flat": flat, "named": named}) if fields or not flat else None
+        if noted is None:
             return super().values_list(*fields, flat=flat, named=named)  # type: ignore[return-value]
-        return self._with_values(simple_query, fields, FlatValuesListIterable if flat else ValuesListIterable)
-
-    def _are_simple_values_fields(self, fields: tuple[Any, ...]) -> bool:
-        """Whether `values()` or `values_list()` asks for columns of the model's
-        own table only, each once (no expressions, no joins like `"author__name"`)."""
-        if len(set(fields)) != len(fields):
-            return False
-        return all(isinstance(name, str) and model_field(self.model, name) is not None for name in fields)
-
-    def _with_values(
-        self, simple_query: SimpleQuery, fields: tuple[str, ...], iterable_class: type[Any]
-    ) -> "QuerySet[Any]":
-        """A copy returning `fields`, made like Django's `_values()` makes it."""
-        clone = self._with_simple_query(simple_query.with_values(fields))
-        clone._fields = fields  # type: ignore[attr-defined]  # Django's
-        clone._iterable_class = iterable_class
-        return clone
+        # What Django's `values_list()` sets on the copy it returns.
+        noted._fields = fields  # type: ignore[attr-defined]  # Django's
+        if named:
+            noted._iterable_class = NamedValuesListIterable
+        elif flat:
+            noted._iterable_class = FlatValuesListIterable
+        else:
+            noted._iterable_class = ValuesListIterable
+        return noted
 
     def __getitem__(self, key: Any) -> Any:  # pyrefly: ignore[bad-override]  # one method for both of Django's overloads
-        """Django's `queryset[...]`. A plain slice like `[10:20]` is noted for the fast lane."""
-        simple_query = self._recordable_query()
+        """Django's `queryset[...]`. A plain slice like `[10:20]` is noted in the recipe."""
+        recipe = self._recordable_recipe()
         if (
-            simple_query is not None
+            recipe is not None
             and self._result_cache is None
             and isinstance(key, slice)
             and key.step is None
             and is_slice_bound(key.start)
             and is_slice_bound(key.stop)
         ):
-            return self._with_simple_query(simple_query.with_limits(key.start, key.stop))
+            return self._with_recipe(recipe.with_step(arguments.slice_step(key.start, key.stop)))
         return super().__getitem__(key)
 
     # ------------------------------------------------------------- reading rows
@@ -368,7 +401,7 @@ class QuerySet(models.QuerySet[ModelType]):
         """The one object matching the filters. The same steps as Django's `get()`."""
         if not runs_on_djox(self.db):
             return await super().aget(*args, **kwargs)
-        clone = self._simple_queryset_for_get(args, kwargs)
+        clone = self._queryset_for_get(args, kwargs)
         if clone is not None:
             await clone._fetch_all_on_djox()
             return self._only_result(clone._result_cache, MAX_GET_RESULTS)
@@ -386,19 +419,19 @@ class QuerySet(models.QuerySet[ModelType]):
         await clone._fetch_all_on_djox()
         return self._only_result(clone._result_cache, limit)
 
-    def _simple_queryset_for_get(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> "QuerySet[ModelType] | None":
+    def _queryset_for_get(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> "QuerySet[ModelType] | None":
         """What `get()` runs, on the fast lane: the same steps as Django's
         `get()` (filter, no ordering, at most `MAX_GET_RESULTS` rows), noted
-        without building Django's `Query`. `None` if it isn't that simple."""
-        simple_query = self._recordable_query()
-        if simple_query is None:
+        in the recipe. `None` if Django should run it."""
+        recipe = self._recordable_recipe()
+        if recipe is None or recipe.has_step("distinct"):
+            return None  # (Django's `get()` keeps the ordering of `distinct(*fields)`)
+        recipe = self._with_filter_noted(recipe, "filter", args, kwargs)
+        if recipe is None:
             return None
-        simple_query = self._with_filter_noted(simple_query, args, kwargs, negated=False)
-        if simple_query is None:
-            return None
-        if not simple_query.is_sliced:
-            simple_query = simple_query.with_order_by(())
-        return self._with_simple_query(simple_query.with_limits(high=MAX_GET_RESULTS))
+        if not recipe.is_sliced:
+            recipe = recipe.with_step(ORDERING_CLEARED_FOR_GET)
+        return self._with_recipe(recipe.with_step(SLICE_FOR_GET))
 
     def _only_result(self, results: list[Any] | None, limit: int | None) -> ModelType:
         """The one result `get()` found, or Django's error for none or several."""
@@ -438,7 +471,7 @@ class QuerySet(models.QuerySet[ModelType]):
         if self._keeps_its_ordering_for_first_and_last():
             queryset = self if method == "first" else self.reverse()
         else:
-            if self._simple_query is None:  # (a simple query has no `GROUP BY` to check)
+            if self._recipe is None:  # (a recipe here has no `GROUP BY` to check, see below)
                 self._check_ordering_first_last_queryset_aggregation(method=method)  # type: ignore[attr-defined]
             queryset = self.order_by("pk" if method == "first" else "-pk")
         first_one: QuerySet[ModelType] = queryset[:1]
@@ -447,9 +480,10 @@ class QuerySet(models.QuerySet[ModelType]):
     def _keeps_its_ordering_for_first_and_last(self) -> bool:
         """Django's test in `first()` and `last()`: the query is ordered, or was
         told not to be (`order_by()`). Otherwise they order by primary key."""
-        simple_query = self._simple_query
-        if simple_query is not None:
-            return simple_query.order_by is not None or bool(self.model._meta.ordering)
+        recipe = self._recipe
+        if recipe is not None and not recipe.groups_rows:
+            return recipe.is_ordered_by_call or bool(self.model._meta.ordering)
+        # With a `GROUP BY`, Django's own answer (which builds its `Query`).
         return self.ordered or not self.query.default_ordering
 
     async def aearliest(self, *fields: Any) -> ModelType:
@@ -499,7 +533,7 @@ class QuerySet(models.QuerySet[ModelType]):
     def _can_contain(self, obj: models.Model) -> bool:
         """Django's checks in `contains()`: errors for what it refuses, and
         `False` for an object of another model."""
-        if self._simple_query is None:  # (a simple query is never combined)
+        if self._recipe is None:  # (a recipe is never combined)
             self._not_support_combined_queries("contains")  # type: ignore[attr-defined]
         if self._fields is not None:  # type: ignore[attr-defined]
             raise TypeError("Cannot call QuerySet.contains() after .values() or .values_list().")
@@ -545,7 +579,20 @@ class QuerySet(models.QuerySet[ModelType]):
         """Aggregates (`Sum`, `Avg`...) over the rows, written by Django's `aggregate()`."""
         if not runs_on_djox(self.db):
             return await super().aaggregate(*args, **kwargs)
+        prepared = self._prepared_aggregate(args, kwargs)
+        if prepared is not None:
+            return prepared.aggregate(await prepared.fetch_rows())
         return await compiler.replay(self.db, lambda: self.aggregate(*args, **kwargs))
+
+    def _prepared_aggregate(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> PreparedQuery | None:
+        """`aggregate(*args, **kwargs)` on the fast lane, ready to run, or `None`."""
+        recipe = self._recipe
+        if recipe is None:
+            return None
+        step = arguments.step_for(self.model, recipe, "aggregate", args, kwargs)
+        if step is None:
+            return None
+        return self._prepared_for_fast_lane("aggregate", step)
 
     async def aupdate(self, **kwargs: Any) -> int:
         """`UPDATE` the rows, written by Django's `update()`. Returns how many changed."""
@@ -612,12 +659,13 @@ class QuerySet(models.QuerySet[ModelType]):
 
         A sliced query is left to Django, which refuses it.
         """
-        if self._simple_query is None or self._simple_query.is_sliced or self.model._meta.parents:
+        recipe = self._recipe
+        if recipe is None or recipe.is_sliced or self.model._meta.parents:
             return None
-        updates = updates_for(self.model, kwargs)
-        if updates is None:
+        step = arguments.update_step(self.model, kwargs)
+        if step is None:
             return None
-        return self._prepared_for_fast_lane("update", updates)
+        return self._prepared_for_fast_lane("update", step)
 
     def _prepared_fast_delete(self) -> PreparedQuery | None:
         """`delete()` on the fast lane, ready to run, or `None`.
@@ -626,7 +674,8 @@ class QuerySet(models.QuerySet[ModelType]):
         signal receiver and no other model's foreign key needs to know.
         A sliced query is left to Django, which refuses it.
         """
-        if self._simple_query is None or self._simple_query.is_sliced or self._fields is not None:  # type: ignore[attr-defined]
+        recipe = self._recipe
+        if recipe is None or recipe.is_sliced or recipe.has_step("distinct") or self._fields is not None:  # type: ignore[attr-defined]
             return None  # Django refuses those
         using = self._alias_for_write()
         if not Collector(using=using, origin=self).can_fast_delete(self):
@@ -779,7 +828,7 @@ class QuerySet(models.QuerySet[ModelType]):
 
     def get(self, *args: Any, **kwargs: Any) -> ModelType:
         """Django's `get()`."""
-        clone = self._simple_queryset_for_get(args, kwargs) if runs_on_djox(self.db) else None
+        clone = self._queryset_for_get(args, kwargs) if runs_on_djox(self.db) else None
         if clone is None:
             return super().get(*args, **kwargs)
         clone._fetch_all()
@@ -787,7 +836,7 @@ class QuerySet(models.QuerySet[ModelType]):
 
     def first(self) -> ModelType | None:
         """Django's `first()`."""
-        if self._simple_query is None or not runs_on_djox(self.db):
+        if self._recipe is None or not runs_on_djox(self.db):
             return super().first()
         for result in self._first_one("first"):
             return result
@@ -795,7 +844,7 @@ class QuerySet(models.QuerySet[ModelType]):
 
     def last(self) -> ModelType | None:
         """Django's `last()`."""
-        if self._simple_query is None or not runs_on_djox(self.db):
+        if self._recipe is None or not runs_on_djox(self.db):
             return super().last()
         for result in self._first_one("last"):
             return result
@@ -819,13 +868,20 @@ class QuerySet(models.QuerySet[ModelType]):
 
     def contains(self, obj: models.Model) -> bool:
         """Django's `contains()`."""
-        if self._simple_query is None or not runs_on_djox(self.db):
+        if self._recipe is None or not runs_on_djox(self.db):
             return super().contains(obj)
         if not self._can_contain(obj):
             return False
         if self._result_cache is not None:
             return obj in self._result_cache
         return self.filter(pk=obj.pk).exists()
+
+    def aggregate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Django's `aggregate()`."""
+        prepared = self._prepared_aggregate(args, kwargs)
+        if prepared is not None:
+            return prepared.aggregate(prepared.fetch_rows_now())
+        return super().aggregate(*args, **kwargs)
 
     def update(self, **kwargs: Any) -> int:
         """Django's `update()`."""
@@ -850,16 +906,17 @@ class QuerySet(models.QuerySet[ModelType]):
 
     # ---------------------------------------------------------------- helpers
 
-    def _prepared_for_fast_lane(self, kind: Kind, updates: tuple[Update, ...] = ()) -> PreparedQuery | None:
+    def _prepared_for_fast_lane(self, kind: Kind, last_step: Step | None = None) -> PreparedQuery | None:
         """This query, ready to run on the fast lane as `kind`, or `None` if
-        it isn't simple, or its database isn't djox's."""
-        if self._simple_query is None or not runs_on_djox(self.db):
+        it has no recipe, or its database isn't djox's. `last_step` is the
+        call that runs it, when it has arguments (`update(...)`, `aggregate(...)`)."""
+        if self._recipe is None or not runs_on_djox(self.db):
             return None
         # While djox's async methods run Django's sync code to capture its SQL
         # (`compiler.capture()`), the SQL must reach Django's compiler.
         if compiler.current_replay.get() is not None:
             return None
-        return fast_lane.prepare(self, kind, updates)
+        return fast_lane.prepare(self, kind, last_step)
 
     def _alias_for_write(self) -> str:
         """The database alias writes go to (the router's `db_for_write()`)."""

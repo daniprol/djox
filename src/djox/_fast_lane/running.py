@@ -1,11 +1,12 @@
-"""Running a `SimpleQuery`: the statement of its shape, its parameters, then results.
+"""Running a `QueryRecipe`: the statement of its shape, its parameters, then results.
 
 `prepare()` does everything but running the SQL, and returns `None` when the
 fast lane leaves the query to Django; `djox.QuerySet` then runs it the way it
 would without the fast lane, with the same result. A `PreparedQuery` runs the
 same way from async code (`await prepared.fetch_rows()`, `stream_rows()` for
-`aiterator()`, or `execute()` for a write) and from sync code (`prepared.fetch_rows_now()`, `execute_now()`), and
-turns the rows into the answer:
+`aiterator()`, or `execute()` for a write) and from sync code
+(`prepared.fetch_rows_now()`, `execute_now()`), and turns the rows into the
+answer (`results()`, `count()`, `exists()`, `aggregate()`):
 
 ```python
 prepared = prepare(queryset, "count")
@@ -27,8 +28,8 @@ from django.db.models.query import FlatValuesListIterable, ModelIterable, Values
 from django.db.models.signals import post_init, pre_init
 
 from djox import _running
-from djox._fast_lane.simple_query import Update
-from djox._fast_lane.statements import Kind, Statement, statement_for, values_fit_their_columns
+from djox._fast_lane.recipe import Step
+from djox._fast_lane.statements import Kind, Statement, statement_for, values_fit_their_columns, values_of
 
 if TYPE_CHECKING:
     from djox._core import Row
@@ -87,7 +88,12 @@ class PreparedQuery:
         if iterable_class is ValuesIterable:
             return builder.dicts(rows)
         if iterable_class is ValuesListIterable:
-            return builder.tuples(rows)
+            tuples = builder.tuples(rows)
+            order = self.statement.tuple_order
+            if order is None:
+                return tuples
+            # Each tuple's columns, put in the order of the names given (Django 6.0 and earlier).
+            return [tuple(values[position] for position in order) for values in tuples]
         if iterable_class is FlatValuesListIterable:
             return [values[0] for values in builder.tuples(rows)]
         fetch_mode = getattr(queryset, "_fetch_mode", None)  # Django 6.1 and later
@@ -101,31 +107,46 @@ class PreparedQuery:
         """Whether there is a row (for a query prepared as `"exists"`)."""
         return bool(rows)
 
+    def aggregate(self, rows: "list[Row]") -> dict[str, Any]:
+        """The dict `aggregate()` returns (for a query prepared as `"aggregate"`):
+        one key per aggregate, from the one row."""
+        assert self.statement is not None, "an aggregate is prepared only with its statement"
+        if not rows:
+            assert self.statement.empty_aggregate is not None, "an aggregate's statement has one"
+            return dict(self.statement.empty_aggregate)
+        builder = self.statement.result_builder
+        assert builder is not None, "an aggregate's statement has one"
+        result: dict[str, Any] = builder.dicts(rows[:1])[0]
+        return result
 
-def prepare(queryset: "models.QuerySet[Any]", kind: Kind, updates: tuple[Update, ...] = ()) -> PreparedQuery | None:
-    """`queryset`'s simple query, ready to run as `kind`, or `None` to leave it to Django.
 
-    `queryset` must have a note (`queryset._simple_query`). `updates` are the
-    values an `UPDATE` sets.
+def prepare(queryset: "models.QuerySet[Any]", kind: Kind, last_step: Step | None = None) -> PreparedQuery | None:
+    """`queryset`'s recipe, ready to run as `kind`, or `None` to leave it to Django.
+
+    `queryset` must have a recipe (`queryset._recipe`). `last_step` is the
+    call that runs the query, when it has arguments: `update(...)` or `aggregate(...)`.
     """
     if kind == "rows" and not can_build_results(queryset):
         return None
-    simple_query = queryset._simple_query  # type: ignore[attr-defined]  # djox.QuerySet's
+    recipe = queryset._recipe  # type: ignore[attr-defined]  # djox.QuerySet's
     alias = queryset.db
-    if simple_query.matches_nothing:
+    if recipe.matches_nothing:
+        if kind == "aggregate":
+            return None  # Django knows each aggregate's answer for no rows
         return PreparedQuery(None, [], alias)
-    # This thread's Django connection: it prepares the values like Django's lookups do.
+    # This thread's Django connection: it prepares the values like Django does.
     connection = connections[alias]
+    values = values_of(recipe, last_step)
     # Checked first: Django writes no SQL (or other SQL) for such values.
-    if not values_fit_their_columns(simple_query, connection):
+    if not values_fit_their_columns(values, connection):
         return None
-    statement = statement_for(queryset, simple_query, kind, alias, updates)
+    statement = statement_for(queryset, recipe, kind, alias, last_step)
     if statement is None:
         return None
     for related_model in statement.related_models:
         if not builds_like_django(related_model):
             return None
-    return PreparedQuery(statement, statement.parameters(simple_query, connection, updates), alias)
+    return PreparedQuery(statement, statement.parameters(values, connection), alias)
 
 
 def can_build_results(queryset: "models.QuerySet[Any]") -> bool:
@@ -141,7 +162,7 @@ def can_build_results(queryset: "models.QuerySet[Any]") -> bool:
     statement says which they are (`prepare()`).
     """
     model = queryset.model
-    asks_for_values = queryset._simple_query.values_fields is not None  # type: ignore[attr-defined]  # djox.QuerySet's
+    asks_for_values = queryset._fields is not None  # type: ignore[attr-defined]  # Django's: set by `values()`
     if queryset._iterable_class in (ValuesIterable, ValuesListIterable, FlatValuesListIterable):
         return asks_for_values
     if asks_for_values or queryset._iterable_class is not ModelIterable:

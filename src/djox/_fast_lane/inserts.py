@@ -38,7 +38,8 @@ from typing import Any
 from django.db import connections, models
 
 from djox._fast_lane import is_enabled
-from djox._fast_lane.statements import LEFT_TO_DJANGO, same_values
+from djox._fast_lane.parameters import same_values
+from djox._fast_lane.statements import LEFT_TO_DJANGO
 
 # The `pre_save()` methods the fast lane knows: Django's own, which return
 # the value to save (the attribute, or the date `auto_now` puts there) and

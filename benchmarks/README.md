@@ -112,6 +112,16 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
   hand-written SQL.
 - **`select_related()` takes the fast lane too**: 20 chapters with their book take 219 µs sync against 744, and
   206 µs async against 1,245. Django writes the join once; Rust builds both objects of each row.
+- **Annotations, aggregates and `F()` take the fast lane too** (the general fast lane: any chain of calls reuses
+  the SQL Django wrote once for its shape). Measured before and after it, in one run of the same VM:
+
+  | djox.Manager, µs | sync before | sync after | async before | async after | Django async |
+  |---|---|---|---|---|---|
+  | 10 books with a chapter count (`annotate(Count())`) | 625 | 183 | 670 | 148 | 1,028 |
+  | 10 books by chapter title (a reverse relation) | 507 | 108 | 539 | 117 | 898 |
+  | sum of pages (`aggregate(Sum())`) | 356 | 171 | 465 | 173 | 764 |
+  | update with `F()` | 226 | 102 | 495 | 169 | 605 |
+
 - **`create()` takes the fast lane**: `acreate()` 268 µs against 441, `create()` 145 against 183. Django writes the
   model's `INSERT` once.
 - **`prefetch_related()` gains less** (1.9 ms against 2.4 ms async): the prefetching query still runs Django's code.

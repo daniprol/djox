@@ -199,11 +199,11 @@ variable, which `async_to_sync()` copies to the async code it starts.
 
 Most of the time of a `djox.Manager` query is Django's Python: building the
 `Query` (`filter()`), writing the SQL (the compiler) and building the
-instances. SQLite itself takes a few microseconds. For simple queries, djox
+instances. SQLite itself takes a few microseconds. For most queries, djox
 skips most of it:
 
 ```text
-  Book.objects.filter(pages__gt=500)[:20]     a note: ("pages", "gt", 500), [0:20]
+  Book.objects.filter(pages__gt=500)[:20]     a recipe: filter(pages__gt=?) [500], slice [0:20]
   async for book in ...:
       shape seen before?  ── no ──►  Django builds the query and writes the SQL, once
               │ yes
@@ -213,20 +213,32 @@ skips most of it:
       ResultBuilder (Rust)            one instance (or dict, or tuple) per row
 ```
 
-- **A note instead of a `Query`.** While a `djox.QuerySet` is only filtered
-  with plain values (`exact`, `gt`, `gte`, `lt`, `lte`, `in`, `isnull`, on the
-  model's columns or through foreign keys), ordered by columns and sliced, it
-  writes down what was asked (`SimpleQuery`). Each `filter()` or `exclude()`
-  call is noted with its structure: its conditions and `Q` objects, joined by
-  `AND` or `OR`, maybe negated, since that decides the SQL. The values are
-  prepared by their field right away, so a wrong value raises at `filter()`,
-  as in Django.
+- **A recipe instead of a `Query`.** A `djox.QuerySet` writes down each call
+  (`filter()`, `annotate()`, `order_by()`, `values()`, a slice...) as a step
+  of a recipe (`_fast_lane/recipe.py`), with its values taken out: the
+  `500` of `pages__gt=500`, the `1` of `F("pages") + 1`. What is left is the
+  call's *shape*. Names, Django's expression classes and their structure
+  (`AND`, `OR`, `NOT`) are shape, since they decide the SQL. If anyone asks
+  for `queryset.query`, Django's own methods replay the recipe and build it.
+- **Errors come at the same moment.** Filter values are prepared by their
+  field right away, so a wrong value raises at `filter()`. Other calls are
+  checked by Django once per kind of step (`_fast_lane/checks.py`): the first
+  `annotate(n=Count("chaptrs"))` raises Django's `FieldError` at the call,
+  and a later call of that shape is known to be fine. The check also says
+  each annotation's output field (to prepare `n__gt=2`) and whether the query
+  groups its rows.
 - **The SQL of each shape is Django's.** Two queries that differ only in their
-  values have the same *shape*, and the same SQL. The first time djox meets a
-  shape, Django builds the query and writes the SQL; djox keeps it (and checks
-  that it computes the same parameters as Django). Writing the SQL in Rust
-  would buy nothing, since it is written once per shape, and this way the SQL
-  is exactly Django's, for every Django version and, later, every database.
+  values have the same shape, and the same SQL. The first time djox meets a
+  shape, Django builds the query from the recipe and writes the SQL; djox
+  keeps it, with where each parameter comes from (`_fast_lane/parameters.py`):
+  each of Django's parameters is matched, by value and type, to one of the
+  recipe's values, or is fixed by the shape (a constant Django adds,
+  like the `1` that `exists()` selects). If a parameter could come from two values (`pages=412` and
+  `F("pages") + 412`), djox waits for a query whose values differ; if a value
+  is missing from the SQL (an `alias()` nothing uses), Django keeps the
+  shape. Writing the SQL in Rust would buy nothing, since it is written once
+  per shape, and this way the SQL is exactly Django's, for every Django
+  version and every database.
 - **Rust builds the results** (`ResultBuilder`, `src/results.rs`): for a
   model, an empty instance, its `_state`, and one attribute per column. It is
   what `Model.from_db()` makes, without running `__init__` for every row.
@@ -249,8 +261,9 @@ skips most of it:
   Django's own (`_fast_lane/conversions.py` checks), and any value Rust
   doesn't handle goes to Django's converter. A field's own `from_db_value()`
   always runs.
-- **Writes too.** `update(name=value)` and a `delete()` Django would do in one
-  statement keep a statement per shape too, captured from Django's own
+- **Aggregates and writes too.** `aggregate()`, `update()` (with values or
+  expressions) and a `delete()` Django would do in one statement keep a
+  statement per shape too, captured from Django's own `aggregate()`,
   `update()` and `_raw_delete()`.
 - **New objects too.** `create()`, `acreate()` and `asave()` keep the
   `INSERT` Django wrote for a model's first new object, and compute the next
