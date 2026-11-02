@@ -9,7 +9,7 @@ Anything this file doesn't fully understand returns `None`: the `QuerySet`
 then hands the call to Django right away. That covers joins
 (`author__name`), transforms (`published__year`), other lookups
 (`icontains`), expressions (`F("pages")`), subqueries, and values of a type
-the field doesn't usually get (`filter(pages="7")`).
+the field doesn't usually get (`filter(pages=7.5)`).
 
 The SQL itself always comes from Django (`djox._fast_lane.statements`). This
 file only has to say which queries share their SQL, and compute the
@@ -57,11 +57,17 @@ INTEGER_TYPES = {
 }
 
 # The Python types a filter value may have, by the field's internal type. A
-# value of another type (a string for an integer field, a float for a date...)
+# value of another type (a float for an integer field, a string for a date...)
 # is still allowed by Django, which converts it in its own ways: the fast lane
 # lets Django do that.
+#
+# Text is allowed for integers and UUIDs, because ids often come from URLs
+# (`/books/5/` gives `pk="5"`, which is what Django REST framework's views
+# pass). The field's own `get_prep_value()` turns it into a number or a
+# `uuid.UUID`, exactly as in Django, so `"5"` gives the same query as `5`, and
+# `"five"` raises the same error, at the same moment.
 VALUE_TYPES: dict[str, tuple[type, ...]] = {
-    **dict.fromkeys(INTEGER_TYPES, (int,)),
+    **dict.fromkeys(INTEGER_TYPES, (int, str)),
     "CharField": (str,),
     "TextField": (str,),
     "SlugField": (str,),
@@ -73,7 +79,7 @@ VALUE_TYPES: dict[str, tuple[type, ...]] = {
     "DateTimeField": (datetime.datetime,),
     "DateField": (datetime.date,),
     "TimeField": (datetime.time,),
-    "UUIDField": (uuid.UUID,),
+    "UUIDField": (uuid.UUID, str),
 }
 
 # Returned by `prepare()` for a value the fast lane leaves to Django.

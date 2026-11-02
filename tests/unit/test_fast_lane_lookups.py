@@ -2,12 +2,14 @@
 
 import datetime
 import decimal
+import uuid
 from typing import Any
 
 import pytest
 from django.db.models import F, Value
 
 from djox._fast_lane.lookups import condition_for, is_simple_ordering
+from tests.e2e.kinds.models import EveryKind
 from tests.e2e.library.models import Author, Book
 
 
@@ -54,6 +56,25 @@ def test_a_foreign_key_takes_an_instance_or_its_id() -> None:
     assert by_instance.values == by_id.values == (3,)
 
 
+def test_ids_from_urls_are_prepared_like_numbers() -> None:
+    # `/books/7/` gives `pk="7"`: the field turns it into `7`, as Django does.
+    by_text = condition_for(Book, "pk", "7")
+    by_number = condition_for(Book, "pk", 7)
+    assert by_text is not None
+    assert by_number is not None
+    assert by_text.values == by_number.values == (7,)
+    by_author = condition_for(Book, "author__in", ["3", 3, "4"])
+    assert by_author is not None
+    assert by_author.values == (3, 4)
+
+
+def test_uuids_from_urls_are_prepared_like_uuids() -> None:
+    value = uuid.UUID("0b8f2c1e-6a4d-4f3b-9c55-2f1d8e7a6b10")
+    condition = condition_for(EveryKind, "uuid", str(value))
+    assert condition is not None
+    assert condition.values == (value,)
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [
@@ -62,7 +83,6 @@ def test_a_foreign_key_takes_an_instance_or_its_id() -> None:
         ("title__icontains", "dune"),  # a lookup the fast lane doesn't know
         ("pages", F("price")),  # an expression
         ("pages", Value(3)),
-        ("pages", "7"),  # Django converts it in its own way
         ("pages", 7.5),
         ("pages__gt", None),  # Django raises
         ("in_print__isnull", "yes"),  # Django raises
