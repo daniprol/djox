@@ -1,7 +1,6 @@
 [package]
 name = "djox_python"
 description = "The Python extension of djox (`djox._core`)"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -19,9 +18,9 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 [workspace]
 members = [".", "crates/djox-core", "crates/djox"]
 
-# The single source of the version: the crates and the Python package (see `dynamic` in pyproject.toml).
+# Settings the crates share. No version: djox is published as a Python package only, and its
+# version lives only in pyproject.toml (bump it with `uv version`). The crates aren't published.
 [workspace.package]
-version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/daniprol/djox"

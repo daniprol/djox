@@ -258,11 +258,12 @@ like an example of how to use djox.
   page, the most common case first. Add a new page to `nav` in
   `zensical.toml`; the README links to the published site
   (`https://daniprol.github.io/djox/`), so it also works on PyPI.
-- The version lives in one place: `[workspace.package]` in `Cargo.toml`.
-  Note each release's changes in `CHANGELOG.md`.
-- Releases (`.github/workflows/release.yml`): every push to main publishes a
-  development build to TestPyPI (`0.1.0.dev42`, stamped by
-  `scripts/stamp-dev-version.py`). To publish to PyPI, bump the version with
-  `cargo set-version --bump patch` (or `minor`, `alpha`...; from
-  `cargo install cargo-edit`), merge to main, then push the tag in Python form
-  (`git tag v0.1.1 && git push origin v0.1.1`).
+- The version lives in one place: `version` in `pyproject.toml` (the crates
+  have none: only the Python package is published). Note each release's
+  changes in `CHANGELOG.md`.
+- Releases (`.github/workflows/release.yml`), from main:
+  `uv version --bump patch` (or `minor`), commit and push, then push the tag
+  (`git tag "v$(uv version --short)" && git push origin "v$(uv version --short)"`).
+  The tag reruns CI, builds the wheels and publishes to PyPI after approval
+  in the `pypi` environment. Running the workflow by hand publishes to
+  TestPyPI instead.

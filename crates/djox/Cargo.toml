@@ -1,9 +1,9 @@
 [package]
 name = "djox"
 description = "The djox backends: run SQL for async Python without blocking it. SQLite and Postgres"
-version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false  # only the Python package is published
 repository.workspace = true
 
 [dependencies]
