@@ -73,9 +73,12 @@ wheels = [
 
 [[package]]
 name = "djox"
+version = "0.1.0"
 source = { directory = "../" }
 
 [package.metadata]
+requires-dist = [{ name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1.8" }]
+provides-extras = ["postgres"]
 
 [package.metadata.requires-dev]
 dev = [

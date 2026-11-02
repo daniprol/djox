@@ -35,8 +35,7 @@ uv add djox  # or: pip install djox
 - Python 3.11+, Django 5.2, 6.0 or 6.1.
 - Wheels for Linux, macOS and Windows: no Rust needed.
 - SQLite is bundled. For Postgres, install `"djox[postgres]"`, which adds
-  psycopg 3 for Django's sync code. TLS isn't supported yet
-  ([Postgres](postgres.md#not-supported-yet)).
+  psycopg 3 for Django's sync code.
 
 ## Set up
 

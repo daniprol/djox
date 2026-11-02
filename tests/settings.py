@@ -105,6 +105,12 @@ if os.environ.get("DJOX_TEST_DATABASE") == "postgres":
         "HOST": postgres.hostname or "",
         "PORT": postgres.port or "",
     }
+    # With a TLS server's authority (`scripts/make-test-certificates.sh`),
+    # every connection, Django's and djox's, is encrypted and checked.
+    root_certificate = os.environ.get("DJOX_POSTGRES_ROOT_CERT")
+    if root_certificate:
+        tls_options = {"sslmode": "verify-full", "sslrootcert": root_certificate}
+        DATABASES["default"] = {**DATABASES["default"], "OPTIONS": tls_options}
     # The ported `backends` tests have no migrations, and foreign keys to
     # `contenttypes`, which has. Postgres checks that a foreign key's table
     # exists, so, like Django's own test runner, the tables of

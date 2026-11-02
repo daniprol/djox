@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use djox::postgres::{PostgresDatabase, PostgresSettings};
+use djox::postgres::{PostgresDatabase, PostgresSettings, TlsMode};
 use djox::sqlite::{SqliteConnection, SqliteDatabase, SqliteSettings};
 use djox::{Database, Rows, Value};
 use pyo3::exceptions::PyValueError;
@@ -112,14 +112,37 @@ impl PythonDatabase {
     /// or libpq's `key=value` words (`"host=localhost dbname=app user=django"`).
     /// `pool_size` is the most connections open at once. `time_zone` is
     /// the session's time zone (`SET TIME ZONE`), like Django sets it.
+    /// `sslmode`, `sslrootcert`, `sslcert` and `sslkey` are libpq's TLS
+    /// settings, with libpq's values (`sslmode="verify-full"`).
     ///
     /// It opens one connection right away, so wrong settings fail here.
     #[staticmethod]
-    #[pyo3(signature = (connection, *, pool_size = 10, time_zone = None))]
-    fn postgres(py: Python<'_>, connection: String, pool_size: usize, time_zone: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (
+        connection, *, pool_size = 10, time_zone = None,
+        sslmode = None, sslrootcert = None, sslcert = None, sslkey = None,
+    ))]
+    // Clippy counts arguments; these are the keyword arguments of one Python method.
+    #[allow(clippy::too_many_arguments)]
+    fn postgres(
+        py: Python<'_>,
+        connection: String,
+        pool_size: usize,
+        time_zone: Option<String>,
+        sslmode: Option<String>,
+        sslrootcert: Option<String>,
+        sslcert: Option<String>,
+        sslkey: Option<String>,
+    ) -> PyResult<Self> {
         let mut settings = PostgresSettings::new(connection);
         settings.pool_size = pool_size;
         settings.time_zone = time_zone;
+        // `if let Some(name) = ...`: only when `sslmode` isn't `None`.
+        if let Some(name) = sslmode {
+            settings.tls.mode = Some(TlsMode::from_name(&name).map_err(to_python_error)?);
+        }
+        settings.tls.root_certificates = sslrootcert;
+        settings.tls.client_certificate = sslcert;
+        settings.tls.client_key = sslkey;
         let location = settings.describe();
         // Connecting waits for the network: `detach` lets other Python threads run meanwhile.
         let backend = py

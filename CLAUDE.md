@@ -194,8 +194,9 @@ them, and it should teach them both along the way.
    `values()` and `values_list()`, with dates, decimals and booleans
    converted in Rust. `aiterator()` streams its rows (done). Next: `F()` in
    `update()`, joins, `annotate()`.
-7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`.
-   Next: TLS, reading arrays, ranges and `hstore` from async code.
+7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`,
+   with TLS (rustls, libpq's `sslmode` values). Next: reading arrays,
+   ranges and `hstore` from async code.
 8. Related objects (done): `select_related()` on the fast lane (Rust builds
    the related objects and calls Django's setters to cache them), and
    `prefetch_related()` with its main query on the fast lane and Django's

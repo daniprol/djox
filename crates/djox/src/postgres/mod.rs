@@ -56,7 +56,8 @@
 //! | `stream.rs`       | Streams: a query's rows a chunk at a time, on a connection of its own |
 //! | `values.rs`       | djox values to parameters, and columns to djox values            |
 //! | `errors.rs`       | Postgres errors (SQLSTATE codes) to djox errors                  |
-//! | `settings.rs`     | [`PostgresSettings`]: the server, the pool size, the time zone   |
+//! | `settings.rs`     | [`PostgresSettings`]: the server, the pool size, the time zone, TLS |
+//! | `tls.rs`          | TLS: encrypting connections and checking the server's certificate |
 //! | `placeholders.rs` | Turns Django's `%s` placeholders into Postgres's `$1`, `$2`...    |
 
 mod database;
@@ -64,8 +65,10 @@ mod errors;
 mod placeholders;
 mod settings;
 mod stream;
+mod tls;
 mod values;
 
 pub use database::PostgresDatabase;
 pub use placeholders::to_numbered_placeholders;
 pub use settings::PostgresSettings;
+pub use tls::{TlsMode, TlsSettings};

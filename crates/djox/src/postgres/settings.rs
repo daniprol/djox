@@ -1,6 +1,10 @@
-//! [`PostgresSettings`]: which server to talk to and how many connections to keep.
+//! [`PostgresSettings`]: which server to talk to, how many connections to
+//! keep, and how to encrypt them.
 
 use djox_core::{Error, Result};
+use tokio_postgres_rustls::MakeRustlsConnect;
+
+use super::tls::{TlsMode, TlsSettings, tls_connector};
 
 /// Which server to talk to, and how. Mirrors Django's `DATABASES[alias]`
 /// for Postgres: `HOST`, `PORT`, `NAME`, `USER` and `PASSWORD` all end up in
@@ -16,6 +20,8 @@ pub struct PostgresSettings {
     /// it on its own connections; djox's must match, because Postgres reads
     /// a date and time without a zone in it.
     pub time_zone: Option<String>,
+    /// TLS: libpq's `sslmode`, `sslrootcert`, `sslcert` and `sslkey` (see `tls.rs`).
+    pub tls: TlsSettings,
 }
 
 impl PostgresSettings {
@@ -25,16 +31,27 @@ impl PostgresSettings {
             connection: connection.into(),
             pool_size: 10,
             time_zone: None,
+            tls: TlsSettings::default(),
         }
     }
 
     /// The driver's connection settings, read from `connection`, with the time zone.
     pub fn driver_config(&self) -> Result<tokio_postgres::Config> {
         // `.parse()` reads the text into a `Config`, like `Config.from_string(...)`.
-        let mut config: tokio_postgres::Config = self
-            .connection
-            .parse()
-            .map_err(|error| Error::Settings(format!("can't read the Postgres connection settings: {error}")))?;
+        let mut config: tokio_postgres::Config = self.connection.parse().map_err(|error| {
+            // The driver's reader knows only `sslmode=disable`, `prefer` and
+            // `require`, and none of the certificate settings.
+            let mut message = format!("can't read the Postgres connection settings: {error}");
+            if self.connection.contains("ssl") {
+                message.push_str(" (give sslmode, sslrootcert, sslcert and sslkey as separate settings)");
+            }
+            Error::Settings(message)
+        })?;
+        let tls_mode = self
+            .tls
+            .mode
+            .unwrap_or(TlsMode::from_driver_mode(config.get_ssl_mode()));
+        config.ssl_mode(tls_mode.driver_mode());
         if let Some(time_zone) = &self.time_zone {
             // `-c name=value` sets a setting for the session as it starts, so
             // it costs no extra round trip (libpq's `options`).
@@ -50,6 +67,20 @@ impl PostgresSettings {
             config.application_name("djox");
         }
         Ok(config)
+    }
+
+    /// How much TLS to use: the `sslmode` setting, or else the connection
+    /// text's, or else `prefer` (libpq's default).
+    pub fn tls_mode(&self) -> Result<TlsMode> {
+        match self.tls.mode {
+            Some(mode) => Ok(mode),
+            None => Ok(TlsMode::from_driver_mode(self.driver_config()?.get_ssl_mode())),
+        }
+    }
+
+    /// What the driver opens TLS connections with (see `tls.rs`).
+    pub fn tls_connector(&self) -> Result<MakeRustlsConnect> {
+        tls_connector(&self.tls, self.tls_mode()?)
     }
 
     /// Where the database is, for `repr()`: `"localhost:5432/app"`. Never the password.
@@ -86,7 +117,9 @@ impl PostgresSettings {
         {
             return Err(Error::Settings(format!("{time_zone:?} is not a time zone name")));
         }
-        self.driver_config().map(|_| ())
+        self.driver_config()?;
+        // Reads the certificate files, so a missing one fails now.
+        self.tls_connector().map(|_| ())
     }
 }
 

@@ -26,6 +26,13 @@ tokio = { version = "1.54", features = ["rt-multi-thread", "time"] }
 # `TaskTracker`: waits for the statements already sent when the database closes.
 tokio-util = { version = "0.7", features = ["rt"] }
 bytes = "1"
+# TLS for Postgres, in pure Rust (no OpenSSL to bundle in the wheels).
+# `ring` does the cryptography; `tls12` lets older servers connect too.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# The certificate authorities the operating system trusts (`sslrootcert=system`).
+rustls-native-certs = "0.8"
+# Plugs rustls into tokio-postgres.
+tokio-postgres-rustls = "0.14"
 
 [dev-dependencies]
 tempfile = "3"

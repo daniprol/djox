@@ -4,6 +4,14 @@ All notable changes to djox. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Before 1.0, a minor version may break things; each
 break comes with a migration note.
 
+## [Unreleased]
+
+### Added
+
+- **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
+  `OPTIONS` (`sslmode` from `disable` to `verify-full`, `sslrootcert`, `sslcert`, `sslkey`), also as arguments
+  of `djox.Database.postgres()`. Built on rustls: nothing to install.
+
 ## [0.1.0] - 2026-11-02
 
 The first release.
