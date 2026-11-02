@@ -6,11 +6,12 @@ import uuid
 from typing import Any
 
 import pytest
-from django.db.models import F, Value
+from django.db.models import Exists, F, Q, Value
 
-from djox._fast_lane.lookups import condition_for, is_simple_ordering
+from djox._fast_lane.lookups import condition_for, is_simple_ordering, where_for
+from djox._fast_lane.simple_query import Where
 from tests.e2e.kinds.models import EveryKind
-from tests.e2e.library.models import Author, Book
+from tests.e2e.library.models import Author, Book, Edition
 
 
 def test_a_plain_lookup_is_understood() -> None:
@@ -78,8 +79,8 @@ def test_uuids_from_urls_are_prepared_like_uuids() -> None:
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("author__name", "Frank Herbert"),  # a join
         ("published__year", 2020),  # a transform
+        ("author__name__icontains", "frank"),  # a lookup the fast lane doesn't know, through a join
         ("title__icontains", "dune"),  # a lookup the fast lane doesn't know
         ("pages", F("price")),  # an expression
         ("pages", Value(3)),
@@ -96,8 +97,52 @@ def test_anything_else_goes_to_django(name: str, value: Any) -> None:
     assert condition_for(Book, name, value) is None
 
 
+def test_a_name_follows_foreign_keys_to_the_field_it_compares() -> None:
+    condition = condition_for(Edition, "book__author__name__in", ["Jane Austen"])
+    assert condition is not None
+    assert (condition.field, condition.lookup, condition.values) == (
+        Author._meta.get_field("name"),
+        "in",
+        ("Jane Austen",),
+    )
+    on_the_relation = condition_for(Edition, "book__author__in", [1])
+    assert on_the_relation is not None
+    assert (on_the_relation.field, on_the_relation.lookup) == (Book._meta.get_field("author"), "in")
+
+
+def test_relations_to_many_rows_go_to_django() -> None:
+    assert condition_for(Book, "editions__number", 1) is None  # a reverse foreign key
+    assert condition_for(Author, "books__title", "Dune") is None
+    assert condition_for(Author, "biography__text", "Born") is None  # a reverse one-to-one
+
+
+def test_a_filter_call_keeps_djangos_order_and_structure() -> None:
+    where = where_for(Book, (Q(pages__gt=1) | ~Q(title="Dune"),), {"in_print": True, "author": 3}, negated=True)
+    assert where is not None
+    assert (where.connector, where.negated) == ("AND", True)
+    # The `Q` first, then the keyword arguments sorted by name, like `Q(*args, **kwargs)`.
+    assert [condition.name for condition in where.conditions] == ["pages__gt", "title", "author", "in_print"]
+    either = where.children[0]
+    assert isinstance(either, Where)
+    assert (either.connector, either.negated) == ("OR", False)
+
+
+@pytest.mark.parametrize(
+    "q",
+    [
+        Q(pages__gt=1) ^ Q(title="Dune"),  # XOR
+        Q(Q()),  # an empty `Q` inside
+        Q(Exists(Book.objects.all())),  # an expression
+        Q(title__icontains="dune") | Q(pages=1),  # one condition the fast lane doesn't know
+    ],
+)
+def test_a_filter_call_with_anything_else_goes_to_django(q: Q) -> None:
+    assert where_for(Book, (q,), {}, negated=False) is None
+
+
 def test_ordering_by_columns_is_simple_and_by_anything_else_is_not() -> None:
-    assert is_simple_ordering(Book, ("-pages", "pk", "author", "author_id"))
+    assert is_simple_ordering(Book, ("-pages", "pk", "author", "author_id", "author__name", "-author__pk"))
     assert not is_simple_ordering(Book, ("?",))
-    assert not is_simple_ordering(Book, ("author__name",))
+    assert not is_simple_ordering(Book, ("editions__number",))
+    assert not is_simple_ordering(Book, ("author__name__lower",))
     assert not is_simple_ordering(Book, (F("pages").desc(),))

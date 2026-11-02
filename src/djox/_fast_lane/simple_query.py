@@ -7,13 +7,28 @@ step. For a query this simple, a note is enough:
 
 ```python
 SimpleQuery(
-    filter_calls=({"pages__gt": 500},),
-    conditions=(Condition(pages_field, "gt", (500,)),),
+    filters=(Where((Condition("pages__gt", 500, pages_field, "gt", (500,)),)),),
+    conditions=(Condition("pages__gt", 500, pages_field, "gt", (500,)),),
     order_by=("-pages",),
     low=0,
     high=20,
 )
 ```
+
+Filters keep the structure Django gives them. Each `filter()` or
+`exclude()` call is a `Where`: its conditions joined by `AND`, negated for
+`exclude()`. A `Q` object inside it is a `Where` of its own, joined by `AND`
+or `OR`, negated by `~`. So `exclude(Q(pages__gt=500) | Q(in_print=False))`
+is noted as:
+
+```
+Where(
+    negated=True, children=(Where(connector="OR", children=(Condition("pages__gt", ...), Condition("in_print", ...))),)
+)
+```
+
+The structure decides the SQL (`AND` or `OR`, `NOT`, which joins are
+`LEFT OUTER`), so it is part of the query's shape. The values are not.
 
 `djox.QuerySet` keeps such a note while it can (`_simple_query`), and builds
 Django's `Query` from it only when something asks for `queryset.query`
@@ -25,7 +40,10 @@ returns a new one, the way each `QuerySet` method returns a new `QuerySet`.
 """
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
+
+from django.db.models import Q
 
 if TYPE_CHECKING:
     from django.db.models import Field, Model, QuerySet
@@ -33,15 +51,24 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Condition:
-    """One filter the fast lane understands, like `pages__gt=500`.
+    """One filter the fast lane understands, like `pages__gt=500` or `author__name="Jane Austen"`.
 
     `values` are already prepared by the field (`field.get_prep_value()`, the
     first half of what Django's lookup does): one value, several for `in`,
     none for `isnull`.
     """
 
+    name: str
+    """The name as given, like `"pages__gt"` or `"author__name"`: it says
+    which relations Django joins, which field it compares, and how."""
+
+    value: Any
+    """The value as given (a copy, for a list or a set), to give Django the
+    same filter when it builds its `Query` from the note."""
+
     field: "Field[Any, Any]"
-    """The model field, like `Book.pages` (for `author=...`, the foreign key)."""
+    """The model field compared, like `Book.pages`, or `Author.name` for
+    `author__name` (for `author=...`, the foreign key)."""
 
     lookup: str
     """Django's lookup name: `"exact"`, `"gt"`, `"gte"`, `"lt"`, `"lte"`, `"in"` or `"isnull"`."""
@@ -50,9 +77,10 @@ class Condition:
     """The prepared values that become the statement's parameters."""
 
     detail: Any = None
-    """What, besides the field and the lookup, changes the SQL: how many values
-    an `in` has, `True` or `False` for `isnull`, and the value itself for a
-    `True` or `False` (some databases write `WHERE "in_print"` for it)."""
+    """What, besides the name and the lookup, changes the SQL: for an `in`, how
+    many values it has and whether `None` was one of them; `True` or `False`
+    for `isnull`; and the value itself for a `True` or `False` (some
+    databases write `WHERE "in_print"` for it)."""
 
     checks_integer_range: bool = False
     """Whether Django's lookup refuses integers the column can't hold (it then
@@ -61,12 +89,78 @@ class Condition:
     @property
     def shape(self) -> tuple[Any, ...]:
         """The part of the query's shape this condition adds (see `SimpleQuery.shape`)."""
-        return (self.field, self.lookup, self.detail)
+        return (self.name, self.lookup, self.detail)
 
     @property
     def matches_nothing(self) -> bool:
         """`in` with no values: nothing can match, so no SQL needs to run (like Django)."""
         return self.lookup == "in" and not self.values
+
+    def as_q_child(self) -> tuple[str, Any]:
+        """This condition as a child of Django's `Q`: `("pages__gt", 500)`."""
+        return (self.name, self.value)
+
+
+@dataclass(frozen=True)
+class Where:
+    """Conditions joined by `AND` or `OR`, maybe negated: the fast lane's `Q` object.
+
+    A `filter()` call is one (`AND`), an `exclude()` call too (`AND`, negated),
+    and so is each `Q` inside them (see the module docs).
+    """
+
+    # `"Condition | Where"`: each child is a condition or another node, like a `Q` in a `Q`.
+    children: tuple["Condition | Where", ...]
+
+    connector: str = "AND"
+    """`"AND"` or `"OR"` (Django's `Q.AND` and `Q.OR`)."""
+
+    negated: bool = False
+    """Whether the node is negated: `exclude()`, or `~Q(...)`."""
+
+    # `@cached_property` computes the value once, then keeps it on the
+    # object, like a property that remembers its answer. A note is never
+    # changed, so its shape never needs computing again.
+    @cached_property
+    def shape(self) -> tuple[Any, ...]:
+        """The part of the query's shape this node adds (see `SimpleQuery.shape`)."""
+        return (self.connector, self.negated, tuple(child.shape for child in self.children))
+
+    @property
+    def conditions(self) -> list[Condition]:
+        """Every condition in this node, in the order the SQL has them."""
+        conditions: list[Condition] = []
+        for child in self.children:
+            if isinstance(child, Condition):
+                conditions.append(child)
+            else:
+                conditions.extend(child.conditions)
+        return conditions
+
+    @property
+    def matches_nothing(self) -> bool:
+        """Whether Django knows, without asking, that nothing matches this node.
+
+        An `in` with no values matches nothing; so does an `AND` with one
+        such child, and an `OR` whose children all are. Under a `NOT`, the
+        answer is "everything", which still needs SQL (Django then leaves
+        the node out of the `WHERE`).
+        """
+        if self.negated:
+            return False
+        if self.connector == "AND":
+            return any(child.matches_nothing for child in self.children)
+        return all(child.matches_nothing for child in self.children)
+
+    def as_q_children(self) -> list[Any]:
+        """The children of the `Q` this node stands for: `Q` objects and `(name, value)` pairs."""
+        q_children: list[Any] = []
+        for child in self.children:
+            if isinstance(child, Condition):
+                q_children.append(child.as_q_child())
+            else:
+                q_children.append(Q(*child.as_q_children(), _connector=child.connector, _negated=child.negated))
+        return q_children
 
 
 @dataclass(frozen=True)
@@ -96,12 +190,12 @@ class SimpleQuery:
     An empty `SimpleQuery()` is "all the model's objects", like `Book.objects.all()`.
     """
 
-    filter_calls: tuple[dict[str, Any], ...] = ()
-    """The keyword arguments of each `filter()` call, exactly as given, to build
-    Django's `Query` from them (`replay_on()`)."""
+    filters: tuple[Where, ...] = ()
+    """One `Where` per `filter()` or `exclude()` call, in the order of the calls."""
 
     conditions: tuple[Condition, ...] = ()
-    """The same filters, understood: one `Condition` per keyword argument."""
+    """Every condition of `filters`, in the order the SQL has them (and so
+    their parameters). Kept apart so each query doesn't walk the tree again."""
 
     order_by: tuple[str, ...] | None = None
     """The names given to `order_by()`, like `("-pages", "id")`, or `None` for the
@@ -150,10 +244,11 @@ class SimpleQuery:
     @property
     def matches_nothing(self) -> bool:
         """Whether Django would know, without asking, that nothing matches:
-        an empty slice like `[5:5]`, or `in` with no values."""
+        an empty slice like `[5:5]`, or an `in` with no values that decides
+        the answer (see `Where.matches_nothing`)."""
         if self.high is not None and self.low == self.high:
             return True
-        return any(condition.matches_nothing for condition in self.conditions)
+        return any(where.matches_nothing for where in self.filters)
 
     @property
     def shape(self) -> tuple[Any, ...]:
@@ -163,9 +258,9 @@ class SimpleQuery:
         so they share one SQL statement with a different parameter. The slice
         is part of the shape because Django writes `LIMIT 20` into the SQL.
         """
-        conditions = tuple(condition.shape for condition in self.conditions)
+        filters = tuple(where.shape for where in self.filters)
         return (
-            conditions,
+            filters,
             self.order_by,
             self.reverse_ordering,
             self.low,
@@ -182,17 +277,9 @@ class SimpleQuery:
             parameters.extend(condition.values)
         return parameters
 
-    def with_filter(self, keyword_arguments: dict[str, Any], conditions: list[Condition]) -> "SimpleQuery":
-        """This query, filtered by one more `filter()` call."""
-        # A copy of each list or set (`title__in=titles`): Django reads the values
-        # when `filter()` runs, so changing `titles` afterwards changes nothing.
-        snapshot = {}
-        for name, value in keyword_arguments.items():
-            snapshot[name] = type(value)(value) if type(value) in (list, set) else value
-        return self.changed(
-            filter_calls=(*self.filter_calls, snapshot),
-            conditions=(*self.conditions, *conditions),
-        )
+    def with_filter(self, where: Where) -> "SimpleQuery":
+        """This query, filtered by one more `filter()` or `exclude()` call."""
+        return self.changed(filters=(*self.filters, where), conditions=(*self.conditions, *where.conditions))
 
     def with_order_by(self, names: tuple[str, ...]) -> "SimpleQuery":
         """This query, ordered by `names` instead (like `order_by()`, which replaces any ordering)."""
@@ -239,8 +326,11 @@ class SimpleQuery:
         `queryset`'s query must still be the empty query its `QuerySet` started
         with. Each step does what the matching `QuerySet` method does to its query.
         """
-        for keyword_arguments in self.filter_calls:
-            queryset._filter_or_exclude_inplace(False, (), keyword_arguments)  # type: ignore[attr-defined]  # Django's
+        for where in self.filters:
+            # What `filter(*args, **kwargs)` does, with the same `Q` children
+            # (`Q(*args, **kwargs)` puts the keyword arguments after the others, sorted).
+            arguments = where.as_q_children()
+            queryset._filter_or_exclude_inplace(where.negated, arguments, {})  # type: ignore[attr-defined]  # Django's
         query = queryset._query  # type: ignore[attr-defined]  # Django's, not in django-stubs
         if self.order_by is not None:
             query.clear_ordering(force=True, clear_default=False)
