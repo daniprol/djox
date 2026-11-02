@@ -1,0 +1,115 @@
+/* djox's look: the colors of the logo (Django's greens, an orange for speed).
+   zensical.toml picks `primary = "custom"` and `accent = "custom"`; this file sets them. */
+
+:root {
+  --djox-green-darkest: #092e20;  /* the logo's background, Django's own green */
+  --djox-green-dark: #0c4b33;
+  --djox-green: #0e7a52;
+  --djox-green-light: #44b78b;    /* the logo's database */
+  --djox-orange: #f76b15;         /* the logo's speed lines */
+  --djox-orange-dark: #c2500c;
+}
+
+/* Light mode */
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--djox-green-darkest);
+  --md-primary-fg-color--light: var(--djox-green-dark);
+  --md-primary-fg-color--dark: #051a12;
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+  --md-typeset-a-color: var(--djox-green);
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--djox-orange-dark);
+  --md-accent-fg-color--transparent: rgba(247, 107, 21, 0.1);
+  --md-accent-bg-color: #ffffff;
+}
+
+/* Dark mode: a green-tinted night instead of the default blue-grey */
+[data-md-color-scheme="slate"] {
+  --md-hue: 155;
+  --md-typeset-a-color: var(--djox-green-light);
+  --md-accent-fg-color: var(--djox-orange);
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #0a2219;
+}
+
+/* The header: Django green, with an orange line under it, like the logo's speed lines */
+.md-header {
+  border-bottom: 3px solid var(--djox-orange);
+}
+
+/* Headings: a little tighter and bolder than the body text */
+.md-typeset h1,
+.md-typeset h2 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h1 {
+  color: var(--djox-green-darkest);
+}
+
+[data-md-color-scheme="slate"] .md-typeset h1 {
+  color: #ffffff;
+}
+
+/* Inline code in text: a soft green tint */
+.md-typeset :not(pre) > code {
+  background-color: rgba(68, 183, 139, 0.12);
+}
+
+/* Tables: a green rule under the head row */
+.md-typeset table:not([class]) th {
+  border-bottom: 2px solid var(--djox-green-light);
+}
+
+/* The home page's first screen */
+.djox-hero {
+  text-align: center;
+  padding: 1rem 0 0.5rem;
+}
+
+.djox-hero img {
+  height: 4.5rem;
+}
+
+.djox-hero .djox-tagline {
+  font-size: 1.25em;
+  font-weight: 600;
+  margin: 0.8em 0 0.2em;
+}
+
+.djox-hero .djox-subtitle {
+  color: var(--md-default-fg-color--light);
+  margin-top: 0;
+}
+
+.djox-hero .md-button {
+  margin: 0.3em;
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--djox-green-dark);
+  border-color: var(--djox-green-dark);
+}
+
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button:hover {
+  background-color: var(--djox-orange-dark);
+  border-color: var(--djox-orange-dark);
+  color: #ffffff;
+}
+
+/* The home page's title: read by search and screen readers, hidden behind the hero */
+.md-typeset h1.djox-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}

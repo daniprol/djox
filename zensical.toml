@@ -9,18 +9,41 @@ site_url = "https://daniprol.github.io/djox/"
 repo_url = "https://github.com/daniprol/djox"
 repo_name = "daniprol/djox"
 edit_uri = "edit/main/docs/"
+extra_css = ["stylesheets/djox.css"]
 nav = [
   { "Get started" = "index.md" },
-  { "Use with Django" = "django.md" },
-  { "How it works" = "how-it-works.md" },
-  { "Benchmarks" = "benchmarks.md" },
-  { "Roadmap" = "roadmap.md" },
+  { "Guide" = [
+    { "Async queries" = "queries.md" },
+    { "Choose the models" = "models.md" },
+    { "The fast lane" = "fast-lane.md" },
+    { "Related objects" = "related-objects.md" },
+    { "Streaming" = "streaming.md" },
+    { "Transactions" = "transactions.md" },
+    { "Hooks" = "hooks.md" },
+    { "Testing" = "testing.md" },
+  ] },
+  { "Databases" = [
+    { "SQLite" = "sqlite.md" },
+    { "Postgres" = "postgres.md" },
+    { "Raw SQL" = "raw-sql.md" },
+  ] },
+  { "Under the hood" = [
+    { "How it works" = "how-it-works.md" },
+    { "Benchmarks" = "benchmarks.md" },
+  ] },
+  { "Project" = [
+    { "Roadmap" = "roadmap.md" },
+    { "Changelog" = "changelog.md" },
+  ] },
 ]
 
 [project.theme]
 language = "en"  # also the language of the built-in search
 logo = "assets/logo.svg"
 favicon = "assets/logo.svg"
+# djox's own look (the colors of the logo): docs/stylesheets/djox.css sets the "custom" colors.
+font.text = "IBM Plex Sans"
+font.code = "IBM Plex Mono"
 features = [
   "content.action.edit",    # "edit this page" button
   "content.code.annotate",
@@ -29,6 +52,7 @@ features = [
   "navigation.footer",      # previous/next links
   "navigation.instant",
   "navigation.instant.prefetch",
+  "navigation.sections",    # Guide, Databases... as groups in the sidebar
   "navigation.top",
   "navigation.tracking",
   "search.highlight",       # highlight the search terms on the page you open
@@ -38,12 +62,16 @@ features = [
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
 scheme = "default"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to dark mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: dark)"
 scheme = "slate"
+primary = "custom"
+accent = "custom"
 toggle.icon = "lucide/sun"
 toggle.name = "Switch to light mode"
 

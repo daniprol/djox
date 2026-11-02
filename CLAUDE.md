@@ -254,4 +254,15 @@ like an example of how to use djox.
   `scripts/cargo-test.sh --workspace` runs the Rust tests.
 - Docs: `uv run --only-group docs zensical serve`. Update them with every
   user-facing change.
+- Docs pages are short and progressive: bullets over prose, one topic per
+  page, the most common case first. Add a new page to `nav` in
+  `zensical.toml`; the README links to the published site
+  (`https://daniprol.github.io/djox/`), so it also works on PyPI.
 - The version lives in one place: `[workspace.package]` in `Cargo.toml`.
+  Note each release's changes in `CHANGELOG.md`.
+- Releases (`.github/workflows/release.yml`): every push to main publishes a
+  development build to TestPyPI (`0.1.0.dev42`, stamped by
+  `scripts/stamp-dev-version.py`). To publish to PyPI, bump the version with
+  `cargo set-version --bump patch` (or `minor`, `alpha`...; from
+  `cargo install cargo-edit`), merge to main, then push the tag in Python form
+  (`git tag v0.1.1 && git push origin v0.1.1`).
