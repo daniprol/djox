@@ -21,7 +21,7 @@ from django.test.utils import CaptureQueriesContext
 import djox
 from djox._fast_lane import inserts
 from djox._fast_lane.inserts import InsertStatement
-from tests.e2e.kinds.models import Shout, Ticket
+from tests.e2e.kinds.models import Shout, Tag, Ticket
 from tests.e2e.library.models import Author, Book
 from tests.e2e.test_fast_lane import PUBLISHED, djangos, fields_of
 
@@ -147,6 +147,21 @@ def test_values_django_fills_are_filled() -> None:
             ticket.day,
             1,
         )
+
+
+def test_an_insert_without_returning() -> None:
+    for name in ("red", "blue"):
+        Tag.objects.create(name=name, color=name)
+    assert [statement.fields[0].model for statement in kept_statements()] == [Tag]
+    assert "RETURNING" not in kept_statements()[0].sql
+    assert list(Tag.objects.order_by("name").values_list("name", flat=True)) == ["blue", "red"]
+
+
+async def test_an_async_insert_without_returning() -> None:
+    for name in ("red", "blue"):
+        await Tag.objects.acreate(name=name, color=name)
+    assert [statement.fields[0].model for statement in kept_statements()] == [Tag]
+    assert [name async for name in Tag.objects.order_by("name").values_list("name", flat=True)] == ["blue", "red"]
 
 
 def test_a_value_from_the_database_is_djangos_way() -> None:

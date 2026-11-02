@@ -2,8 +2,8 @@
 kind, and models whose saving is unusual.
 
 `EveryKind` checks that async queries give back exactly the values Django's
-sync queries do, on every database (`tests/e2e/test_values.py`). `Ticket`
-and `Shout` check saving new objects (`tests/e2e/test_fast_lane_inserts.py`).
+sync queries do, on every database (`tests/e2e/test_values.py`). `Ticket`,
+`Tag` and `Shout` check saving new objects (`tests/e2e/test_fast_lane_inserts.py`).
 The app has no migrations: Django makes its tables from the models.
 """
 
@@ -48,6 +48,16 @@ class Ticket(models.Model):
     changed = models.DateTimeField(auto_now=True)
     day = models.DateField(auto_now_add=True)
     priority = models.IntegerField(db_default=3)
+
+    objects = djox.Manager()
+
+
+class Tag(models.Model):
+    """A primary key given by the caller, and nothing for the database to
+    fill: Django's `INSERT` has no `RETURNING`, so there are no rows to read."""
+
+    name = models.CharField(max_length=50, primary_key=True)
+    color = models.CharField(max_length=20)
 
     objects = djox.Manager()
 
