@@ -113,8 +113,12 @@ async def insert(obj: models.Model, model: type[models.Model], alias: str) -> No
     with _running.mark_for_rollback_on_error(alias):
         prepared = inserts.prepare(obj, model, alias)
         if prepared is not None:
-            rows = await _running.fetch_all(alias, prepared.statement.sql, prepared.parameters, writes=True)
-            prepared.assign_returned_values(obj, rows)
+            if prepared.statement.returning_fields:
+                rows = await _running.fetch_all(alias, prepared.statement.sql, prepared.parameters, writes=True)
+                prepared.assign_returned_values(obj, rows)
+            else:
+                # Nothing to read back (the object has its primary key): an `INSERT` without `RETURNING`.
+                await _running.execute(alias, prepared.statement.sql, prepared.parameters)
             return
         insert_compiler = djangos_insert(obj, model, alias)
         returning_fields = insert_compiler.returning_fields
@@ -145,8 +149,12 @@ def insert_now(obj: models.Model, model: type[models.Model], alias: str) -> None
     with transaction.mark_for_rollback_on_error(using=alias):
         prepared = inserts.prepare(obj, model, alias)
         if prepared is not None:
-            rows = _running.fetch_all_now(alias, prepared.statement.sql, prepared.parameters)
-            prepared.assign_returned_values(obj, rows)
+            if prepared.statement.returning_fields:
+                rows = _running.fetch_all_now(alias, prepared.statement.sql, prepared.parameters)
+                prepared.assign_returned_values(obj, rows)
+            else:
+                # No `RETURNING`, so no rows: psycopg refuses to fetch them.
+                _running.execute_now(alias, prepared.statement.sql, prepared.parameters)
             return
         insert_compiler = djangos_insert(obj, model, alias)
         returning_fields = insert_compiler.returning_fields
