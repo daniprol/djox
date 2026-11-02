@@ -35,11 +35,11 @@ A small shop app ([`web/app.py`](https://github.com/daniprol/djox/blob/main/benc
   - update a book (`PATCH`), create a book (`POST`)
 - **Stacks**: the same code. djox only changes settings: its `ENGINE`, and `"djox"` in `INSTALLED_APPS`.
 - **Server**: [granian](https://github.com/emmett-framework/granian), one worker process, one thread. WSGI for sync
-  views and DRF, ASGI for async views. No middleware.
+  views and DRF, ASGI for async views: Django's handler on Django, djox's (`djox.asgi`) on djox. No middleware.
 - **Connections**: kept between requests under WSGI. Under ASGI, `CONN_MAX_AGE = 0`, as Django's docs advise. On
   Postgres, Django's own connection pool (`"pool": True`).
 - **Load**: [oha](https://github.com/hatoo/oha), 32 connections, 2 s warm-up, then 5 s per endpoint. Stacks take
-  turns, round after round (3 on SQLite, 5 on Postgres: `--rounds 5`); each number is the median. No request
+  turns, round after round (3 by default, `--rounds 5` for more); each number is the median. No request
   failed.
 
 Requests per second, higher is better. In brackets: djox against Django.
@@ -48,33 +48,32 @@ SQLite:
 
 | | Sync views, Django | Sync views, djox | Async views, Django | Async views, djox | DRF, Django | DRF, djox |
 |---|---:|---:|---:|---:|---:|---:|
-| get one book | 1,629 | 2,451 (1.5x) | 168 | 416 (2.5x) | 809 | 1,026 (1.3x) |
-| list a page, with authors | 688 | 698 (1.0x) | 76 | 235 (3.1x) | 415 | 400 (1.0x) |
-| update a book | 1,924 | 2,515 (1.3x) | 173 | 401 (2.3x) | 502 | 565 (1.1x) |
-| create a book | 1,654 | 1,545 (0.9x) | 171 | 332 (1.9x) | 556 | 646 (1.2x) |
+| get one book | 1,875 | 3,438 (1.8x) | 200 | 1,733 (8.7x) | 809 | 1,026 (1.3x) |
+| list a page, with authors | 769 | 1,665 (2.2x) | 88 | 1,161 (13.3x) | 415 | 400 (1.0x) |
+| update a book | 2,402 | 3,262 (1.4x) | 217 | 997 (4.6x) | 502 | 565 (1.1x) |
+| create a book | 2,049 | 2,241 (1.1x) | 216 | 861 (4.0x) | 556 | 646 (1.2x) |
 
 Postgres:
 
 | | Sync views, Django | Sync views, djox | Async views, Django | Async views, djox | DRF, Django | DRF, djox |
 |---|---:|---:|---:|---:|---:|---:|
-| get one book | 719 | 900 (1.3x) | 223 | 395 (1.8x) | 438 | 521 (1.2x) |
-| list a page, with authors | 131 | 134 (1.0x) | 135 | 201 (1.5x) | 166 | 208 (1.3x) |
-| update a book | 457 | 493 (1.1x) | 225 | 360 (1.6x) | 227 | 248 (1.1x) |
-| create a book | 400 | 376 (0.9x) | 228 | 309 (1.4x) | 252 | 263 (1.0x) |
+| get one book | 883 | 1,147 (1.3x) | 305 | 1,157 (3.8x) | 438 | 521 (1.2x) |
+| list a page, with authors | 157 | 341 (2.2x) | 185 | 596 (3.2x) | 166 | 208 (1.3x) |
+| update a book | 659 | 700 (1.1x) | 341 | 1,018 (3.0x) | 227 | 248 (1.1x) |
+| create a book | 574 | 558 (1.0x) | 315 | 929 (2.9x) | 252 | 263 (1.0x) |
 
-- **Async views: 1.4 to 3.1 times the requests.** Django runs every async query on its one worker thread;
-  djox runs them on its own connections.
-- **Sync views: up to 1.5 times**, on simple reads and updates (the fast lane). `create()` runs Django's own
-  code. The views were measured before `select_related()` joined the fast lane (#12), so the page row is
-  Django's code too.
+- **Async views: 2.9 to 13.3 times the requests.** Django runs every async query on its one worker thread, and
+  its ASGI handler hops to threads for each request's signals. djox runs the queries on its own connections
+  (small SQLite reads right on the event loop's thread), and its handler sends the signals on the loop.
+- **The gap between async and sync views mostly closes.** On Postgres, djox's async views serve more requests
+  than its sync views. On SQLite they serve a third to two thirds as many; Django's serve about a tenth.
+- **Sync views: 1.1 to 2.2 times**, from the fast lane: reads, updates, `select_related()` pages, and `create()`.
 - **DRF: up to 1.3 times.** DRF's router passes the id from the URL as text (`pk="5"`), which the fast lane
   takes since [#15](https://github.com/daniprol/djox/pull/15). DRF spends most of each request in its own code
-  (serializers, permissions, rendering), so it gains less than plain views. The DRF columns come from their own
+  (serializers, permissions, rendering), so it gains less than plain views. The DRF columns come from an earlier
   run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
-- **Async views are slower than sync views on both stacks.** Django's ASGI handler hops to a thread for its
-  request signals: an empty async view serves about 540 requests per second on this VM.
-- **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores), so it gets
-  5 rounds. Differences under about 10% are noise.
+- **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores). Differences
+  under about 10% are noise.
 
 ## ORM calls on SQLite
 
@@ -83,21 +82,21 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
-| get one book by id | 216 | 186 | 61 | 4 | 507 | 371 | 132 | 63 |
-| fetch 20 books | 543 | 460 | 120 | 26 | 957 | 753 | 216 | 99 |
-| fetch 1,000 books | 7,515 | 7,662 | 2,469 | 622 | 9,864 | 8,920 | 3,055 | 693 |
-| count | 283 | 278 | 95 | 67 | 584 | 420 | 177 | 127 |
-| update one book | 138 | 110 | 54 | 9 | 304 | 261 | 157 | 73 |
-| insert one book | 159 | 149 | 167 | 45 | 331 | 346 | 365 | 104 |
-| two inserts in a transaction | 325 | 318 | 305 | 51 | 535 | 1,091 | 1,247 | n/a |
-| get or create (exists) | 194 | 195 | 61 | n/a | 482 | 341 | 147 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 481 | 871 | 926 | n/a |
-| 20 chapters with their book | 694 | 802 | 176 | n/a | 1,195 | 1,006 | 293 | n/a |
-| 1,000 chapters with their book | 13,441 | 13,830 | 4,901 | n/a | 15,413 | 14,336 | 5,661 | n/a |
-| 20 books with their chapters | 1,884 | 1,812 | 1,303 | n/a | 2,368 | 2,340 | 1,723 | n/a |
-| 100 gets at once | n/a | n/a | n/a | n/a | 426 | 331 | 142 | 58 |
-| 100 get or create at once | n/a | n/a | n/a | n/a | 407 | 268 | 118 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | n/a | 460 | 779 | 773 | n/a |
+| get one book by id | 218 | 214 | 64 | 4 | 517 | 245 | 51 | 6 |
+| fetch 20 books | 474 | 522 | 124 | 24 | 963 | 592 | 141 | 27 |
+| fetch 1,000 books | 8,355 | 7,760 | 2,753 | 588 | 9,834 | 10,881 | 2,989 | 810 |
+| count | 290 | 263 | 93 | 61 | 568 | 306 | 89 | 58 |
+| update one book | 119 | 130 | 58 | 10 | 378 | 323 | 193 | 115 |
+| insert one book | 183 | 195 | 145 | 47 | 441 | 401 | 268 | 136 |
+| two inserts in a transaction | 319 | 346 | 332 | 60 | 645 | 1,485 | 1,280 | n/a |
+| get or create (exists) | 202 | 218 | 61 | n/a | 578 | 253 | 58 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 624 | 1,060 | 863 | n/a |
+| 20 chapters with their book | 744 | 744 | 219 | n/a | 1,245 | 924 | 206 | n/a |
+| 1,000 chapters with their book | 15,373 | 15,678 | 5,423 | n/a | 17,241 | 13,811 | 7,469 | n/a |
+| 20 books with their chapters | 2,004 | 1,883 | 1,546 | n/a | 2,414 | 2,390 | 1,872 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 445 | 254 | 60 | 6 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 503 | 232 | 63 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 595 | 898 | 916 | n/a |
 
 | Contender | What runs |
 |---|---|
@@ -107,16 +106,20 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 | djox safe lane | `djox.Manager()` with `DJOX_FAST_LANE = False`: Django builds everything, djox runs the SQL |
 | sqlite3 / djox | Hand-written SQL on Python's `sqlite3` / on `djox.Database`. The floors |
 
-- **The fast lane makes sync code 3 times faster**: `get()` 61 µs against 216, `count()` 95 against 283.
-- **Async `aget()` is 4 times faster** than Django's (132 µs against 507), and 1,000 books 3 times.
-- **`select_related()` takes the fast lane too**: 20 chapters with their book take 176 µs sync against 694, and
-  293 µs async against 1,195. Django writes the join once; Rust builds both objects of each row.
-- **`prefetch_related()` gains less** (1.7 ms against 2.4 ms async): the prefetching query still runs Django's code.
+- **The fast lane makes sync code 3 times faster**: `get()` 64 µs against 218, `count()` 93 against 290.
+- **Async `aget()` is 10 times faster** than Django's (51 µs against 517), and 1,000 books 3 times. A small read
+  runs right on the calling thread ([quick reads](https://daniprol.github.io/djox/sqlite/)), within 50 µs of
+  hand-written SQL.
+- **`select_related()` takes the fast lane too**: 20 chapters with their book take 219 µs sync against 744, and
+  206 µs async against 1,245. Django writes the join once; Rust builds both objects of each row.
+- **`create()` takes the fast lane**: `acreate()` 268 µs against 441, `create()` 145 against 183. Django writes the
+  model's `INSERT` once.
+- **`prefetch_related()` gains less** (1.9 ms against 2.4 ms async): the prefetching query still runs Django's code.
 - **djox's `ENGINE` alone costs about nothing**: "djox sync" is within noise of Django.
-- **Inserts and `atomic()` blocks run Django's own code**, so the fast lane doesn't change them.
 - **A short `djox.atomic()` block is slower** than one `sync_to_async()` around a sync `atomic()`: it pays a
   thread round trip per statement. What it buys is async code inside the transaction.
-- **A round trip to djox's threads costs 60 to 90 µs** on this VM ("djox" column), against 4 µs for SQLite itself.
+- **Writes, and reads too slow to run inline, take a round trip to djox's threads**: 60 to 90 µs on this VM
+  (update one book: 115 µs in the "djox" column, against 10 µs for SQLite itself).
 
 <details>
 <summary>What made the round trip faster (120 µs to 66 µs)</summary>
