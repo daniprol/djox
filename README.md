@@ -61,9 +61,11 @@ The same Django app on stock Django and on djox: one worker process, SQLite, req
 
 ```bash
 uv add djox  # or: pip install djox
+uv add "djox[postgres]"  # on Postgres: adds psycopg 3 for Django's sync code
 ```
 
 Python 3.11+, Django 5.2 to 6.1. Wheels for Linux, macOS and Windows, so no Rust needed.
+On Postgres, async connections don't support TLS yet, so servers that require it (most hosted ones) won't work.
 
 Change two settings:
 

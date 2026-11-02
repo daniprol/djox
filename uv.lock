@@ -177,6 +177,11 @@ name = "djox"
 version = "0.1.0"
 source = { editable = "." }
 
+[package.optional-dependencies]
+postgres = [
+    { name = "psycopg", extra = ["binary"] },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "django", version = "5.2.18", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -197,6 +202,8 @@ docs = [
 ]
 
 [package.metadata]
+requires-dist = [{ name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1.8" }]
+provides-extras = ["postgres"]
 
 [package.metadata.requires-dev]
 dev = [

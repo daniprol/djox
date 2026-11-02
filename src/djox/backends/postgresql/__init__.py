@@ -18,13 +18,15 @@ runner) runs on psycopg, exactly as with Django's own Postgres backend.
 djox's async code (`djox.Manager`, `djox.connections[alias]`) runs on a pool
 of connections that Rust owns (`Database.postgres()`). Both are clients of
 the same server, which is safe: unlike SQLite, Postgres is a server built
-for many clients. So psycopg must be installed, as for Django's backend.
+for many clients. So psycopg 3 must be installed (`djox[postgres]`), as for
+Django's backend; psycopg2 isn't supported (see `driver.py`).
 
 djox subclasses Django's classes and changes only what djox needs:
 
 | File            | What it does                                                    |
 |-----------------|-----------------------------------------------------------------|
 | `base.py`       | `DatabaseWrapper`: hooks, noting transactions, opening the async database |
+| `driver.py`     | Checks that psycopg 3 is installed                                |
 | `errors.py`     | Turns djox's exceptions into Django's, next to psycopg's          |
 | `options.py`    | Reads djox's options and the connection settings the async database uses |
 | `time_zones.py` | Moves async rows' dates and times into the connection's time zone |
@@ -32,3 +34,9 @@ djox subclasses Django's classes and changes only what djox needs:
 | `operations.py` | Points Django at djox's compilers                                 |
 | `compiler.py`   | Django's compilers, able to hand a statement to async code        |
 """
+
+from djox.backends.postgresql.driver import require_psycopg_3
+
+# Python runs this file before `base.py`, so the check comes before Django's
+# backend, which would quietly fall back to psycopg2.
+require_psycopg_3()
