@@ -101,6 +101,7 @@ SIMPLE_QUERYSETS: dict[str, MakeQuerySet] = {
     "reverse": lambda: Book.objects.order_by("pages").reverse(),
     "foreign key by name": lambda: Book.objects.filter(author_id__in=[1, 2]).order_by("-id"),
     "ordered by a foreign key": lambda: Book.objects.order_by("author", "title"),
+    "numbers as text, like from a URL": lambda: Book.objects.filter(pages__in=["412", "474"]).order_by("pk"),
 }
 
 
@@ -211,7 +212,6 @@ DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
     "a join": lambda: Book.objects.filter(author__name="Jane Austen"),
     "icontains": lambda: Book.objects.filter(title__icontains="dune"),
     "select_related, then only": lambda: Book.objects.select_related("author").only("title", "author__name"),
-    "a string for an integer": lambda: Book.objects.filter(pages="412"),
     "only": lambda: Book.objects.only("title"),
 }
 
@@ -223,6 +223,16 @@ async def test_other_querysets_go_to_django(make_queryset: MakeQuerySet) -> None
     books = [book async for book in make_queryset().order_by("pk")]
     assert [book.pk for book in books] == [book.pk for book in expected]
     assert fast_statements() == []
+
+
+@pytest.mark.usefixtures("library")
+async def test_an_id_as_text_shares_the_shape_of_an_id_as_a_number() -> None:
+    # Django REST framework's views look objects up with the URL's text: `/books/7/` gives `pk="7"`.
+    dune = await Book.objects.aget(title="Dune")
+    by_number = await Book.objects.aget(pk=dune.pk)
+    by_text = await Book.objects.aget(pk=str(dune.pk))
+    assert fields_of(by_text) == fields_of(by_number)
+    assert len(fast_statements()) == 2, "one statement by title, and one by primary key for both"
 
 
 def test_errors_are_raised_where_django_raises_them() -> None:
