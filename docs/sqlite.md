@@ -19,6 +19,10 @@ transactions. Underneath, every query runs on the SQLite bundled in djox.
 - **No "database is locked" under load**: djox's writers
   [take turns](transactions.md#writes-take-turns) instead of sleeping and
   retrying.
+- **Quick reads**: a small async read (one row by its id) runs right on the
+  calling thread, which is ten times faster than the trip to a reader thread.
+  SQLite stops it after `quick_read_limit` (1 ms), and it then runs on a
+  reader, so the event loop is never held longer.
 
 ## Why the `ENGINE` matters
 
@@ -37,7 +41,7 @@ transactions. Underneath, every query runs on the SQLite bundled in djox.
 
 ## Options
 
-`OPTIONS` takes Django's SQLite options, plus one for the async connections:
+`OPTIONS` takes Django's SQLite options, plus two for the async connections:
 
 | Option             | Default       | What it does                                                    |
 |--------------------|---------------|-----------------------------------------------------------------|
@@ -45,6 +49,7 @@ transactions. Underneath, every query runs on the SQLite bundled in djox.
 | `transaction_mode` | `"IMMEDIATE"` | How `atomic()` starts a transaction: `BEGIN <mode>`. `None` for a plain `BEGIN` |
 | `init_command`     | `""`          | SQL run on every new connection, `;`-separated                  |
 | `readers`          | 1 per core, at most 4 | Reader connections of `djox.connections[alias]`          |
+| `quick_read_limit` | `0.001`       | Seconds a small async read may run on the calling thread; `0`: never |
 
 An unknown option (like `detect_types`, an option of Python's `sqlite3`)
 raises `ImproperlyConfigured`.

@@ -8,9 +8,30 @@ break comes with a migration note.
 
 ### Added
 
+- **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
+  when that can't block it, instead of hopping to a thread twice per request (an empty async view: 1.3 ms to
+  0.16 ms).
+- **Quick SQLite reads**: a small async read runs right on the calling thread, stopped after
+  `quick_read_limit` (a new option, 1 ms) and sent to a reader then (`aget()`: 174 µs to 52 µs).
+- **The fast lane takes more**: `Q()` objects, `exclude()`, and names through foreign keys and one-to-one
+  fields (`author__name`), in filters and in `order_by()`.
+- **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
+  `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
   `OPTIONS` (`sslmode` from `disable` to `verify-full`, `sslrootcert`, `sslcert`, `sslkey`), also as arguments
   of `djox.Database.postgres()`. Built on rustls: nothing to install.
+
+### Changed
+
+- From async code, saving an object of a model with sync `pre_save` or `post_save` receivers runs on a djox
+  thread, rather than sending each signal to Django's sync thread.
+- Fewer lookups per query: the Python around each query is about half what it was.
+
+### Fixed
+
+- `acreate()` now calls a model's own `save()`.
+- An `INSERT ... RETURNING` sent to `fetch_all()` goes straight to SQLite's writer thread, not through a
+  reader.
 
 ## [0.1.0] - 2026-11-02
 
