@@ -52,6 +52,16 @@ where
     future_answered_by(py, to_python, AnsweringThread::ShortLived)
 }
 
+/// A Future on the running event loop that already has its result, for an
+/// answer found right away (a quick read). Awaiting it returns at once,
+/// without giving the event loop a turn.
+pub fn finished_future<'py>(py: Python<'py>, value: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let get_running_loop = GET_RUNNING_LOOP.import(py, "asyncio", "get_running_loop")?;
+    let future = get_running_loop.call0()?.call_method0("create_future")?;
+    future.call_method1("set_result", (value,))?;
+    Ok(future)
+}
+
 /// Which kind of thread finishes a Future.
 #[derive(Clone, Copy)] // `Copy`: a plain value, copied like an `int` in Python.
 enum AnsweringThread {

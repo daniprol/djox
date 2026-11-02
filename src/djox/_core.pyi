@@ -70,6 +70,7 @@ class Database:
         *,
         readers: int | None = None,
         timeout: float = 5.0,
+        quick_read_limit: float = 0.001,
         prepare: Callable[[Connection], object] | None = None,
     ) -> Database:
         """Open a SQLite database file (created if missing) and put it in WAL mode.
@@ -79,6 +80,11 @@ class Database:
         at most 4; 0 means the writer runs everything). `timeout` is how many
         seconds to wait for a lock held by another connection. In-memory
         databases raise `ValueError`: their connections can't share data.
+
+        A small read runs right away on the calling thread (a *quick read*):
+        for a small query, the trip to a reader thread takes longer than the
+        query. `quick_read_limit` is the most seconds it may run there before
+        it goes to a reader instead; 0 turns quick reads off.
 
         `prepare`, if given, is called with each new connection before it
         starts working, to register SQL functions or run `PRAGMA`s. The

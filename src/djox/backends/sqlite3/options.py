@@ -6,6 +6,7 @@
 | `transaction_mode` | `"IMMEDIATE"` | How `atomic()` starts a transaction: `BEGIN <mode>`        |
 | `init_command`     | `""`          | SQL run on every new connection, `;`-separated             |
 | `readers`          | 1 per core, at most 4 | Reader connections of the async database (`djox.connections`) |
+| `quick_read_limit` | `0.001`       | Seconds a small async read may run on the calling thread; `0`: never |
 
 The first three are Django's own SQLite options. Two things differ:
 
@@ -25,7 +26,7 @@ from dataclasses import dataclass
 from django.core.exceptions import ImproperlyConfigured
 
 TRANSACTION_MODES = ("DEFERRED", "EXCLUSIVE", "IMMEDIATE")
-KNOWN_OPTIONS = ("timeout", "transaction_mode", "init_command", "readers")
+KNOWN_OPTIONS = ("timeout", "transaction_mode", "init_command", "readers", "quick_read_limit")
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,7 @@ class SqliteOptions:
     transaction_mode: str | None = "IMMEDIATE"
     init_commands: tuple[str, ...] = ()
     readers: int | None = None
+    quick_read_limit: float = 0.001
 
 
 def read_options(alias: str, options: Mapping[str, object]) -> SqliteOptions:
@@ -47,20 +49,21 @@ def read_options(alias: str, options: Mapping[str, object]) -> SqliteOptions:
             f"The options are: {', '.join(KNOWN_OPTIONS)}."
         )
     return SqliteOptions(
-        timeout=read_timeout(alias, options.get("timeout", 5.0)),
+        timeout=read_seconds(alias, "timeout", options.get("timeout", 5.0)),
         transaction_mode=read_transaction_mode(alias, options.get("transaction_mode", "IMMEDIATE")),
         init_commands=read_init_commands(alias, options.get("init_command", "")),
         readers=read_readers(alias, options.get("readers")),
+        quick_read_limit=read_seconds(alias, "quick_read_limit", options.get("quick_read_limit", 0.001)),
     )
 
 
-def read_timeout(alias: str, timeout: object) -> float:
+def read_seconds(alias: str, name: str, seconds: object) -> float:
     # `bool` is a subclass of `int` in Python, so `True` is refused explicitly.
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout < 0:
+    if isinstance(seconds, bool) or not isinstance(seconds, int | float) or seconds < 0:
         raise ImproperlyConfigured(
-            f"settings.DATABASES[{alias!r}]['OPTIONS']['timeout'] must be a number of seconds, 0 or more."
+            f"settings.DATABASES[{alias!r}]['OPTIONS'][{name!r}] must be a number of seconds, 0 or more."
         )
-    return float(timeout)
+    return float(seconds)
 
 
 def read_transaction_mode(alias: str, transaction_mode: object) -> str | None:

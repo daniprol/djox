@@ -7,6 +7,8 @@
 //! `djox.Connection` (used by Django's sync ORM) calls these methods on the
 //! caller's thread, after letting other Python threads run.
 
+use std::time::{Duration, Instant};
+
 use chrono::Timelike; // `.nanosecond()` on times and datetimes
 use djox_core::{ChunkRequests, Error, Executed, Result, Rows, Value};
 use rusqlite::limits::Limit;
@@ -15,6 +17,11 @@ use rusqlite::{ErrorCode, OpenFlags, TransactionBehavior, params_from_iter};
 
 use super::placeholders::to_question_marks;
 use super::settings::{SqliteSettings, is_in_memory};
+
+/// How often SQLite asks [`SqliteConnection::query_within`] whether time is
+/// up: every this many steps of its virtual machine (a few to a few dozen
+/// microseconds), so checking the clock costs next to nothing.
+const STEPS_BETWEEN_CLOCK_CHECKS: i32 = 1000;
 
 /// What a connection is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +260,38 @@ impl SqliteConnection {
     /// Runs a statement written with Django's `%s` placeholders and returns all its rows.
     pub fn query(&mut self, sql: &str, parameters: &[Value]) -> Result<Rows> {
         self.rows_of(&to_question_marks(sql), parameters)
+    }
+
+    /// Runs a query that reads, written with Django's `%s` placeholders, if
+    /// SQLite can answer it within `time_limit` without waiting for a lock.
+    /// `None` means it didn't: the statement writes, it would have taken
+    /// longer (SQLite stopped it), or it failed. Then nothing was changed, and
+    /// the caller runs it again the usual way, which also reports any error.
+    pub fn query_within(&mut self, sql: &str, parameters: &[Value], time_limit: Duration) -> Option<Rows> {
+        if self.statement_writes(sql) != Ok(false) {
+            return None;
+        }
+        let deadline = Instant::now() + time_limit;
+        // SQLite calls this function every `STEPS_BETWEEN_CLOCK_CHECKS` steps of
+        // the statement; answering `true` stops the statement. `move` gives the
+        // function its own copy of `deadline`.
+        let stop_after_deadline = move || Instant::now() >= deadline;
+        self.connection
+            .progress_handler(STEPS_BETWEEN_CLOCK_CHECKS, Some(stop_after_deadline))
+            .ok()?;
+        // `.ok()` turns an error into `None`: "it failed, run it the usual way".
+        let rows = self.query(sql, parameters).ok();
+        // `None::<fn() -> bool>`: no function any more (Rust needs to be told
+        // the type of the function that isn't there).
+        let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+        rows
+    }
+
+    /// Never waits for a lock held by another connection: a statement that
+    /// would have to wait fails at once ("database is locked"). For the quick
+    /// reader, which must not hold up its caller.
+    pub fn never_wait_for_locks(&mut self) -> Result<()> {
+        self.connection.busy_timeout(Duration::ZERO).map_err(to_djox_error)
     }
 
     /// Runs a statement that changes data, written with Django's `%s` placeholders.

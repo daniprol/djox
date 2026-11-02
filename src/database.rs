@@ -7,7 +7,11 @@
 //!
 //! Each method sends its statement to the backend right away and returns an
 //! `asyncio.Future` that the backend finishes when the answer arrives (see
-//! `answers.rs`), so Python's event loop is never blocked. A Future rather
+//! `answers.rs`), so Python's event loop is never blocked. The one exception
+//! is a *quick read* (`fetch_all` and `fetch_one` on SQLite): a small query
+//! the backend answers right away, within a limit (1 ms by default), because
+//! sending it to another thread would take longer than running it. Its
+//! Future is already finished when it is returned. A Future rather
 //! than a coroutine: the statement is already on its way before anyone awaits
 //! it, so statements reach the database in the order the methods were called.
 
@@ -22,7 +26,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::answers::{future_for_answer, future_for_stream_answer};
+use crate::answers::{finished_future, future_for_answer, future_for_stream_answer};
 use crate::connection::PythonConnection;
 use crate::errors::to_python_error;
 use crate::values::{parameters_from_python, row_to_python, rows_to_python};
@@ -50,22 +54,25 @@ impl PythonDatabase {
     /// or run `PRAGMA`s. The connection is only lent: it can't be used after
     /// `prepare` returns.
     ///
+    /// `quick_read_limit` is the most seconds a read may run right on the
+    /// calling thread before it goes to a reader instead (see
+    /// `crates/djox/src/sqlite/quick_reads.rs`); 0 turns quick reads off.
+    ///
     /// `#[staticmethod]` is Python's `@staticmethod`. `#[pyo3(signature = ...)]`
     /// writes the Python signature, defaults and keyword-only `*` included.
     #[staticmethod]
-    #[pyo3(signature = (path, *, readers = None, timeout = 5.0, prepare = None))]
+    #[pyo3(signature = (path, *, readers = None, timeout = 5.0, quick_read_limit = 0.001, prepare = None))]
     fn sqlite(
         py: Python<'_>,
         path: PathBuf,
         readers: Option<usize>,
         timeout: f64,
+        quick_read_limit: f64,
         prepare: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        if !(timeout.is_finite() && timeout >= 0.0) {
-            return Err(PyValueError::new_err("timeout must be a number of seconds, 0 or more"));
-        }
         let mut settings = SqliteSettings::new(path.clone());
-        settings.busy_timeout = Duration::from_secs_f64(timeout);
+        settings.busy_timeout = seconds("timeout", timeout)?;
+        settings.quick_read_limit = seconds("quick_read_limit", quick_read_limit)?;
         if let Some(reader_count) = readers {
             settings.reader_count = reader_count;
         }
@@ -163,6 +170,9 @@ impl PythonDatabase {
         parameters: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let parameters = parameters_from_python(parameters)?;
+        if let Some(rows) = self.fetch_all_quickly(py, &sql, &parameters) {
+            return finished_future(py, rows_to_python(py, rows)?.into_any());
+        }
         // `|py, rows: Rows| ...` is a closure, Rust's `lambda`.
         let (future, reply) = future_for_answer(py, |py, rows: Rows| Ok(rows_to_python(py, rows)?.into_any()))?;
         self.backend.fetch_all(sql, parameters, reply);
@@ -178,10 +188,10 @@ impl PythonDatabase {
         parameters: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let parameters = parameters_from_python(parameters)?;
-        let (future, reply) = future_for_answer(py, |py, rows: Rows| match rows.rows.into_iter().next() {
-            Some(row) => Ok(row_to_python(py, row)?.into_any()),
-            None => Ok(py.None().into_bound(py)),
-        })?;
+        if let Some(rows) = self.fetch_all_quickly(py, &sql, &parameters) {
+            return finished_future(py, first_row_to_python(py, rows)?);
+        }
+        let (future, reply) = future_for_answer(py, first_row_to_python)?;
         self.backend.fetch_all(sql, parameters, reply);
         Ok(future)
     }
@@ -273,6 +283,34 @@ impl PythonDatabase {
         let closed = if self.backend.is_closed() { ", closed" } else { "" };
         format!("Database.{}('{}'{closed})", self.backend.backend_name(), self.location)
     }
+}
+
+impl PythonDatabase {
+    /// A quick read (see the module docs), or `None` to send the query as usual.
+    fn fetch_all_quickly(&self, py: Python<'_>, sql: &str, parameters: &[Value]) -> Option<Rows> {
+        // The event loop's thread waits for the query either way, but other
+        // Python threads can run meanwhile: let go of the GIL. (A Python SQL
+        // function the query calls takes it back for its own call.)
+        py.detach(|| self.backend.fetch_all_quickly(sql, parameters))
+    }
+}
+
+/// The first row of `rows` as a tuple, or `None` if there is none (`fetch_one`).
+fn first_row_to_python(py: Python<'_>, rows: Rows) -> PyResult<Bound<'_, PyAny>> {
+    match rows.rows.into_iter().next() {
+        Some(row) => Ok(row_to_python(py, row)?.into_any()),
+        None => Ok(py.None().into_bound(py)),
+    }
+}
+
+/// `value` seconds as a `Duration`, or a `ValueError` naming the setting.
+fn seconds(name: &str, value: f64) -> PyResult<Duration> {
+    if !(value.is_finite() && value >= 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a number of seconds, 0 or more"
+        )));
+    }
+    Ok(Duration::from_secs_f64(value))
 }
 
 /// The rows of one query, a chunk at a time (from `Database.stream_rows()`).
