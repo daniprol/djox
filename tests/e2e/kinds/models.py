@@ -1,9 +1,14 @@
-"""A small Django app for the tests: one model with a field of every common kind.
+"""A small Django app for the tests: a model with a field of every common
+kind, and models whose saving is unusual.
 
-It checks that async queries give back exactly the values Django's sync
-queries do, on every database (`tests/e2e/test_values.py`). It has no
-migrations: Django makes its table from the model.
+`EveryKind` checks that async queries give back exactly the values Django's
+sync queries do, on every database (`tests/e2e/test_values.py`). `Ticket`
+and `Shout` check saving new objects (`tests/e2e/test_fast_lane_inserts.py`).
+The app has no migrations: Django makes its tables from the models.
 """
+
+import uuid
+from typing import Any
 
 from django.db import models
 
@@ -30,3 +35,30 @@ class EveryKind(models.Model):
     ip_address = models.GenericIPAddressField(null=True)
 
     objects = djox.Manager()
+
+
+class Ticket(models.Model):
+    """Values Django fills when it saves: a `UUID` primary key with a default,
+    dates that `auto_now` and `auto_now_add` set, and a value the database
+    gives when there is none (`db_default`)."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4)
+    title = models.CharField(max_length=100)
+    opened = models.DateTimeField(auto_now_add=True)
+    changed = models.DateTimeField(auto_now=True)
+    day = models.DateField(auto_now_add=True)
+    priority = models.IntegerField(db_default=3)
+
+    objects = djox.Manager()
+
+
+class Shout(models.Model):
+    """A model with its own `save()`, which every way of saving must call."""
+
+    text = models.CharField(max_length=100)
+
+    objects = djox.Manager()
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.text = self.text.upper()
+        super().save(*args, **kwargs)

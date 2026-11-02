@@ -20,7 +20,7 @@ by Django's own code. Three ways are used, depending on the method:
 - **Replay**: `aaggregate()`. Like the above, but then Django's method runs
   again with the answer, to shape the result itself (`compiler.replay()`).
 - **Create**: `acreate()`. Django's steps of `save()`, with the `INSERT`
-  taken from Django's code and awaited on djox (`compiler.capture()`).
+  on the fast lane, awaited on djox (`djox._saving`).
 
 Methods that need a transaction or several statements (`aget_or_create()`,
 `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, cascading
@@ -56,11 +56,10 @@ from django.db.models.query import (
     ValuesIterable,
     ValuesListIterable,
 )
-from django.db.models.signals import post_save, pre_save
 from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
-from djox import _fast_lane, _running, _threads
+from djox import _fast_lane, _running, _saving, _threads
 from djox._fast_lane import running as fast_lane
 from djox._fast_lane.lookups import is_simple_ordering, model_field, updates_for, where_for
 from djox._fast_lane.running import PreparedQuery
@@ -636,25 +635,43 @@ class QuerySet(models.QuerySet[ModelType]):
 
     # ---------------------------------------------------------------- create
 
+    def create(self, **kwargs: Any) -> ModelType:
+        """Django's `create()`. The `INSERT` takes the fast lane when it can (`djox._saving`)."""
+        using = self._alias_for_write()
+        if not (_fast_lane.is_enabled() and _saving.model_saves_on_djox(self.model, using)):
+            return super().create(**kwargs)
+        obj = self._new_object(kwargs)
+        _saving.save_new_object_now(obj, using, force_insert=True)
+        self._note_fetch_mode(obj)
+        return obj
+
     async def acreate(self, **kwargs: Any) -> ModelType:
         """Create and save an object, like Django's `create()`: the same
-        checks, signals and defaults, with the `INSERT` awaited on djox."""
-        meta = self.model._meta
+        checks, signals and defaults, with the `INSERT` awaited on djox
+        (`djox._saving`). Other models run Django's `create()` on one of
+        djox's threads."""
         using = self._alias_for_write()
-        # Models with parent models (multi-table inheritance) insert into
-        # several tables, and `order_with_respect_to` needs a query first.
         if not runs_on_djox(using):
             return await super().acreate(**kwargs)
-        if meta.parents or meta.order_with_respect_to or meta.auto_created:
+        if not (_saving.model_saves_on_djox(self.model, using) and _saving.signals_can_run_here(self.model)):
             return await self._run_django_method(lambda: self.create(**kwargs), writes=True)
+        obj = self._new_object(kwargs)
+        await _saving.save_new_object(obj, using, force_insert=True)
+        self._note_fetch_mode(obj)
+        return obj
+
+    def _new_object(self, kwargs: dict[str, Any]) -> ModelType:
+        """The object `create(**kwargs)` saves, after Django's check of the names."""
+        meta = self.model._meta
         reverse_one_to_one_fields = frozenset(kwargs).intersection(meta._reverse_one_to_one_field_names)  # type: ignore[attr-defined]
         if reverse_one_to_one_fields:
             raise ValueError("The following fields do not exist in this model: " + ", ".join(reverse_one_to_one_fields))
-        obj = self.model(**kwargs)
-        await save_new_object(obj, using)
+        return self.model(**kwargs)
+
+    def _note_fetch_mode(self, obj: models.Model) -> None:
+        """What Django's `create()` sets last on the object it created."""
         if hasattr(self, "_fetch_mode"):  # Django 6.1 and later
             obj._state.fetch_mode = self._fetch_mode  # pyrefly: ignore[read-only]  # django-stubs: read-only
-        return obj
 
     # -------------------------------------------- Django's methods, on djox's threads
 
@@ -852,39 +869,6 @@ class QuerySet(models.QuerySet[ModelType]):
     def _prefetch_lookups(self) -> tuple[Any, ...]:
         """The `prefetch_related()` lookups, if any."""
         return tuple(self._prefetch_related_lookups)  # type: ignore[attr-defined]
-
-
-async def save_new_object(obj: models.Model, using: str) -> None:
-    """Insert a new object, like `obj.save(force_insert=True, using=using)`
-    does for a model without parent models.
-
-    `Model.save()` sends `pre_save`, fills defaults (`auto_now` dates, a
-    `UUID` primary key...), inserts, sets the new id on the object, and sends
-    `post_save`. Here the signals are sent with `asend()`, and Django's own
-    `_save_table()` fills the defaults and writes the `INSERT`, which
-    `compiler.capture()` takes from it to await on djox.
-    """
-    model = origin = type(obj)
-    if model._meta.proxy:
-        model = model._meta.concrete_model  # type: ignore[assignment]
-    obj._prepare_related_fields_for_save(operation_name="save")  # type: ignore[attr-defined]
-    await pre_save.asend(sender=origin, instance=obj, raw=False, using=using, update_fields=None)
-
-    def save_table() -> None:
-        obj._save_table(raw=False, cls=model, force_insert=True, force_update=False, using=using, update_fields=None)  # type: ignore[attr-defined]
-
-    statement = compiler.capture(save_table)
-    insert_compiler = statement.compiler
-    if not isinstance(insert_compiler, compiler.SQLInsertCompiler):
-        raise RuntimeError(f"expected an INSERT from save(), got {insert_compiler!r}")
-    returning_fields = insert_compiler.returning_fields
-    rows = await compiler.run_insert(using, insert_compiler, returning_fields)
-    if rows:
-        for value, field in zip(rows[0], returning_fields or [], strict=False):
-            setattr(obj, field.attname, value)
-    obj._state.db = using
-    obj._state.adding = False
-    await post_save.asend(sender=origin, instance=obj, created=True, update_fields=None, raw=False, using=using)
 
 
 def is_slice_bound(bound: object) -> bool:
