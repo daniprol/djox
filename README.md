@@ -122,7 +122,7 @@ Anything djox doesn't run itself falls back to Django's own method, so nothing b
 | | |
 |---|---|
 | [Async QuerySets](https://daniprol.github.io/djox/queries/) | `aget`, `acount`, `async for`, `acreate`, `aupdate`, `adelete`, `aget_or_create`... on djox |
-| [The fast lane](https://daniprol.github.io/djox/fast-lane/) | Queries (`Q()`, `exclude()`, joins) and `create()`, sync or async, reuse the SQL Django wrote once, and Rust builds the results |
+| [The fast lane](https://daniprol.github.io/djox/fast-lane/) | Queries (filters, joins, `annotate()`, `F()`, aggregates), updates and `create()`, sync or async, reuse the SQL Django wrote once, and Rust builds the results |
 | [ASGI](https://daniprol.github.io/djox/asgi/) | `djox.asgi`: Django's ASGI handler without its thread hops per request |
 | [Existing models](https://daniprol.github.io/djox/models/) | `DJOX_MODELS` switches any model, `User` included, without touching its code |
 | [Async transactions](https://daniprol.github.io/djox/transactions/) | `async with djox.atomic():` and `djox.on_commit()` |

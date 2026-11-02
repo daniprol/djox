@@ -15,6 +15,11 @@ break comes with a migration note.
   `quick_read_limit` (a new option, 1 ms) and sent to a reader then (`aget()`: 174 µs to 52 µs).
 - **The fast lane takes more**: `Q()` objects, `exclude()`, and names through foreign keys and one-to-one
   fields (`author__name`), in filters and in `order_by()`.
+- **The general fast lane**: a `djox.QuerySet` notes any chain of calls as a recipe, and Django writes the SQL
+  once per shape of the chain. `annotate()`, `alias()`, `F()` and Django's other expressions, aggregates
+  (`aggregate()` and `aaggregate()` too), `update()` with `F()`, `distinct()`, `values()` with expressions,
+  and filters through reverse and many-to-many relations take the fast lane (a `Count()` annotation: 670 µs
+  to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same

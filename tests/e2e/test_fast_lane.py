@@ -16,7 +16,7 @@ import pytest
 from asgiref.sync import async_to_sync, sync_to_async
 from django.core.exceptions import SynchronousOnlyOperation
 from django.db import connection, models, transaction
-from django.db.models import F
+from django.db.models import Exists, F, OuterRef
 from django.db.models.signals import post_init
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
@@ -110,9 +110,9 @@ SIMPLE_QUERYSETS: dict[str, MakeQuerySet] = {
 async def test_simple_querysets_give_djangos_objects(make_queryset: MakeQuerySet) -> None:
     expected = await sync_to_async(djangos)(lambda: list(make_queryset()))
     queryset = make_queryset()
-    assert queryset._simple_query is not None, "every step was noted for the fast lane"
+    assert queryset._recipe is not None, "every step was noted for the fast lane"
     books = [book async for book in queryset]
-    assert queryset._simple_query is not None, "the fast lane ran it: Django's Query was never built"
+    assert queryset._recipe is not None, "the fast lane ran it: Django's Query was never built"
     assert [fields_of(book) for book in books] == [fields_of(book) for book in expected]
     assert len(fast_statements()) == 1
 
@@ -206,7 +206,7 @@ async def test_numbers_too_big_for_the_column_are_left_to_django() -> None:
 
 # Querysets the fast lane leaves to Django, which still gives the right answer.
 DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
-    "F": lambda: Book.objects.filter(pages__gt=F("id")),
+    "a subquery": lambda: Book.objects.filter(Exists(Author.objects.filter(pk=OuterRef("author"), name="Jane Austen"))),
     "icontains": lambda: Book.objects.filter(title__icontains="dune"),
     "select_related, then only": lambda: Book.objects.select_related("author").only("title", "author__name"),
     "only": lambda: Book.objects.only("title"),
@@ -308,7 +308,7 @@ def test_the_fast_lane_sees_an_open_sync_transaction() -> None:
 @pytest.mark.usefixtures("library")
 async def test_the_fast_lane_can_be_turned_off() -> None:
     queryset: Any = Book.objects.filter(pages__gt=300)
-    assert queryset._simple_query is None
+    assert queryset._recipe is None
     assert await queryset.acount() == 2
     assert fast_statements() == []
 
@@ -352,7 +352,7 @@ def test_sync_get_first_last_and_contains_take_the_fast_lane() -> None:
     assert not Book.objects.filter(pages__lt=300).contains(dune)
     queryset: Any = Book.objects.filter(pages__gt=300)
     list(queryset)
-    assert queryset._simple_query is not None, "Django's Query was never built"
+    assert queryset._recipe is not None, "Django's Query was never built"
     with pytest.raises(Book.DoesNotExist, match=r"Book matching query does not exist\."):
         Book.objects.get(title="Ulysses")
     with pytest.raises(Book.MultipleObjectsReturned, match=r"it returned 2!"):
@@ -472,7 +472,6 @@ async def test_async_writes_give_djangos_answers(name: str) -> None:
 
 @pytest.mark.usefixtures("library")
 def test_writes_the_fast_lane_leaves_to_django() -> None:
-    assert Book.objects.filter(pages__gt=300).update(pages=F("pages") + 1) == 2
     assert Book.objects.filter(title="Dune").update(author=Author.objects.get(name="Jane Austen")) == 1
     assert Author.objects.filter(name="Frank Herbert").delete() == (2, {"library.Book": 1, "library.Author": 1})
     assert [found for found in fast_statements() if "UPDATE" in found.sql or "DELETE" in found.sql] == []
@@ -507,6 +506,8 @@ VALUES_QUERYSETS: dict[str, MakeQuerySet] = {
     "values_list of some fields": lambda: Book.objects.values_list("pages", "in_print").order_by("pages"),
     "values_list flat": lambda: Book.objects.order_by("title").values_list("title", flat=True),
     "filtered after values": lambda: Book.objects.values("title").filter(in_print=True).order_by("title")[1:],
+    "values through a foreign key": lambda: Book.objects.order_by("pk").values("title", "author__name"),
+    "the same field twice": lambda: Book.objects.order_by("pk").values_list("title", "title"),
 }
 
 
@@ -523,7 +524,7 @@ def test_values_give_djangos_rows(make_queryset: MakeQuerySet) -> None:
 
     expected = djangos(answers)
     assert answers() == expected
-    assert make_queryset()._simple_query is not None, "noted for the fast lane"
+    assert make_queryset()._recipe is not None, "noted for the fast lane"
     assert any(found.result_builder for found in fast_statements()), "the fast lane built the rows"
 
 
@@ -549,14 +550,14 @@ def test_get_on_values_returns_a_dict() -> None:
     assert Book.objects.values_list("pages", flat=True).get(title="Emma") == 474
 
 
-def test_values_the_fast_lane_leaves_to_django() -> None:
-    for queryset in [
-        Book.objects.values("author__name"),
-        Book.objects.values_list("title", named=True),
-        Book.objects.values(pages_twice=F("pages") * 2),
-        Book.objects.values("title", "title"),
-    ]:
-        assert queryset._simple_query is None  # type: ignore[attr-defined]  # djox.QuerySet's
+@pytest.mark.usefixtures("library")
+def test_named_tuples_are_built_by_django() -> None:
+    queryset = Book.objects.order_by("pk").values_list("title", named=True)
+    assert [row.title for row in queryset] == ["Dune", "Dune Messiah", "Emma", "Persuasion"]
+    assert not any(found.result_builder for found in fast_statements())
+
+
+def test_values_keep_djangos_errors() -> None:
     with pytest.raises(TypeError, match="'flat' is not valid when values_list is called with more than one field"):
         Book.objects.values_list("title", "pages", flat=True)  # type: ignore[misc]  # wrong on purpose
     with pytest.raises(TypeError, match=r"Cannot call delete\(\) after .values\(\)"):

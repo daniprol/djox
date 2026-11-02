@@ -87,15 +87,18 @@ them, and it should teach them both along the way.
   runs it). Rows are turned into results by Django's own iterable classes
   (`_results.py`); single-statement methods are replayed with the answer
   (`backends/sqlite3/compiler.py`); `_running.py` decides where the SQL runs.
-- **The fast lane** (`src/djox/_fast_lane`): while a `djox.QuerySet` is only
-  filtered with plain values (`exact`, `gt`, `in`, `isnull`...), ordered by
-  columns and sliced, it keeps a note (`SimpleQuery`) instead of building
-  Django's `Query`. Its methods, sync and async, reads and simple writes
-  (`update()`, `delete()`), reuse the SQL Django wrote once for the same
-  query *shape*, and Rust builds the results (`src/results.rs`: instances,
+- **The fast lane** (`src/djox/_fast_lane`): a `djox.QuerySet` notes its
+  calls (`filter()`, `annotate()`, `order_by()`, `values()`, slices...) as a
+  recipe (`QueryRecipe`) instead of building Django's `Query`: each call's
+  shape (names, Django's expression classes) and its values, apart. Django
+  checks each new kind of call once, when it is made (`checks.py`), so its
+  errors come at the same moment. Its methods, sync and async, reads,
+  `aggregate()` and writes (`update()`, `delete()`), reuse the SQL Django
+  wrote once for the same recipe *shape* (`parameters.py` matches Django's
+  parameters to the recipe's values), and Rust builds the results (`src/results.rs`: instances,
   dicts for `values()`, tuples for `values_list()`), converting dates,
   decimals and booleans like Django's converters (`src/conversions.rs`).
-  Asking for `queryset.query` builds Django's `Query` from the note, so
+  Asking for `queryset.query` replays the recipe with Django's methods, so
   everything else falls back to Django. Django writes the SQL on purpose: it
   is written once per shape, so a second SQL writer in Rust would buy no
   speed.
@@ -192,8 +195,9 @@ them, and it should teach them both along the way.
    compiler, reusing Django's SQL per query shape, and Rust builds the
    results. It covers sync and async methods, `update()`, `delete()`,
    `values()` and `values_list()`, with dates, decimals and booleans
-   converted in Rust. `aiterator()` streams its rows (done). Next: `F()` in
-   `update()`, joins, `annotate()`.
+   converted in Rust. `aiterator()` streams its rows (done). Any chain of
+   calls is a recipe, so `annotate()`, `F()`, aggregates and joins through
+   any relation take it too (done). Next: subqueries, `bulk_create()`.
 7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`,
    with TLS (rustls, libpq's `sslmode` values). Next: reading arrays,
    ranges and `hstore` from async code.

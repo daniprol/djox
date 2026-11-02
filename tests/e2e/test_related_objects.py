@@ -122,7 +122,7 @@ async def test_select_related_gives_djangos_objects(make_queryset: MakeQuerySet,
     expected = await sync_to_async(djangos)(lambda: [fields_of(found, *relations) for found in make_queryset()])
     queryset = make_queryset()
     found = [instance async for instance in queryset]
-    assert queryset._simple_query is not None, "the fast lane ran it: Django's Query was never built"
+    assert queryset._recipe is not None, "the fast lane ran it: Django's Query was never built"
     assert [fields_of(instance, *relations) for instance in found] == expected
     assert len(fast_statements()) == 1
 
@@ -230,7 +230,7 @@ async def test_prefetch_related_gives_djangos_objects() -> None:
         assert len(queries) == 2, "the authors, then all their books at once"
         assert titles_by_author(authors) == expected
         assert len(queries) == 2, "using the books runs no more queries"
-    assert queryset._simple_query is not None, "the authors' query ran on the fast lane"
+    assert queryset._recipe is not None, "the authors' query ran on the fast lane"
     assert len(fast_statements()) == 1
 
 

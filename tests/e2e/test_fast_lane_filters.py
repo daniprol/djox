@@ -84,9 +84,9 @@ FILTERED_QUERYSETS: dict[str, MakeQuerySet] = {
 async def test_filters_give_djangos_objects(make_queryset: MakeQuerySet) -> None:
     expected = await sync_to_async(djangos)(lambda: [fields_of(item) for item in make_queryset()])
     queryset = make_queryset()
-    assert queryset._simple_query is not None, "every step was noted for the fast lane"
+    assert queryset._recipe is not None, "every step was noted for the fast lane"
     found = [fields_of(item) async for item in queryset]
-    assert queryset._simple_query is not None, "the fast lane ran it: Django's Query was never built"
+    assert queryset._recipe is not None, "the fast lane ran it: Django's Query was never built"
     assert found == expected
     assert len(fast_statements()) == 1
 
@@ -184,7 +184,7 @@ def test_errors_are_raised_where_django_raises_them() -> None:
 
 # Querysets the fast lane leaves to Django, which still gives the right answer.
 DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
-    "a relation to many rows": lambda: Book.objects.filter(editions__number=2),
+    "a transform": lambda: Book.objects.filter(published__year=1965),
     "a transform through a join": lambda: Book.objects.filter(author__name__icontains="jane"),
     "an expression in Q": lambda: Book.objects.filter(
         Q(Exists(Edition.objects.filter(book=OuterRef("pk"), number=2))) | Q(title="Emma")

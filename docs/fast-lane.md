@@ -1,6 +1,6 @@
 # The fast lane
 
-Simple queries skip Django's query building and SQL compiler, and Rust builds
+Most queries skip Django's query building and SQL compiler, and Rust builds
 their results. They run two to four times faster, sync or async
 ([benchmarks](benchmarks.md)). Nothing to turn on.
 
@@ -8,43 +8,50 @@ their results. They run two to four times faster, sync or async
 await Book.objects.aget(pk=5)
 [book async for book in Book.objects.filter(pages__gt=400).order_by("-pages")[:20]]
 Book.objects.filter(Q(author__name="Jane Austen") | Q(in_print=False)).exclude(pages__lt=100)
-await Book.objects.filter(pk=5).aupdate(pages=420)
+Book.objects.annotate(chapter_count=Count("chapters")).filter(chapter_count__gt=10)
+await Book.objects.filter(pages__gt=500).aaggregate(total=Sum("pages"))
+await Book.objects.filter(pk=5).aupdate(pages=F("pages") + 1)
 await Book.objects.acreate(title="Dune", pages=412, author=author)
 ```
 
 ## What takes the fast lane
 
-A query that is:
+A query made of these calls, in any order Django accepts:
 
-- **filtered** with `filter()` and `exclude()`, `Q` objects included (`|`,
-  `&`, `~`), on the model's columns or through foreign keys and one-to-one
-  fields (`author__name`, `book__author__name`), with `exact`, `gt`, `gte`,
-  `lt`, `lte`, `in` or `isnull`, and plain values (numbers, text, booleans,
-  dates, decimals, UUIDs, model instances for a foreign key);
-- **ordered** by columns, here or through foreign keys
-  (`order_by("-pages", "author__name")`, or `Meta.ordering`), reversed, and
-  **sliced** (`[10:20]`);
-- optionally **narrowed** with `values(...)` or `values_list(...)`
-  (`flat=True` included);
-- optionally **joined** with `select_related("author", "author__publisher")`,
-  and followed by any `prefetch_related()`;
+- **`filter()` and `exclude()`**, `Q` objects included (`|`, `&`, `~`), on
+  the model's fields or through any relation (`author__name`,
+  `books__editions__number`, a many-to-many field), with `exact`, `gt`,
+  `gte`, `lt`, `lte`, `in` or `isnull`, comparing with plain values
+  (numbers, text, booleans, dates, decimals, UUIDs, model instances) or with
+  Django's expressions (`pages__gt=F("chapters") * 10`), and on annotations
+  (`chapter_count__gt=10`);
+- **`annotate()` and `alias()`** with Django's expressions: `F()`,
+  arithmetic, `Value()`, aggregates (`Count`, `Sum`, `Avg`, `Max`, `Min`,
+  with `filter=Q(...)` and `default=`), and Django's functions (`Lower`,
+  `Coalesce`, `TruncDay`...);
+- **`order_by()`** with names or expressions (`F("pages").desc(nulls_last=True)`),
+  `reverse()`, `distinct()`, and slices (`[10:20]`);
+- **`values()` and `values_list()`**, with names or expressions
+  (`flat=True` and `named=True` included);
+- **`select_related()`**, and any `prefetch_related()`;
 - then read or written with one of these methods:
 
 | Kind | Async | Sync |
 |------|-------|------|
 | Rows | `async for`, `aiterator()`, `aget()`, `afirst()`, `alast()` | `for`, `list()`, `iterator()`, `get()`, `first()`, `last()`, `queryset[3]` |
-| Answers | `acount()`, `aexists()`, `acontains()` | `count()`, `exists()`, `contains()` |
-| Writes | `aupdate(name=value)`, `adelete()` | `update(name=value)`, `delete()` |
+| Answers | `acount()`, `aexists()`, `acontains()`, `aaggregate()` | `count()`, `exists()`, `contains()`, `aggregate()` |
+| Writes | `aupdate(...)`, `adelete()` | `update(...)`, `delete()` |
 
-- `update()` takes plain values (no `F()` expressions).
+- `update()` takes plain values and Django's expressions (`F("pages") + 1`).
 - `delete()` takes the fast lane when Django would delete with one statement
   too: no `on_delete` work and no delete signal receivers.
 - Integer and UUID ids given as text (`pk="5"`, as URLs and DRF give them)
   take it too.
 
-Everything else (`F()`, `XOR`, relations to many rows like `books__title`,
-transforms like `published__year`, `annotate()`, `only()`, models with
-parent models) runs the usual way, with the same results.
+Everything else runs the usual way, with the same results: subqueries
+(`Exists()`, `Subquery()`, `OuterRef()`), expression classes of your own,
+transforms in names (`published__year`), `XOR`, `extra()`, `only()` and
+`defer()`, `union()`, and models with parent models.
 
 ## New objects
 
@@ -67,11 +74,15 @@ parent models) runs the usual way, with the same results.
 
 ## How it stays correct
 
-- **The SQL is Django's.** The first time djox meets a query *shape* (the same
-  filters, `AND`s, `OR`s and `NOT`s, ordering, slice and columns, with any
-  values), Django writes the SQL. djox keeps it and reuses it for that shape.
-- **Values are prepared by their field** when `filter()` runs, so errors
-  (a wrong field name or value) are raised where Django raises them.
+- **The SQL is Django's.** A query is noted as its chain of calls. The first
+  time djox meets a chain's *shape* (the same calls, names and expressions,
+  with any values), Django builds the query and writes the SQL. djox keeps
+  it, with where each parameter comes from, and reuses it for that shape.
+  If it can't tell where a parameter comes from, Django keeps that shape.
+- **Errors come when Django raises them.** Values are prepared by their
+  field when `filter()` runs, and Django checks each new kind of
+  `annotate()`, `order_by()`... call once, when it is made: a wrong name
+  raises right away, as in Django.
 - **Conversions match Django's**: Rust converts dates, times, decimals and
   booleans like Django's converters, and leaves any value it doesn't handle to
   Django.

@@ -1,26 +1,28 @@
 """The SQL of each query shape, written once by Django and kept.
 
-Two queries with the same shape (see `SimpleQuery.shape`) have the same SQL,
-with different parameters. So the first time the fast lane meets a shape, it
-lets Django build the query and write the SQL, exactly as Django's own
-methods would. It keeps the SQL, and for queries that return rows, a
-`ResultBuilder` set up from Django's compiler (which columns go to which
-attribute or key, with which converters, and which of those Rust can do).
-Every later query of that shape skips
-Django's query building and compiler entirely.
+Two queries with the same shape (see `QueryRecipe.shape`) have the same
+SQL, with different parameters. So the first time the fast lane meets a
+shape, it lets Django build the query from the recipe and write the SQL,
+exactly as Django's own methods would. It keeps:
 
-Before keeping a statement, the fast lane checks that it computes the same
-parameters as Django did, value by value. If not (a field that prepares its
-values in its own way, say), the shape is remembered as one the fast lane
-leaves to Django.
+- the SQL,
+- where each parameter comes from (`parameters.py`): which of the query's
+  values makes it, or a value fixed by the shape,
+- for queries that return rows, a `ResultBuilder` (`results.py`).
 
-| Kind       | SQL Django writes                       | Used by                          |
-|------------|-----------------------------------------|----------------------------------|
-| `"rows"`   | the `SELECT` of the model's columns     | `for`, `get()`, `first()`... and their `a`-versions |
-| `"count"`  | `SELECT COUNT(*) ...` (`query.get_count()`) | `count()`, `acount()`        |
-| `"exists"` | `SELECT 1 ... LIMIT 1` (`query.has_results()`) | `exists()`, `contains()`... |
-| `"update"` | `UPDATE ... SET ...` (`update()`)       | `update()`, `aupdate()`          |
-| `"delete"` | `DELETE FROM ...` (`_raw_delete()`)     | `delete()`, `adelete()` (a "fast delete") |
+Every later query of that shape skips Django's query building and
+compiler entirely. If the fast lane can't tell where the parameters come
+from, the shape is remembered as one it leaves to Django (or, if this
+query's values were only in doubt, it tries again with the next query).
+
+| Kind          | SQL Django writes                       | Used by                          |
+|---------------|-----------------------------------------|----------------------------------|
+| `"rows"`      | the `SELECT` of the results             | `for`, `get()`, `first()`... and their `a`-versions |
+| `"count"`     | `SELECT COUNT(*) ...` (`query.get_count()`) | `count()`, `acount()`        |
+| `"exists"`    | `SELECT 1 ... LIMIT 1` (`query.has_results()`) | `exists()`, `contains()`... |
+| `"aggregate"` | `SELECT SUM(...) ...` (`aggregate()`)   | `aggregate()`, `aaggregate()`    |
+| `"update"`    | `UPDATE ... SET ...` (`update()`)       | `update()`, `aupdate()`          |
+| `"delete"`    | `DELETE FROM ...` (`_raw_delete()`)     | `delete()`, `adelete()` (a "fast delete") |
 """
 
 from dataclasses import dataclass
@@ -29,46 +31,54 @@ from typing import Any, Literal
 from django.core.exceptions import EmptyResultSet, FullResultSet
 from django.core.signals import setting_changed
 from django.db import connections, models
-from django.db.models.base import ModelState
 
-from djox._core import RelatedModel, ResultBuilder
-from djox._fast_lane.conversions import conversion_for
-from djox._fast_lane.simple_query import SimpleQuery, Update
+from djox._core import ResultBuilder
+from djox._fast_lane.arguments import timezone_names
+from djox._fast_lane.parameters import AMBIGUOUS, Fixed, Source, literals_of, parameter_sources
+from djox._fast_lane.recipe import QueryRecipe, QueryValue, Step
+from djox._fast_lane.results import aggregate_builder, rows_builder, tuple_order
 from djox.backends.sqlite3 import compiler
 
-Kind = Literal["rows", "count", "exists", "update", "delete"]
+Kind = Literal["rows", "count", "exists", "aggregate", "update", "delete"]
 
 
 @dataclass(frozen=True)
 class Statement:
-    """The SQL of one query shape, and how to build its objects."""
+    """The SQL of one query shape, and how to make its parameters and results."""
 
     sql: str
     """Django's SQL, with `%s` placeholders for the parameters."""
 
-    result_builder: ResultBuilder | None
-    """For `"rows"`: builds the results (instances, tuples or dicts). `None` for the other kinds."""
+    sources: tuple[Source, ...]
+    """Where each parameter comes from: the position of the value that makes
+    it, or a `Fixed` parameter (see `parameters.py`)."""
+
+    result_builder: ResultBuilder | None = None
+    """For `"rows"` and `"aggregate"`: builds the results. `None` for the other kinds."""
 
     related_models: tuple[type[models.Model], ...] = ()
     """For `"rows"`: the models whose instances `select_related()` adds. The
     fast lane checks before each query that the builder may still make them
     (no signal receiver was connected since, see `running.builds_like_django()`)."""
 
-    select_parameters: tuple[Any, ...] = ()
-    """Parameters Django puts in the `SELECT` clause, before the filters' ones:
-    `exists()` selects `%s` with `1`. The same for every query of the shape."""
+    tuple_order: tuple[int, ...] | None = None
+    """For `values_list()` on Django 6.0 and earlier: the order of the
+    columns in each tuple, when not the order of the `SELECT` (see `results.tuple_order()`)."""
 
-    writes_booleans_in_sql: bool = False
-    """Whether Django wrote `in_print=True` as `WHERE "in_print"` rather than
-    `WHERE "in_print" = %s` (Django 6.0 and earlier do). Then those values are
-    no parameters: they are in the SQL (and in the shape)."""
+    empty_aggregate: dict[str, Any] | None = None
+    """For `"aggregate"`: what `aggregate()` returns if the database returns
+    no row (Django's `empty_result_set_value` of each aggregate)."""
 
-    def parameters(self, simple_query: SimpleQuery, connection: Any, updates: tuple[Update, ...] = ()) -> list[Any]:
-        """The parameters to run this statement with, for `simple_query`'s
-        values (and, for an `UPDATE`, the values it sets, which come first).
+    def parameters(self, values: tuple[QueryValue, ...], connection: Any) -> list[Any]:
+        """The parameters to run this statement with, for a query's `values`.
         `connection` is the alias's Django connection (its `DatabaseWrapper`)."""
-        filter_parameters = parameters_for(simple_query, connection, self.writes_booleans_in_sql)
-        return [*self.select_parameters, *update_parameters(updates, connection), *filter_parameters]
+        parameters = []
+        for source in self.sources:
+            if isinstance(source, Fixed):
+                parameters.append(source.value)
+            else:
+                parameters.append(values[source].parameter(connection))
+        return parameters
 
 
 # Shapes the fast lane leaves to Django are remembered too, so it doesn't ask again.
@@ -80,255 +90,154 @@ LEFT_TO_DJANGO = "left to Django"
 statements: dict[tuple[Any, ...], Statement | str] = {}
 MAX_STATEMENTS = 2000
 
+# How many queries of a shape were in doubt (`parameters.AMBIGUOUS`). After
+# `MAX_ATTEMPTS`, the shape is left to Django: its values are always alike.
+attempts: dict[tuple[Any, ...], int] = {}
+MAX_ATTEMPTS = 10
+
 
 def statement_for(
     queryset: "models.QuerySet[Any]",
-    simple_query: SimpleQuery,
+    recipe: QueryRecipe,
     kind: Kind,
     alias: str,
-    updates: tuple[Update, ...] = (),
+    last_step: Step | None = None,
 ) -> Statement | None:
-    """The statement for `simple_query`'s shape, written by Django the first
-    time, or `None` if the fast lane leaves this shape to Django. `updates`
-    are the values an `UPDATE` sets."""
-    update_shapes = tuple(update.shape for update in updates)
-    key = (queryset.model, alias, kind, simple_query.shape, update_shapes)
+    """The statement for `recipe`'s shape, written by Django the first
+    time, or `None` if the fast lane leaves this shape to Django.
+
+    `last_step` is the call that runs the query, when it has arguments:
+    `update(...)` or `aggregate(...)`.
+    """
+    key = statement_key(queryset.model, recipe, kind, alias, last_step)
     found = statements.get(key)
-    if found is None:
-        found = write_statement(queryset, simple_query, kind, alias, updates)
-        if len(statements) >= MAX_STATEMENTS:
-            statements.clear()
-        statements[key] = found
     if isinstance(found, Statement):
         return found
-    return None
+    if found is not None:
+        return None  # left to Django
+    written = write_statement(queryset, recipe, kind, alias, last_step, key)
+    if written == AMBIGUOUS:
+        attempts[key] = attempts.get(key, 0) + 1
+        if attempts[key] < MAX_ATTEMPTS:
+            return None  # Django's way for this query; the next may teach the fast lane
+        written = LEFT_TO_DJANGO
+    if len(statements) >= MAX_STATEMENTS:
+        statements.clear()
+        attempts.clear()
+    statements[key] = written
+    return written if isinstance(written, Statement) else None
+
+
+def statement_key(
+    model: type[models.Model], recipe: QueryRecipe, kind: Kind, alias: str, last_step: Step | None
+) -> tuple[Any, ...]:
+    """What decides a statement: the model, the database, the kind, the shapes,
+    and for a query with expressions, the current time zone (some of Django's
+    expressions write it into the SQL or its parameters, like `TruncDay()`)."""
+    last_shape = last_step.shape if last_step is not None else None
+    uses_expressions = recipe.uses_expressions or (last_step is not None and last_step.uses_expressions)
+    time_zone = timezone_names() if uses_expressions else ()
+    return (model, alias, kind, recipe.shape, last_shape, time_zone)
+
+
+def values_of(recipe: QueryRecipe, last_step: Step | None) -> tuple[QueryValue, ...]:
+    """The values of a query: those of the call that runs it (an `UPDATE`'s
+    `SET` and an `aggregate()` come before the filters in the SQL), then the recipe's."""
+    if last_step is None:
+        return recipe.values
+    return (*last_step.values, *recipe.values)
 
 
 def write_statement(
     queryset: "models.QuerySet[Any]",
-    simple_query: SimpleQuery,
+    recipe: QueryRecipe,
     kind: Kind,
     alias: str,
-    updates: tuple[Update, ...] = (),
+    last_step: Step | None,
+    key: tuple[Any, ...],
 ) -> Statement | str:
-    """Let Django build `simple_query` and write its SQL (see the module docs)."""
-    # A copy of the QuerySet with this note; asking for its `query` makes Django build it.
-    django_queryset = queryset._with_simple_query(simple_query)  # type: ignore[attr-defined]  # djox.QuerySet's
-    query = django_queryset.query
+    """Let Django build `recipe`'s query and write its SQL (see the module docs).
+    Returns the statement, `LEFT_TO_DJANGO`, or `AMBIGUOUS`."""
+    # A copy of the QuerySet with this recipe; asking for its `query` makes Django build it.
+    django_queryset = queryset._with_recipe(recipe)  # type: ignore[attr-defined]  # djox.QuerySet's
     result_builder = None
     related_models: tuple[type[models.Model], ...] = ()
+    order = None
+    empty_aggregate = None
     try:
+        query = django_queryset.query
         if kind == "rows":
             sql_compiler = query.get_compiler(using=alias)
             sql, django_parameters = sql_compiler.as_sql()
-            found = result_builder_for(queryset.model, sql_compiler, simple_query.values_fields)
+            returns_values = django_queryset._fields is not None
+            found = rows_builder(queryset.model, sql_compiler, returns_values)
             if found is None:
                 return LEFT_TO_DJANGO
             result_builder, related_models = found
+            if returns_values:
+                order = tuple_order(django_queryset, query)
         else:
             # These methods run their statement: capture it instead.
-            if kind == "count":
-                statement = compiler.capture(lambda: query.get_count(using=alias))
-            elif kind == "exists":
-                statement = compiler.capture(lambda: query.has_results(using=alias))
-            elif kind == "update":
-                values = {update.name: update.value for update in updates}
-                statement = compiler.capture(lambda: django_queryset.update(**values))
-            else:
-                query.clear_ordering(force=True)  # what Django's `delete()` does first
-                statement = compiler.capture(lambda: django_queryset._raw_delete(alias))
+            statement = compiler.capture(lambda: run_django_method(django_queryset, query, kind, alias, last_step))
             sql, django_parameters = statement.compiler.as_sql()
+            if kind == "aggregate":
+                result_builder = aggregate_builder(statement.compiler)
+                if result_builder is None:
+                    return LEFT_TO_DJANGO
+                outer_query = statement.compiler.query
+                empty_aggregate = {}
+                for name, expression in outer_query.annotation_select.items():
+                    empty_aggregate[name] = expression.empty_result_set_value
     except (EmptyResultSet, FullResultSet, RuntimeError):
         # Django answers this one without SQL, from the values: let it.
         # (`RuntimeError`: `capture()` found no statement to take.)
         return LEFT_TO_DJANGO
 
-    # Check that the fast lane computes Django's parameters, one of two ways.
-    # `exists()` selects one constant before them (`SELECT %s AS "a"`, with 1).
-    select_parameters = tuple(django_parameters[:1]) if kind == "exists" else ()
-    for writes_booleans_in_sql in (False, True):
-        candidate = Statement(sql, result_builder, related_models, select_parameters, writes_booleans_in_sql)
-        if same_values(list(django_parameters), candidate.parameters(simple_query, connections[alias], updates)):
-            return candidate
-    return LEFT_TO_DJANGO
+    # `exists()` selects one constant before the other parameters (`SELECT %s AS "a"`, with 1).
+    fixed = [Fixed(parameter) for parameter in django_parameters[:1]] if kind == "exists" else []
+    other_parameters = list(django_parameters[len(fixed) :])
+    literals = literals_of(key)
+    sources = parameter_sources(other_parameters, values_of(recipe, last_step), connections[alias], literals)
+    if sources is None:
+        return LEFT_TO_DJANGO
+    if sources == AMBIGUOUS:
+        return AMBIGUOUS
+    assert isinstance(sources, tuple)
+    return Statement(sql, (*fixed, *sources), result_builder, related_models, order, empty_aggregate)
 
 
-def same_values(first: list[Any], second: list[Any]) -> bool:
-    """Whether two lists of parameters are equal, value by value and type by
-    type (`True == 1` in Python, but they aren't the same parameter)."""
-    if len(first) != len(second):
-        return False
-    for first_value, second_value in zip(first, second, strict=True):
-        if type(first_value) is not type(second_value) or first_value != second_value:
-            return False
-    return True
+def run_django_method(
+    django_queryset: "models.QuerySet[Any]", query: Any, kind: Kind, alias: str, last_step: Step | None
+) -> object:
+    """Run the Django method of `kind` (inside `compiler.capture()`, which stops it at its statement)."""
+    if kind == "count":
+        return query.get_count(using=alias)
+    if kind == "exists":
+        return query.has_results(using=alias)
+    if kind == "aggregate":
+        assert last_step is not None, "aggregate() has its arguments"
+        return models.QuerySet.aggregate(django_queryset, *last_step.args, **last_step.kwargs)
+    if kind == "update":
+        assert last_step is not None, "update() has its arguments"
+        return models.QuerySet.update(django_queryset, **last_step.kwargs)
+    query.clear_ordering(force=True)  # what Django's `delete()` does first
+    return django_queryset._raw_delete(alias)
 
 
-def result_builder_for(
-    model: type[models.Model], sql_compiler: Any, values_fields: tuple[str, ...] | None
-) -> tuple[ResultBuilder, tuple[type[models.Model], ...]] | None:
-    """A `ResultBuilder` for the rows of `sql_compiler`'s `SELECT`, and the
-    models of `select_related()` it makes, or `None` if the rows aren't simply
-    the model's own columns (or, for `values()`, the fields asked for), plus
-    whole related models.
-
-    After `as_sql()`, the compiler knows what it selected (`select`), which
-    model the columns belong to (`klass_info`) and how Django converts each
-    one (`get_converters()`): the same things Django's iterable classes read.
-    """
-    columns = [selected[0] for selected in sql_compiler.select]
-    if sql_compiler.has_extra_select:
-        return None  # columns added only for ordering
-    related: list[RelatedModel] = []
-    related_models: list[type[models.Model]] = []
-    if values_fields is None:
-        # Model instances: one attribute per column, every field of the model,
-        # then every field of each related model (`select_related()`).
-        klass_info = sql_compiler.klass_info
-        if sql_compiler.annotation_col_map or klass_info is None or klass_info["model"] is not model:
-            return None
-        if whole_model_columns(klass_info, columns) != (0, len(model._meta.concrete_fields)):
-            return None  # some fields are deferred (`only()`, `defer()`): Django's `from_db()` handles that
-        found_related = related_models_for(klass_info, columns, related_models)
-        if found_related is None:
-            return None
-        related = found_related
-        column_count = len(model._meta.concrete_fields)
-        for related_model in related_models:
-            column_count += len(related_model._meta.concrete_fields)
-        if column_count != len(columns):
-            return None  # columns that belong to no model
-        names = [column.target.attname for column in columns]
-    else:
-        # `values()` and `values_list()`: one key (or tuple position) per field
-        # asked for, named like Django's `ValuesIterable` names them. (Django
-        # 6.1 selects them `AS` their names, which the compiler lists in
-        # `annotation_col_map`; real annotations are in `annotation_select`.)
-        query = sql_compiler.query
-        names = list(query.values_select)
-        if query.extra_select or query.annotation_select or len(names) != len(columns):
-            return None
-    found_converters = sql_compiler.get_converters(columns)
-    converters = []
-    conversions: list[tuple[Any, ...] | None] = []
-    for index in range(len(columns)):
-        column_converters = found_converters.get(index)  # `(functions, expression)`, or `None`
-        converters.append(column_converters)
-        if column_converters is None:
-            conversions.append(None)
-        else:
-            functions, expression = column_converters
-            conversions.append(conversion_for(functions, expression, sql_compiler.connection))
-    if values_fields is not None:
-        return ResultBuilder(names, converters, conversions, sql_compiler.connection), ()
-    builder = ResultBuilder(names, converters, conversions, sql_compiler.connection, model, ModelState, related)
-    return builder, tuple(related_models)
-
-
-def related_models_for(
-    klass_info: dict[str, Any], columns: list[Any], related_models: list[type[models.Model]]
-) -> list[RelatedModel] | None:
-    """The `RelatedModel`s `select_related()` adds below `klass_info` (and,
-    in turn, below them), or `None` if one isn't simple enough. Each model is
-    also added to `related_models`.
-
-    Django describes each related model in `klass_info["related_klass_infos"]`,
-    for its `RelatedPopulator`: the model, its columns, and the functions that
-    cache it on its parent (`local_setter`) and its parent on it (`remote_setter`).
-    """
-    related = []
-    for related_info in klass_info.get("related_klass_infos", []):
-        related_model = related_info["model"]
-        model_columns = whole_model_columns(related_info, columns)
-        # `from_parent`: a child model of multi-table inheritance, whose
-        # columns are mixed with its parent's. Django's `RelatedPopulator` reorders them.
-        if related_info["from_parent"] or model_columns is None:
-            return None
-        first_column, end_column = model_columns
-        if end_column - first_column != len(related_model._meta.concrete_fields):
-            return None  # some fields are deferred (`only()`)
-        names = [columns[index].target.attname for index in range(first_column, end_column)]
-        # Django checks the first column of the primary key (a composite
-        # primary key's columns are all `NULL` when one is).
-        primary_key_name = related_model._meta.pk_fields[0].attname
-        if primary_key_name not in names:
-            return None
-        below = related_models_for(related_info, columns, related_models)
-        if below is None:
-            return None
-        related_models.append(related_model)
-        related.append(
-            RelatedModel(
-                related_model,
-                first_column,
-                end_column,
-                first_column + names.index(primary_key_name),
-                related_info["local_setter"],
-                related_info["remote_setter"],
-                below,
-            )
-        )
-    return related
-
-
-def whole_model_columns(klass_info: dict[str, Any], columns: list[Any]) -> tuple[int, int] | None:
-    """Where a model's columns start and end in the row, `(first, end)` like
-    `row[first:end]`, if they are side by side and are plain columns. Otherwise `None`."""
-    select_fields = list(klass_info["select_fields"])
-    if not select_fields:
-        return None
-    first_column, end_column = select_fields[0], select_fields[-1] + 1
-    if select_fields != list(range(first_column, end_column)):
-        return None
-    for index in select_fields:
-        if getattr(columns[index], "target", None) is None:
-            return None
-    return first_column, end_column
-
-
-def parameters_for(simple_query: SimpleQuery, connection: Any, writes_booleans_in_sql: bool = False) -> list[Any]:
-    """The filters' parameters, computed like Django's lookups compute them.
-
-    The values were prepared by their field when `filter()` ran; the database
-    connection finishes them (`get_db_prep_value()`: dates to text, and so on).
-    `writes_booleans_in_sql` leaves out `True` and `False` compared with `exact`
-    (see `Statement.writes_booleans_in_sql`).
-    """
-    parameters: list[Any] = []
-    for condition in simple_query.conditions:
-        if writes_booleans_in_sql and condition.lookup == "exact" and isinstance(condition.detail, bool):
-            continue
-        # Django's lookups prepare a foreign key's value with the field it points to.
-        field = getattr(condition.field, "target_field", None) or condition.field
-        for value in condition.values:
-            parameters.append(field.get_db_prep_value(value, connection, prepared=True))
-    return parameters
-
-
-def update_parameters(updates: tuple[Update, ...], connection: Any) -> list[Any]:
-    """The parameters of an `UPDATE`'s `SET`, prepared like Django's `UPDATE`
-    compiler prepares them (`get_db_prep_save()`). `None` has none: it is `NULL` in the SQL."""
-    parameters = []
-    for update in updates:
-        if update.value is not None:
-            parameters.append(update.field.get_db_prep_save(update.value, connection))
-    return parameters
-
-
-def values_fit_their_columns(simple_query: SimpleQuery, connection: Any) -> bool:
+def values_fit_their_columns(values: tuple[QueryValue, ...], connection: Any) -> bool:
     """Whether every integer fits its column, by Django's rules.
 
     Django's integer lookups know without asking that a number bigger than the
     column can hold matches nothing (`pages=2**70`), or everything (`pages__lt=2**70`),
     and run no SQL, or other SQL. The fast lane leaves those queries to Django.
     """
-    for condition in simple_query.conditions:
-        if not condition.checks_integer_range:
+    for value in values:
+        if not value.checks_integer_range:
             continue
-        smallest, largest = connection.ops.integer_field_range(condition.field.get_internal_type())
-        for value in condition.values:
-            if (smallest is not None and value < smallest) or (largest is not None and value > largest):
-                return False
+        smallest, largest = connection.ops.integer_field_range(value.field.get_internal_type())
+        number = value.value
+        if (smallest is not None and number < smallest) or (largest is not None and number > largest):
+            return False
     return True
 
 
@@ -336,6 +245,7 @@ def forget_statements(**_details: object) -> None:
     """Forget every statement, when a test changes Django's settings: the SQL
     or the converters might change with them."""
     statements.clear()
+    attempts.clear()
 
 
 setting_changed.connect(forget_statements)

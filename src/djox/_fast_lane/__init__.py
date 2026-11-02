@@ -1,33 +1,37 @@
-"""The fast lane: simple queries skip Django's query building and compiler.
+"""The fast lane: queries skip Django's query building and compiler.
 
 The safe lane (`djox.QuerySet` alone) lets Django build every query, write
 its SQL and build its objects, and only runs the SQL on djox. That Python is
-most of the time of a query. The fast lane notices queries that are simple
-enough, writes down what they ask for (`SimpleQuery`), and then:
+most of the time of a query. The fast lane instead writes down the calls
+that make a query (a `QueryRecipe`: `filter()`, `annotate()`, `order_by()`...),
+and then:
 
 1. **reuses the SQL** Django wrote for the first query of the same *shape*
-   (the same filters, ordering, slice and columns, with any values),
-2. **computes the parameters** with the fields' own methods, like Django's lookups,
+   (the same calls, with any values),
+2. **computes the parameters** from the query's values, the way Django does,
 3. **runs the SQL** through `djox._running`, like the safe lane,
 4. **builds the results in Rust** (`ResultBuilder`: instances, dicts or
    tuples), converting dates, times, decimals and booleans in Rust the way
    Django's converters do.
 
-It serves sync and async methods, reads (rows, `count()`, `exists()`) and
-simple writes (`update()`, `delete()`, and the `INSERT` of `create()` and
-`asave()`, with `inserts.py`).
+It serves sync and async methods, reads (rows, `count()`, `exists()`,
+`aggregate()`) and writes (`update()`, `delete()`, and the `INSERT` of
+`create()` and `asave()`, with `inserts.py`).
 
 Anything else goes to Django, at the moment Django would see it, so results
 and errors are the same. `DJOX_FAST_LANE = False` in the settings turns it off.
 
-| File              | What it does                                                          |
-|-------------------|-----------------------------------------------------------------------|
-| `simple_query.py` | `SimpleQuery`: the note a `QuerySet` keeps; building Django's `Query` from it |
-| `lookups.py`      | Understanding `filter()`, `exclude()`, `Q` and `order_by()` arguments, like Django's lookups |
-| `statements.py`   | The SQL of each shape, written once by Django and kept                |
-| `conversions.py`  | Which of Django's converters Rust can do instead                      |
-| `running.py`      | Running a simple query, sync or async, and turning its rows into results |
-| `inserts.py`      | The `INSERT` of each model's new objects, written once by Django and kept |
+| File             | What it does                                                          |
+|------------------|-----------------------------------------------------------------------|
+| `recipe.py`      | `QueryRecipe`: the calls a `QuerySet` keeps; building Django's `QuerySet` from them |
+| `arguments.py`   | Reading each call's arguments into a shape and values, like Django's lookups |
+| `checks.py`      | Django checks each new kind of call once, so its errors come at its moment |
+| `statements.py`  | The SQL of each shape, written once by Django and kept                |
+| `parameters.py`  | Which value makes each of Django's parameters                         |
+| `results.py`     | The `ResultBuilder` of each shape                                     |
+| `conversions.py` | Which of Django's converters Rust can do instead                      |
+| `running.py`     | Running a recipe, sync or async, and turning its rows into results    |
+| `inserts.py`     | The `INSERT` of each model's new objects, written once by Django and kept |
 """
 
 from django.conf import settings

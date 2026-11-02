@@ -64,7 +64,7 @@ settings.configure(
             "OPTIONS": {"init_command": "PRAGMA synchronous = NORMAL"},
         },
     },
-    INSTALLED_APPS=[],
+    INSTALLED_APPS=["shelf"],  # the app of the models below (`shelf/`)
     USE_TZ=True,
     DJOX_FAST_LANE=True,  # switched off for the "djox safe lane" contender
 )
@@ -72,6 +72,7 @@ django.setup()
 
 from asgiref.sync import sync_to_async  # noqa: E402
 from django.db import connection, models, transaction  # noqa: E402  (needs the settings above)
+from django.db.models import Count, F, Sum  # noqa: E402
 
 import djox  # noqa: E402
 
@@ -184,6 +185,25 @@ def related_querysets(books: models.Manager, chapters: models.Manager) -> dict[s
     }
 
 
+def expression_querysets(books: models.Manager) -> dict[str, Callable[[], models.QuerySet]]:
+    """Queries with annotations, and a filter through a reverse relation (the
+    general fast lane), as querysets of the given manager."""
+    return {
+        "10 books with a chapter count": lambda: (
+            books.filter(pages=600).annotate(chapter_count=Count("chapters")).order_by("id")
+        ),
+        "10 books by chapter title": lambda: books.filter(pages=600, chapters__title="Chapter 2").order_by("id"),
+    }
+
+
+def sum_of_pages(books: models.Manager) -> object:
+    return books.filter(pages__gt=500).aggregate(total=Sum("pages"))
+
+
+def add_a_page(books: models.Manager) -> object:
+    return books.filter(id=7).update(pages=F("pages") + 1)
+
+
 def make_django_sync() -> dict[str, Callable[[], object]]:
     return {
         "get one book by id": lambda: Book.objects.get(id=7),
@@ -197,6 +217,9 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("default"),
         "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
         **listed(related_querysets(Book.objects, Chapter.objects)),
+        **listed(expression_querysets(Book.objects)),
+        "sum of pages": lambda: sum_of_pages(Book.objects),
+        "update with F()": lambda: add_a_page(Book.objects),
     }
 
 
@@ -235,6 +258,9 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
         ),
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
         **fetched(related_querysets(Book.objects, Chapter.objects)),
+        **fetched(expression_querysets(Book.objects)),
+        "sum of pages": lambda: Book.objects.filter(pages__gt=500).aaggregate(total=Sum("pages")),
+        "update with F()": lambda: Book.objects.filter(id=7).aupdate(pages=F("pages") + 1),
     }
 
 
@@ -285,6 +311,9 @@ def make_djox_sync(manager: models.Manager, chapter_manager: models.Manager) -> 
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("djox"),
         "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
         **listed(related_querysets(books, chapter_manager.db_manager("djox"))),
+        **listed(expression_querysets(books)),
+        "sum of pages": lambda: sum_of_pages(books),
+        "update with F()": lambda: add_a_page(books),
     }
 
 
@@ -312,6 +341,9 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "one insert, or two in a transaction": alternating(lambda: books.acreate(**new_book()), two_inserts),
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
         **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"))),
+        **fetched(expression_querysets(books)),
+        "sum of pages": lambda: books.filter(pages__gt=500).aaggregate(total=Sum("pages")),
+        "update with F()": lambda: books.filter(id=7).aupdate(pages=F("pages") + 1),
     }
 
 
@@ -366,6 +398,10 @@ REPEATS = {
     "20 chapters with their book": 1000,
     "1,000 chapters with their book": 30,
     "20 books with their chapters": 500,
+    "10 books with a chapter count": 500,
+    "10 books by chapter title": 500,
+    "sum of pages": 300,
+    "update with F()": 500,
 }
 CONCURRENT_TASKS = 100
 # Each runs `CONCURRENT_TASKS` calls of a scenario at once, with `asyncio.gather()`.
