@@ -33,6 +33,10 @@ A small shop app ([`web/app.py`](https://github.com/daniprol/djox/blob/main/benc
   - get one book (random id)
   - list a page of 20 books with their authors: a `count()` and a `select_related()` join (random page)
   - update a book (`PATCH`), create a book (`POST`)
+  - a page of 20 authors with their books' stats: `annotate(Count("books"), Sum("books__pages"))`, a `GROUP BY`
+    over a join
+  - one author's stats: `aggregate(Avg(), Max(), Sum())` of their 100 books
+  - count a read of a book (`POST`): `update(read_count=F("read_count") + 1)`
 - **Stacks**: the same code. djox only changes settings: its `ENGINE`, and `"djox"` in `INSTALLED_APPS`.
 - **Server**: [granian](https://github.com/emmett-framework/granian), one worker process, one thread. WSGI for sync
   views and DRF, ASGI for async views: Django's handler on Django, djox's (`djox.asgi`) on djox. No middleware.
@@ -61,6 +65,21 @@ Postgres:
 | list a page, with authors | 157 | 341 (2.2x) | 185 | 596 (3.2x) | 166 | 208 (1.3x) |
 | update a book | 659 | 700 (1.1x) | 341 | 1,018 (3.0x) | 227 | 248 (1.1x) |
 | create a book | 574 | 558 (1.0x) | 315 | 929 (2.9x) | 252 | 263 (1.0x) |
+
+Annotations, aggregates and `F()` on SQLite, measured after the tables above, with djox before and after
+[the general fast lane](https://daniprol.github.io/djox/fast-lane/) (3 rounds, the same load):
+
+| | Sync, Django | Sync, djox before | Sync, djox | Async, Django | Async, djox before | Async, djox | DRF, Django | DRF, djox before | DRF, djox |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| get one book | 2,307 | 4,643 | 4,330 (1.9x) | 339 | 2,670 | 2,541 (7.5x) | 898 | 1,134 | 1,162 (1.3x) |
+| authors with stats | 242 | 259 | 324 (1.3x) | 135 | 626 | 848 (6.3x) | 208 | 202 | 207 (1.0x) |
+| one author's stats | 1,282 | 1,214 | 3,704 (2.9x) | 293 | 797 | 2,448 (8.4x) | 1,071 | 997 | 1,925 (1.8x) |
+| count a read | 2,442 | 2,312 | 3,384 (1.4x) | 348 | 911 | 1,267 (3.6x) | 1,709 | 1,467 | 2,123 (1.2x) |
+
+- **`aggregate()` and `update()` with `F()` now take the fast lane**: one author's stats serve 3 times the requests
+  of djox before, sync or async.
+- **Authors with stats are bound by SQLite**: the `GROUP BY` over 10,000 books takes most of each request, so the
+  fast lane adds a quarter to a third.
 
 - **Async views: 2.9 to 13.3 times the requests.** Django runs every async query on its one worker thread, and
   its ASGI handler hops to threads for each request's signals. djox runs the queries on its own connections

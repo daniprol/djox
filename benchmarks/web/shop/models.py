@@ -13,3 +13,4 @@ class Book(models.Model):
     price = models.DecimalField(max_digits=6, decimal_places=2)
     published = models.DateTimeField()
     author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="books")
+    read_count = models.IntegerField(default=0)  # how many times the book was read: `F("read_count") + 1`
