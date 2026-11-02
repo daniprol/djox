@@ -65,27 +65,27 @@
         },
         "drf": {
           "get one book": {
-            "requests_per_second": 599.1505506183964,
-            "p50_ms": 47.594553,
-            "p99_ms": 100.978326,
+            "requests_per_second": 808.6594390613192,
+            "p50_ms": 38.16749299999999,
+            "p99_ms": 58.606176000000005,
             "failed": 0
           },
           "list a page, with authors": {
-            "requests_per_second": 290.22984648353435,
-            "p50_ms": 101.42432699999999,
-            "p99_ms": 193.16968,
+            "requests_per_second": 415.23538657475865,
+            "p50_ms": 74.32742300000001,
+            "p99_ms": 112.52890000000001,
             "failed": 0
           },
           "update a book": {
-            "requests_per_second": 394.0994181668074,
-            "p50_ms": 79.120466,
-            "p99_ms": 147.286918,
+            "requests_per_second": 501.68593316739793,
+            "p50_ms": 64.98799,
+            "p99_ms": 92.546773,
             "failed": 0
           },
           "create a book": {
-            "requests_per_second": 423.0972534372586,
-            "p50_ms": 71.155559,
-            "p99_ms": 116.20458599999999,
+            "requests_per_second": 556.4439219314496,
+            "p50_ms": 56.766281,
+            "p99_ms": 87.212158,
             "failed": 0
           }
         }
@@ -145,27 +145,27 @@
         },
         "drf": {
           "get one book": {
-            "requests_per_second": 545.4948472367836,
-            "p50_ms": 52.107421,
-            "p99_ms": 103.668369,
+            "requests_per_second": 1026.4560529131934,
+            "p50_ms": 29.93036,
+            "p99_ms": 45.766003,
             "failed": 0
           },
           "list a page, with authors": {
-            "requests_per_second": 283.85421650513285,
-            "p50_ms": 108.15852,
-            "p99_ms": 196.223134,
+            "requests_per_second": 400.4172023396223,
+            "p50_ms": 77.38224000000001,
+            "p99_ms": 116.073728,
             "failed": 0
           },
           "update a book": {
-            "requests_per_second": 335.40163334491046,
-            "p50_ms": 96.14841799999999,
-            "p99_ms": 139.157742,
+            "requests_per_second": 564.69430183619,
+            "p50_ms": 54.159642,
+            "p99_ms": 113.28659400000001,
             "failed": 0
           },
           "create a book": {
-            "requests_per_second": 482.66017470571137,
-            "p50_ms": 64.482675,
-            "p99_ms": 96.013581,
+            "requests_per_second": 645.9080021733703,
+            "p50_ms": 48.628177,
+            "p99_ms": 76.085347,
             "failed": 0
           }
         }
@@ -227,27 +227,27 @@
         },
         "drf": {
           "get one book": {
-            "requests_per_second": 310.638016625806,
-            "p50_ms": 102.494889,
-            "p99_ms": 185.671855,
+            "requests_per_second": 438.41062370857225,
+            "p50_ms": 71.132926,
+            "p99_ms": 111.60396300000001,
             "failed": 0
           },
           "list a page, with authors": {
-            "requests_per_second": 93.55266022092756,
-            "p50_ms": 345.99258100000003,
-            "p99_ms": 565.437984,
+            "requests_per_second": 166.30306746323754,
+            "p50_ms": 191.06843800000001,
+            "p99_ms": 334.96523499999995,
             "failed": 0
           },
           "update a book": {
-            "requests_per_second": 160.11286997055487,
-            "p50_ms": 203.18740699999998,
-            "p99_ms": 334.988952,
+            "requests_per_second": 227.36899242159268,
+            "p50_ms": 139.691607,
+            "p99_ms": 226.435858,
             "failed": 0
           },
           "create a book": {
-            "requests_per_second": 192.90257162408219,
-            "p50_ms": 166.598452,
-            "p99_ms": 273.882187,
+            "requests_per_second": 252.26781837349625,
+            "p50_ms": 126.754531,
+            "p99_ms": 192.698572,
             "failed": 0
           }
         }
@@ -307,27 +307,27 @@
         },
         "drf": {
           "get one book": {
-            "requests_per_second": 292.85939843709787,
-            "p50_ms": 108.012227,
-            "p99_ms": 181.75169699999998,
+            "requests_per_second": 521.3269480251907,
+            "p50_ms": 60.231537,
+            "p99_ms": 90.495928,
             "failed": 0
           },
           "list a page, with authors": {
-            "requests_per_second": 97.95740118658007,
-            "p50_ms": 340.49120300000004,
-            "p99_ms": 580.744184,
+            "requests_per_second": 207.91882873876298,
+            "p50_ms": 154.494597,
+            "p99_ms": 236.905771,
             "failed": 0
           },
           "update a book": {
-            "requests_per_second": 150.33878267911595,
-            "p50_ms": 209.46230699999998,
-            "p99_ms": 343.472151,
+            "requests_per_second": 248.07597788791864,
+            "p50_ms": 129.019049,
+            "p99_ms": 191.734962,
             "failed": 0
           },
           "create a book": {
-            "requests_per_second": 191.2819282457922,
-            "p50_ms": 168.78348400000002,
-            "p99_ms": 270.810228,
+            "requests_per_second": 263.24488589932656,
+            "p50_ms": 120.37072,
+            "p99_ms": 177.42398,
             "failed": 0
           }
         }
