@@ -13,5 +13,5 @@ def test_the_engine_asks_for_psycopg_3_when_it_is_missing(monkeypatch: pytest.Mo
     monkeypatch.delitem(sys.modules, "djox.backends.postgresql", raising=False)
     monkeypatch.delitem(sys.modules, "djox.backends.postgresql.base", raising=False)
 
-    with pytest.raises(ImproperlyConfigured, match=r'needs psycopg 3.*djox\[postgres\]'):
+    with pytest.raises(ImproperlyConfigured, match=r"needs psycopg 3.*djox\[postgres\]"):
         importlib.import_module("djox.backends.postgresql.base")
