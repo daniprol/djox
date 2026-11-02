@@ -157,17 +157,17 @@ def median_of_rounds(rounds: list[dict[str, dict[str, float]]]) -> dict[str, dic
     return medians
 
 
-def markdown(all_results: dict) -> str:
+def markdown(all_results: dict, apis: list[str]) -> str:
     lines = []
     for database, by_stack in all_results.items():
         lines += [
             f"\n{database}: requests per second, higher is better\n",
-            "| | " + " | ".join(f"{api} Django | {api} djox" for api in APIS) + " |",
-            "|---|" + "---:|" * (2 * len(APIS)),
+            "| | " + " | ".join(f"{api} Django | {api} djox" for api in apis) + " |",
+            "|---|" + "---:|" * (2 * len(apis)),
         ]
         for name, *_ in endpoints("sync"):
             cells = []
-            for api in APIS:
+            for api in apis:
                 django_rps = by_stack["django"][api][name]["requests_per_second"]
                 djox_rps = by_stack["djox"][api][name]["requests_per_second"]
                 cells += [f"{django_rps:,.0f}", f"{djox_rps:,.0f} ({djox_rps / django_rps:.1f}x)"]
@@ -175,9 +175,29 @@ def markdown(all_results: dict) -> str:
     return "\n".join(lines)
 
 
+def save(new_results: dict, arguments: argparse.Namespace) -> None:
+    """Write `results/web.json`, keeping the APIs and databases this run didn't measure."""
+    saved = json.loads(RESULTS.read_text()) if RESULTS.exists() else {"results": {}, "rounds": {}}
+    for database, by_stack in new_results.items():
+        saved["rounds"][database] = arguments.rounds
+        for stack, by_api in by_stack.items():
+            saved["results"].setdefault(database, {}).setdefault(stack, {}).update(by_api)
+    saved.update(
+        {
+            "machine": f"{platform.system()} {platform.machine()}, {os.cpu_count()} CPUs",
+            "python": platform.python_version(),
+            "django": django.get_version(),
+            "connections": CONNECTIONS,
+            "seconds_per_endpoint": arguments.duration,
+        }
+    )
+    RESULTS.write_text(json.dumps(saved, indent=2) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--databases", nargs="+", default=["sqlite", "postgres"])
+    parser.add_argument("--apis", nargs="+", default=APIS, choices=APIS, help="only some APIs, like --apis drf")
     parser.add_argument("--duration", type=float, default=5, help="seconds per endpoint")
     parser.add_argument("--rounds", type=int, default=3)
     arguments = parser.parse_args()
@@ -185,28 +205,16 @@ def main() -> None:
     for database in arguments.databases:
         if database == "postgres":
             create_postgres_database()
-        rounds: dict = {stack: {api: [] for api in APIS} for stack in STACKS}
+        rounds: dict = {stack: {api: [] for api in arguments.apis} for stack in STACKS}
         for _ in range(arguments.rounds):
-            for api in APIS:
+            for api in arguments.apis:
                 for stack in STACKS:
                     rounds[stack][api].append(run(database, stack, api, arguments.duration))
-        all_results[database] = {stack: {api: median_of_rounds(rounds[stack][api]) for api in APIS} for stack in STACKS}
-    RESULTS.write_text(
-        json.dumps(
-            {
-                "machine": f"{platform.system()} {platform.machine()}, {os.cpu_count()} CPUs",
-                "python": platform.python_version(),
-                "django": django.get_version(),
-                "connections": CONNECTIONS,
-                "seconds_per_endpoint": arguments.duration,
-                "rounds": arguments.rounds,
-                "results": all_results,
-            },
-            indent=2,
-        )
-        + "\n"
-    )
-    print(markdown(all_results))
+        all_results[database] = {
+            stack: {api: median_of_rounds(rounds[stack][api]) for api in arguments.apis} for stack in STACKS
+        }
+    save(all_results, arguments)
+    print(markdown(all_results, arguments.apis))
 
 
 if __name__ == "__main__":
