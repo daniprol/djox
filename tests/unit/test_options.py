@@ -8,8 +8,13 @@ from djox.backends.sqlite3.options import SqliteOptions, read_options
 
 def test_defaults() -> None:
     assert read_options("default", {}) == SqliteOptions(
-        timeout=5.0, transaction_mode="IMMEDIATE", init_commands=(), readers=None
+        timeout=5.0, transaction_mode="IMMEDIATE", init_commands=(), readers=None, quick_read_limit=0.001
     )
+
+
+def test_djox_options_are_read() -> None:
+    options = read_options("default", {"readers": 2, "quick_read_limit": 0})
+    assert (options.readers, options.quick_read_limit) == (2, 0.0)
 
 
 def test_djangos_options_are_read() -> None:
@@ -39,6 +44,7 @@ def test_unknown_options_are_refused() -> None:
         ({"transaction_mode": "LAZY"}, "transaction_mode"),
         ({"init_command": ["PRAGMA x"]}, "init_command"),
         ({"readers": -1}, "readers"),
+        ({"quick_read_limit": "1ms"}, "quick_read_limit"),
     ],
 )
 def test_invalid_options_name_the_option(options: dict[str, object], message: str) -> None:

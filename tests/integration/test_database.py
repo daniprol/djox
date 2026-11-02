@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -77,6 +78,33 @@ async def test_a_slow_query_does_not_block_the_event_loop(database: djox.Databas
     assert ticks > 5  # the loop kept running while SQLite worked
 
 
+async def test_a_small_read_is_answered_right_away(books: djox.Database) -> None:
+    await books.execute("INSERT INTO book (title) VALUES ('Dune')")
+    answer = books.fetch_one("SELECT title FROM book WHERE id = %s", [1])
+    # A quick read: run on this thread, faster than a trip to a reader thread.
+    assert answer.done()
+    assert await answer == ("Dune",)
+
+
+async def test_a_slow_read_moves_to_a_reader_after_the_quick_read_limit(database: djox.Database) -> None:
+    slow_query = """
+        WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 3000000)
+        SELECT count(*) FROM numbers
+    """
+    started = time.perf_counter()
+    answer = database.fetch_one(slow_query)
+    assert time.perf_counter() - started < 0.05  # stopped after 1 ms, not run to the end here
+    assert not answer.done()
+    assert await answer == (3000000,)
+
+
+async def test_quick_reads_can_be_turned_off(tmp_path: Path) -> None:
+    with djox.Database.sqlite(tmp_path / "app.sqlite3", quick_read_limit=0) as database:
+        answer = database.fetch_one("SELECT 1")
+        assert not answer.done()
+        assert await answer == (1,)
+
+
 async def test_works_with_no_readers(tmp_path: Path) -> None:
     with djox.Database.sqlite(tmp_path / "app.sqlite3", readers=0) as database:
         assert await database.fetch_one("SELECT 1") == (1,)
@@ -113,3 +141,5 @@ def test_in_memory_databases_are_refused(path: str) -> None:
 def test_settings_are_checked(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="timeout"):
         djox.Database.sqlite(tmp_path / "app.sqlite3", timeout=-1)
+    with pytest.raises(ValueError, match="quick_read_limit"):
+        djox.Database.sqlite(tmp_path / "app.sqlite3", quick_read_limit=float("nan"))

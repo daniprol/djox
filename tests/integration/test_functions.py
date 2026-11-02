@@ -70,7 +70,7 @@ async def test_prepare_runs_on_every_connection_of_a_database(tmp_path: Path) ->
         prepared.append(connection)
 
     with djox.Database.sqlite(tmp_path / "app.sqlite3", readers=2, prepare=prepare) as database:
-        assert len(prepared) == 3  # the writer and two readers
+        assert len(prepared) == 4  # the writer, two readers and the quick reader
         assert await database.fetch_one("SELECT answer()") == (42,)
         assert await database.fetch_all("SELECT answer() AS answer") == [(42,)]
 

@@ -14,7 +14,7 @@ uuid = "1"
 # SQLite backend
 crossbeam-channel = "0.5"
 # `functions`: SQL functions written in Rust or Python (Django needs ~40). `limits`: read SQLite's limits.
-rusqlite = { version = "0.41", features = ["bundled", "functions", "limits"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions", "hooks", "limits"] }
 
 # Postgres backend
 # A pool of connections that reconnects broken ones and caches prepared statements.

@@ -7,6 +7,7 @@ use crossbeam_channel::Sender;
 use djox_core::{ChunkRequests, Database, Error, Executed, ReplySender, Result, Rows, Value};
 
 use super::connection::{Access, SqliteConnection};
+use super::quick_reads::QuickReader;
 use super::readers::ReaderQueue;
 use super::settings::SqliteSettings;
 use super::worker::{Job, Jobs, start_worker};
@@ -18,6 +19,8 @@ use super::worker::{Job, Jobs, start_worker};
 ///   order they were sent, so they never fail with "database is locked".
 /// - `fetch_all` goes to whichever reader is free. A statement that writes
 ///   (like `INSERT ... RETURNING`) is passed on to the writer.
+/// - `fetch_all_quickly` runs a small read right on the calling thread, on a
+///   connection of its own (see `quick_reads.rs`).
 /// - `stream_rows` opens a reader connection of its own, on a thread of its
 ///   own, for as long as the stream lasts.
 pub struct SqliteDatabase {
@@ -28,6 +31,8 @@ pub struct SqliteDatabase {
     /// one locks it just long enough to copy a queue sender.
     queues: Mutex<Option<Queues>>,
     settings: SqliteSettings,
+    /// The connection for quick reads, or `None` if they are off.
+    quick_reader: Option<QuickReader>,
     /// What `open_with` was given to prepare each new connection, kept for
     /// the connections streams open later.
     prepare: Arc<Prepare>,
@@ -74,6 +79,12 @@ impl SqliteDatabase {
         for _ in 0..settings.reader_count {
             reader_connections.push(prepare(SqliteConnection::open(&settings, Access::Reader)?)?);
         }
+        let quick_reader = if settings.quick_read_limit.is_zero() {
+            None
+        } else {
+            let connection = prepare(SqliteConnection::open(&settings, Access::Reader)?)?;
+            Some(QuickReader::new(connection, settings.quick_read_limit)?)
+        };
 
         // An unbounded channel is like Python's `queue.SimpleQueue`: sending never waits.
         let (writer_queue, writer_jobs) = crossbeam_channel::unbounded();
@@ -103,6 +114,7 @@ impl SqliteDatabase {
         Ok(SqliteDatabase {
             queues: Mutex::new(Some(queues)),
             settings,
+            quick_reader,
             prepare: Arc::new(prepare),
         })
     }
@@ -159,6 +171,14 @@ impl Database for SqliteDatabase {
 
     fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>) {
         self.send_to_readers(Job::FetchAll { sql, parameters, reply });
+    }
+
+    fn fetch_all_quickly(&self, sql: &str, parameters: &[Value]) -> Option<Rows> {
+        if self.is_closed() {
+            return None; // `fetch_all` answers `Error::Closed`
+        }
+        // `?` on an `Option` returns `None` right away when there is no quick reader.
+        self.quick_reader.as_ref()?.fetch_all(sql, parameters)
     }
 
     fn stream_rows(&self, sql: String, parameters: Vec<Value>, chunk_size: usize, requests: ChunkRequests) {
@@ -313,6 +333,29 @@ mod tests {
     }
 
     #[test]
+    fn quick_reads_answer_small_reads_and_leave_the_rest() {
+        let (_folder, database) = open(1);
+        let rows = database.fetch_all_quickly("SELECT count(*) FROM book", &[]).unwrap();
+        assert_eq!(rows.rows, [[Value::Integer(0)]]);
+        assert!(
+            database
+                .fetch_all_quickly("INSERT INTO book (title) VALUES ('Dune') RETURNING id", &[])
+                .is_none()
+        );
+        database.close();
+        assert!(database.fetch_all_quickly("SELECT 1", &[]).is_none(), "closed");
+    }
+
+    #[test]
+    fn quick_reads_can_be_turned_off() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut settings = SqliteSettings::new(folder.path().join("app.sqlite3"));
+        settings.quick_read_limit = std::time::Duration::ZERO;
+        let database = SqliteDatabase::open(settings).unwrap();
+        assert!(database.fetch_all_quickly("SELECT 1", &[]).is_none());
+    }
+
+    #[test]
     fn works_with_no_readers() {
         let (_folder, database) = open(0);
         assert_eq!(count_books(&database), Value::Integer(0));
@@ -346,7 +389,11 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(*prepared.lock().unwrap(), 3, "the writer and two readers");
+        assert_eq!(
+            *prepared.lock().unwrap(),
+            4,
+            "the writer, two readers and the quick reader"
+        );
         let rows = fetch_all(&database, "SELECT answer()", vec![]).unwrap();
         assert_eq!(rows.rows, [[Value::Integer(42)]]);
     }

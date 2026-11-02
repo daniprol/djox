@@ -100,7 +100,11 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
             prepare_connection(connection, init_commands)
 
         return djox.Database.sqlite(
-            str(self.settings_dict["NAME"]), readers=options.readers, timeout=options.timeout, prepare=prepare
+            str(self.settings_dict["NAME"]),
+            readers=options.readers,
+            timeout=options.timeout,
+            quick_read_limit=options.quick_read_limit,
+            prepare=prepare,
         )
 
 

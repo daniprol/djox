@@ -14,7 +14,8 @@ use crate::{ChunkRequests, Executed, ReplySender, Rows, Value};
 /// - **SQL uses Django's `%s` placeholders**, because that is what Django's
 ///   SQL compiler writes. Each backend converts them to its own style (`?` for
 ///   SQLite, `$1` for Postgres). `%%` is a literal `%`.
-/// - **Methods never block.** Each one sends the statement right away and
+/// - **Methods never block** (but [`Database::fetch_all_quickly`], which may
+///   for a moment, by design). Each one sends the statement right away and
 ///   returns; the answer comes later through the [`ReplySender`], exactly
 ///   once. A statement sent after an earlier one was answered sees what the
 ///   earlier one did. Statements sent at the same moment may run at the same
@@ -31,6 +32,23 @@ pub trait Database: Send + Sync {
 
     /// Runs a query and returns all its rows.
     fn fetch_all(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Rows>);
+
+    /// Runs a query right here, on the calling thread, if the backend can
+    /// answer it within a moment: a *quick read*. Returns `None` when it
+    /// can't (the statement writes, takes longer, or the backend has no quick
+    /// reads); then send it with [`Database::fetch_all`] as usual.
+    ///
+    /// For a small query, sending it to another thread and waiting for the
+    /// answer takes longer than running it. The calling thread waits for a
+    /// quick read, but never longer than the backend's limit (the SQLite
+    /// backend's `quick_read_limit`). The default answers `None`: Postgres
+    /// has to wait for the network, so it has no quick reads.
+    ///
+    /// `&[Value]` borrows the parameters (a read-only view of a list), so they
+    /// can still be sent to `fetch_all` afterwards.
+    fn fetch_all_quickly(&self, _sql: &str, _parameters: &[Value]) -> Option<Rows> {
+        None
+    }
 
     /// Runs a query and hands its rows over `chunk_size` at a time, each
     /// chunk when the caller asks for it through its [`crate::RowStream`].
