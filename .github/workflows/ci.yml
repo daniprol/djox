@@ -32,6 +32,26 @@ jobs:
       - name: Push hooks (mypy, pyrefly, clippy, cargo test, pytest)
         run: uv run --frozen prek run --all-files --stage pre-push
 
+  other-platforms:
+    # The tests run on Linux; wheels are also built for Windows and macOS (release.yml), where
+    # some code differs (Unix sockets exist only on Unix). Building here catches that before a release.
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run --frozen python -c "import djox; print(djox.__version__, djox.sqlite_version)"
+
   django-versions:
     # Django's compiler internals change between releases, so the tests run on each supported one.
     name: Tests on Django ${{ matrix.django-version }}
