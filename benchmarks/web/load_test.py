@@ -39,10 +39,15 @@ def endpoints(api: str) -> list[tuple[str, str, str, str | None]]:
     """(name, method, URL regex, JSON body) for each endpoint of an API, writes last."""
     slash = "/" if api == "drf" else ""  # DRF's router adds a trailing slash
     author_field = "author" if api == "drf" else "author_id"
-    book = rf"{BASE}/{api}/books/[1-9][0-9]{{0,3}}{slash}"  # a random book, 1 to 9999
+    book_path = rf"{BASE}/{api}/books/[1-9][0-9]{{0,3}}"  # a random book, 1 to 9999
+    book = book_path + slash
+    author = rf"{BASE}/{api}/authors/[1-9][0-9]?"  # a random author, 1 to 99
     return [
         ("get one book", "GET", book, None),
         ("list a page, with authors", "GET", rf"{BASE}/{api}/books{slash}[?]page=[1-9][0-9]?", None),
+        ("authors with stats", "GET", rf"{BASE}/{api}/authors{slash}[?]page=[1-5]", None),
+        ("one author's stats", "GET", rf"{author}/stats{slash}", None),
+        ("count a read", "POST", rf"{book_path}/read{slash}", None),
         ("update a book", "PATCH", book, '{"pages": 123}'),
         (
             "create a book",

@@ -4,6 +4,12 @@
 
 The same endpoints three times, and the same code on both stacks:
 
+- books: get one, list a page with authors, update, create;
+- authors with their books' stats (`annotate(Count(), Sum())`), one author's
+  stats (`aggregate()`), and counting a read (`update(read_count=F(...) + 1)`):
+  the queries of a dashboard or a profile page.
+
+
 - `/sync/...`: plain Django views (run under WSGI).
 - `/async/...`: async Django views (run under ASGI).
 - `/drf/...`: a Django REST framework `ModelViewSet` (sync, under WSGI).
@@ -89,9 +95,10 @@ django.setup()
 from django.core.asgi import get_asgi_application  # noqa: E402  (needs the settings above)
 from django.core.wsgi import get_wsgi_application  # noqa: E402
 from django.db import connection  # noqa: E402
+from django.db.models import Avg, Count, F, Max, Sum  # noqa: E402
 from django.http import HttpRequest, JsonResponse  # noqa: E402
 from django.urls import include, path  # noqa: E402
-from rest_framework import routers, serializers, viewsets  # noqa: E402
+from rest_framework import decorators, response, routers, serializers, viewsets  # noqa: E402
 from shop.models import Author, Book  # noqa: E402
 
 
@@ -112,6 +119,32 @@ def book_with_author_as_dict(book: Book) -> dict[str, object]:
 
 def page_number(request: HttpRequest) -> int:
     return int(request.GET.get("page", "1"))
+
+
+def authors_with_stats() -> object:
+    """Authors with how many books they wrote and their total pages: a `GROUP BY` and a join."""
+    return Author.objects.annotate(book_count=Count("books"), total_pages=Sum("books__pages")).order_by("id")
+
+
+def author_with_stats_as_dict(author: Author) -> dict[str, object]:
+    return {
+        "id": author.pk,
+        "name": author.name,
+        "book_count": author.book_count,  # type: ignore[attr-defined]  # an annotation
+        "total_pages": author.total_pages,  # type: ignore[attr-defined]
+    }
+
+
+def books_stats(author_id: int) -> object:
+    """The books of one author, for `aggregate()`."""
+    return Book.objects.filter(author_id=author_id)
+
+
+STATS = {"average_pages": Avg("pages"), "longest": Max("pages"), "total_price": Sum("price")}
+
+
+def stats_as_dict(author_id: int, stats: dict[str, object]) -> dict[str, object]:
+    return {"author_id": author_id, **{name: str(value) for name, value in stats.items()}}
 
 
 # ---------------------------------------------------------------- plain sync views
@@ -137,6 +170,25 @@ def sync_book(request: HttpRequest, book_id: int) -> JsonResponse:
     return JsonResponse(book_as_dict(Book.objects.get(pk=book_id)))
 
 
+def sync_authors(request: HttpRequest) -> JsonResponse:
+    """GET: one page of authors with their books' stats."""
+    start = (page_number(request) - 1) * PAGE_SIZE
+    authors = authors_with_stats()[start : start + PAGE_SIZE]
+    results = [author_with_stats_as_dict(author) for author in authors]
+    return JsonResponse({"count": Author.objects.count(), "results": results})
+
+
+def sync_author_stats(request: HttpRequest, author_id: int) -> JsonResponse:
+    """GET: the stats of one author's books."""
+    return JsonResponse(stats_as_dict(author_id, books_stats(author_id).aggregate(**STATS)))
+
+
+def sync_read_book(request: HttpRequest, book_id: int) -> JsonResponse:
+    """POST: count one more read of a book."""
+    updated = Book.objects.filter(pk=book_id).update(read_count=F("read_count") + 1)
+    return JsonResponse({"updated": updated})
+
+
 # ---------------------------------------------------------------- async views: the same, with `a`-methods
 
 
@@ -158,6 +210,22 @@ async def async_book(request: HttpRequest, book_id: int) -> JsonResponse:
     return JsonResponse(book_as_dict(await Book.objects.aget(pk=book_id)))
 
 
+async def async_authors(request: HttpRequest) -> JsonResponse:
+    start = (page_number(request) - 1) * PAGE_SIZE
+    authors = authors_with_stats()[start : start + PAGE_SIZE]
+    results = [author_with_stats_as_dict(author) async for author in authors]
+    return JsonResponse({"count": await Author.objects.acount(), "results": results})
+
+
+async def async_author_stats(request: HttpRequest, author_id: int) -> JsonResponse:
+    return JsonResponse(stats_as_dict(author_id, await books_stats(author_id).aaggregate(**STATS)))
+
+
+async def async_read_book(request: HttpRequest, book_id: int) -> JsonResponse:
+    updated = await Book.objects.filter(pk=book_id).aupdate(read_count=F("read_count") + 1)
+    return JsonResponse({"updated": updated})
+
+
 # ---------------------------------------------------------------- Django REST framework
 
 
@@ -177,15 +245,45 @@ class BookViewSet(viewsets.ModelViewSet):
     queryset = Book.objects.select_related("author").order_by("id")
     serializer_class = BookSerializer
 
+    @decorators.action(detail=True, methods=["post"])
+    def read(self, request: HttpRequest, pk: str) -> response.Response:
+        updated = Book.objects.filter(pk=pk).update(read_count=F("read_count") + 1)
+        return response.Response({"updated": updated})
+
+
+class AuthorWithStatsSerializer(serializers.ModelSerializer):
+    book_count = serializers.IntegerField(read_only=True)
+    total_pages = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Author
+        fields = ("id", "name", "book_count", "total_pages")
+
+
+class AuthorViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = authors_with_stats()
+    serializer_class = AuthorWithStatsSerializer
+
+    @decorators.action(detail=True)
+    def stats(self, request: HttpRequest, pk: str) -> response.Response:
+        return response.Response(stats_as_dict(int(pk), books_stats(int(pk)).aggregate(**STATS)))
+
 
 router = routers.SimpleRouter()
 router.register("books", BookViewSet)
+router.register("authors", AuthorViewSet)
 
 urlpatterns = [
     path("sync/books", sync_books),
     path("sync/books/<int:book_id>", sync_book),
     path("async/books", async_books),
     path("async/books/<int:book_id>", async_book),
+    path("sync/authors", sync_authors),
+    path("sync/authors/<int:author_id>/stats", sync_author_stats),
+    path("sync/books/<int:book_id>/read", sync_read_book),
+    path("async/authors", async_authors),
+    path("async/authors/<int:author_id>/stats", async_author_stats),
+    path("async/books/<int:book_id>/read", async_read_book),
     path("drf/", include(router.urls)),
 ]
 
