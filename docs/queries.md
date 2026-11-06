@@ -26,6 +26,7 @@ count = await Book.objects.filter(author__name="Frank Herbert").acount()
 | `acount()`, `aexists()`, `acontains()`, `aaggregate()` | djox |
 | `acreate()` | djox, on the [fast lane](fast-lane.md#new-objects) (signals are sent with `asend()`); a djox thread for models with their own `save()`, or sync `pre_save`/`post_save` receivers |
 | `aupdate()` | djox |
+| `Book.objects.araw()` | djox ([raw queries](#raw-queries)) |
 | `adelete()` | djox when Django can delete with one statement (no `on_delete` work, no delete signal receivers); else a djox thread |
 | `aget_or_create()` | djox: the lookup, then the `INSERT` in a `djox.atomic()` block ([below](#several-statements)) |
 | `ain_bulk()`, `abulk_update()` | djox, on the [fast lane](fast-lane.md#many-objects-at-once) |
@@ -52,6 +53,26 @@ Django's steps one by one, each statement awaited on djox:
   `order_with_respect_to`, `abulk_update()` on a filtered QuerySet or a model
   with parent models, and `ain_bulk()` after `values()`, on a field that isn't
   unique, or with more ids than one query takes.
+
+## Raw queries
+
+`araw()` is the manager's `raw()` for async code. Await it for a list, or use
+`async for`:
+
+```python
+books = await Book.objects.araw("SELECT * FROM library_book WHERE pages > %s", [400])
+async for book in Book.objects.araw("SELECT * FROM library_book"):
+    print(book.title)
+```
+
+- **djox runs the SQL**, and Django builds the instances, so they are exactly
+  what `raw()` gives: columns matched to fields (`translations` works), extra
+  columns as attributes, other fields deferred.
+- **Placeholders are `%s`**, with `params` in a list or tuple. Named
+  parameters (`%(name)s` with a `dict`) run on Django's thread, like `raw()`.
+- **`prefetch_related()`** works on the result.
+- It runs in the open `djox.atomic()` block or sync transaction, if there is
+  one.
 
 ## "A djox thread"
 

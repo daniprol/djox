@@ -91,6 +91,14 @@ async def test_a_librarys_models_run_on_djox_too() -> None:
     assert (await User.objects.aget(username="dani")).first_name == "Dani"
 
 
+async def test_switched_managers_have_araw() -> None:
+    await Shelf.objects.acreate(name="Hall", width=120)
+
+    shelves = await Shelf.objects.araw("SELECT * FROM shelf_shelf WHERE width > %s", [100])
+
+    assert [shelf.name for shelf in shelves] == ["Hall"]
+
+
 def test_a_related_managers_queryset_stays_unchanged_by_its_copies() -> None:
     # Django 6.1's related managers set their `QuerySet` up "in place"
     # (`_avoid_cloning()`), calling `using()` there for a manager bound to a

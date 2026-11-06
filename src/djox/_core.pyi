@@ -142,6 +142,12 @@ class Database:
         """Run a query and return all its rows. A statement that writes
         (like `INSERT ... RETURNING`) still works: it runs on the writer."""
 
+    def fetch_all_with_columns(
+        self, sql: str, parameters: Sequence[Parameter] | None = None
+    ) -> asyncio.Future[tuple[list[str], list[Row]]]:
+        """Like `fetch_all()`, but returns `(columns, rows)`: the column names
+        as the query named them, then the rows."""
+
     def fetch_one(self, sql: str, parameters: Sequence[Parameter] | None = None) -> asyncio.Future[Row | None]:
         """Run a query and return its first row, or `None`."""
 

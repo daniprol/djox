@@ -8,6 +8,10 @@ break comes with a migration note.
 
 ### Added
 
+- **`Manager.araw()`**: Django's `raw()` for async code. `await Book.objects.araw(sql, params)` gives the
+  instances, and `async for` works too. djox runs the SQL and Django builds the instances (columns matched to
+  fields, `translations`, extra columns as attributes). `djox.Database.fetch_all_with_columns()` gives the
+  column names it needs.
 - **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
   when that can't block it, instead of hopping to a thread twice per request (an empty async view: 1.3 ms to
   0.16 ms). A request's sync code (a sync view, sync middleware) runs on one of djox's pooled threads instead
@@ -23,7 +27,9 @@ break comes with a migration note.
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
 - **Prefetching on the fast lane**: the query `prefetch_related()` runs for a reverse foreign key (an
   author's books) reuses Django's SQL for its shape and Rust builds the objects (20 books with their
-  chapters: 1,260 µs to 840 µs sync).
+  chapters: 1,260 µs to 840 µs sync). It does the same for a foreign key forwards (the author of each book:
+  874 µs to 325 µs sync) and a many-to-many field (the tags of each book: 1,112 µs to 742 µs sync). A
+  many-to-many field needs a djox default manager on the related model and a queryset with no calls.
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
 - **Quick SQLite writes**: a small async write (`aupdate()` of one row, `acreate()`, a fast `adelete()`) runs

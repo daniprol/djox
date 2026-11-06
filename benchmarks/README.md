@@ -150,34 +150,28 @@ handler on djox. Requests per second, higher is better:
 
 ## ORM calls on SQLite
 
-The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters
+The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters and 2 of 20 tags
 ([`run.py`](https://github.com/daniprol/djox/blob/main/benchmarks/run.py)). Microseconds per call, median of 5 rounds, lower is better.
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
-| get one book by id | 170 | 176 | 51 | 3 | 437 | 186 | 51 | 5 |
-| fetch 20 books | 421 | 442 | 119 | 24 | 857 | 481 | 112 | 21 |
-| fetch 1,000 books | 6,334 | 7,107 | 2,327 | 581 | 8,462 | 7,021 | 2,831 | 442 |
-| count | 247 | 229 | 84 | 64 | 546 | 229 | 83 | 44 |
-| update one book | 109 | 105 | 67 | 13 | 284 | 140 | 77 | 10 |
-| insert one book | 146 | 138 | 103 | 37 | 346 | 181 | 109 | 35 |
-| two inserts in a transaction | 265 | 389 | 304 | 35 | 467 | 440 | 231 | n/a |
-| get or create (exists) | 189 | 186 | 51 | n/a | 392 | 207 | 51 | n/a |
-| get or create (new) | 388 | 431 | 176 | n/a | 636 | 798 | 313 | n/a |
-| bulk create 100 books | 1,591 | 1,844 | 2,027 | n/a | 2,702 | 2,194 | 2,083 | n/a |
-| bulk update 100 books | 8,523 | 9,858 | 746 | n/a | 10,449 | 10,478 | 806 | n/a |
-| in bulk 100 books | 900 | 1,266 | 384 | n/a | 1,344 | 1,306 | 395 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 451 | 306 | 179 | n/a |
-| 20 chapters with their book | 563 | 723 | 194 | n/a | 1,001 | 770 | 195 | n/a |
-| 1,000 chapters with their book | 11,480 | 13,820 | 5,172 | n/a | 14,259 | 12,958 | 4,589 | n/a |
-| 20 books with their chapters | 1,503 | 1,755 | 939 | n/a | 2,159 | 2,170 | 1,338 | n/a |
-| 10 books with a chapter count | 460 | 601 | 157 | n/a | 898 | 625 | 155 | n/a |
-| 10 books by chapter title | 355 | 479 | 122 | n/a | 809 | 471 | 115 | n/a |
-| sum of pages | 335 | 373 | 190 | n/a | 652 | 426 | 164 | n/a |
-| update with F() | 188 | 195 | 93 | n/a | 431 | 231 | 118 | n/a |
-| 100 gets at once | n/a | n/a | n/a | n/a | 450 | 202 | 75 | 5 |
-| 100 get or create at once | n/a | n/a | n/a | n/a | 341 | 225 | 62 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | n/a | 446 | 302 | 153 | n/a |
+| get one book by id | 218 | 214 | 64 | 4 | 517 | 245 | 51 | 6 |
+| fetch 20 books | 474 | 522 | 124 | 24 | 963 | 592 | 141 | 27 |
+| fetch 1,000 books | 8,355 | 7,760 | 2,753 | 588 | 9,834 | 10,881 | 2,989 | 810 |
+| count | 290 | 263 | 93 | 61 | 568 | 306 | 89 | 58 |
+| update one book | 119 | 130 | 58 | 10 | 378 | 323 | 193 | 115 |
+| insert one book | 183 | 195 | 145 | 47 | 441 | 401 | 268 | 136 |
+| two inserts in a transaction | 319 | 346 | 332 | 60 | 645 | 1,485 | 1,280 | n/a |
+| get or create (exists) | 202 | 218 | 61 | n/a | 578 | 253 | 58 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 624 | 1,060 | 863 | n/a |
+| 20 chapters with their book | 744 | 744 | 219 | n/a | 1,245 | 924 | 206 | n/a |
+| 1,000 chapters with their book | 15,373 | 15,678 | 5,423 | n/a | 17,241 | 13,811 | 7,469 | n/a |
+| 20 books with their chapters | 1,514 | 1,745 | 983 | n/a | 2,522 | 2,475 | 1,608 | n/a |
+| 20 chapters with their book (prefetched) | 791 | 1,128 | 325 | n/a | 1,777 | 1,662 | 728 | n/a |
+| 20 books with their tags | 1,416 | 1,565 | 742 | n/a | 2,288 | 2,282 | 1,270 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 445 | 254 | 60 | 6 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 503 | 232 | 63 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 595 | 898 | 916 | n/a |
 
 | Contender | What runs |
 |---|---|
@@ -197,6 +191,16 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
   and Rust builds the chapters. 20 books with their chapters: sync 1,260 µs to 840 µs (same run, with and
   without it). The scenario uses `Prefetch("chapters", queryset=...)` so each contender's own manager builds the
   chapters.
+- **So does prefetching a foreign key forwards, and a many-to-many field** (the author of each book, the tags of
+  each book). Measured with and without it, in one run of the same VM:
+
+  | djox.Manager, µs | sync before | sync after | async before | async after | Django async |
+  |---|---|---|---|---|---|
+  | 20 chapters with their book (prefetched) | 874 | 325 | 1,192 | 728 | 1,523 |
+  | 20 books with their tags | 1,112 | 742 | 1,686 | 1,270 | 2,025 |
+
+  The many-to-many scenario passes `Prefetch("tags", queryset=Tag.objects.all())` where `Tag`'s default manager is
+  djox's: djox takes a many-to-many prefetch only for a related model with a djox default manager.
 - **`bulk_update()` takes the fast lane**: djox keeps the `UPDATE` Django writes for each shape of batch (a `CASE
   WHEN` per object) and only computes the parameters. 100 books: 746 µs sync against 8,523, 806 µs async against
   10,449. `in_bulk()` of 100 books: 384 µs against 900.
@@ -215,7 +219,8 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
 - **`create()` takes the fast lane**: `acreate()` 268 µs against 441, `create()` 145 against 183. Django writes the
   model's `INSERT` once.
-- **`prefetch_related()` gains less** (1.9 ms against 2.4 ms async): the prefetching query still runs Django's code.
+- **`prefetch_related()` gains less than `select_related()`**: only its queries take the fast lane; Django's code
+  still matches the objects, on one of djox's threads.
 - **djox's `ENGINE` alone costs about nothing**: "djox sync" is within noise of Django.
 - **A short `djox.atomic()` block is slower** than one `sync_to_async()` around a sync `atomic()`: it pays a
   thread round trip per statement. What it buys is async code inside the transaction.

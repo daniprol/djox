@@ -42,6 +42,7 @@ from django.utils.functional import cached_property
 
 from djox.models import Model
 from djox.query import QuerySet
+from djox.raw import AsyncRawQueries
 from djox.related import RunRelatedManagersOnDjox
 
 # `djox.Model`'s methods, put on chosen models that don't define their own.
@@ -121,7 +122,7 @@ def manager_class_on_djox(manager_class: type[models.Manager[Any]]) -> type:
         # `type(name, bases, attributes)` makes a class, like a `class` statement does.
         made = type(
             manager_class.__name__,
-            (manager_class, RunRelatedManagersOnDjox),
+            (manager_class, AsyncRawQueries, RunRelatedManagersOnDjox),
             {
                 "__module__": manager_class.__module__,
                 "__qualname__": manager_class.__qualname__,

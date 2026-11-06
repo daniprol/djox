@@ -130,6 +130,13 @@ class WriterTransaction:
         cursor = await self.run(sql, parameters)
         return cursor.fetchall()
 
+    async def fetch_all_with_columns(self, sql: str, parameters: Sequence[Any]) -> "tuple[list[str], list[Row]]":
+        """Like `fetch_all()`, with the column names too."""
+        self.check_can_run_queries()
+        cursor = await self.run(sql, parameters)
+        columns = [column[0] for column in cursor.description or ()]
+        return columns, cursor.fetchall()
+
     async def execute(self, sql: str, parameters: Sequence[Any]) -> int:
         """Run a statement of the block that changes data, and return how many rows it changed."""
         self.check_can_run_queries()

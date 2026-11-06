@@ -73,6 +73,7 @@ from djox._fast_lane.recipe import QueryRecipe, Step
 from djox._fast_lane.running import PreparedQuery
 from djox._fast_lane.statements import Kind
 from djox._prefetch_filter import use_fast_lane_for_prefetching
+from djox._prefetch_forward import use_fast_lane_for_forward_foreign_keys
 from djox._results import results_from_rows
 from djox.backends import engine
 from djox.backends.sqlite3 import compiler
@@ -80,6 +81,7 @@ from djox.prefetch import aprefetch_related_objects
 
 # Prefetching queries take the fast lane too (see `djox._prefetch_filter` for why this changes a Django function).
 use_fast_lane_for_prefetching()
+use_fast_lane_for_forward_foreign_keys()
 
 # The model class of a `QuerySet`, like `Book` in `QuerySet[Book]`.
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)

@@ -21,6 +21,21 @@ async def test_execute_and_fetch(books: djox.Database) -> None:
     assert await books.fetch_one("SELECT title FROM book WHERE pages > %s", [1000]) is None
 
 
+async def test_fetch_all_with_columns_gives_the_column_names_as_the_query_named_them(books: djox.Database) -> None:
+    await books.execute("INSERT INTO book (title, pages) VALUES (%s, %s)", ["Dune", 412])
+
+    columns, rows = await books.fetch_all_with_columns("SELECT title AS name, pages * 2 AS double, 7 FROM book")
+
+    assert columns == ["name", "double", "7"]
+    assert rows == [("Dune", 824, 7)]
+
+
+async def test_fetch_all_with_columns_names_the_columns_of_a_query_with_no_rows(books: djox.Database) -> None:
+    columns, rows = await books.fetch_all_with_columns("SELECT id, title FROM book")
+
+    assert (columns, rows) == (["id", "title"], [])
+
+
 async def test_fetch_all_runs_statements_that_write(books: djox.Database) -> None:
     rows = await books.fetch_all("INSERT INTO book (title) VALUES (%s) RETURNING id, title", ["Dune"])
     assert rows == [(1, "Dune")]
