@@ -4,14 +4,15 @@ SQLite lets one connection write at a time. djox writes through two kinds of
 connection:
 
 - **Plain writes** (`acreate()`, `aupdate()`, a fast `adelete()` outside a
-  transaction) go to djox's writer thread, which runs them one after the
-  other on its own connection. Many can be on their way at once: they never
-  fight each other.
-- **Transactions** (`djox.atomic()`) and Django's own write methods
-  (`aget_or_create()`, `abulk_create()`... on djox's threads, see
-  `djox._threads`) run on a Django connection of their own. djox's `ENGINE`
-  starts their transactions with `BEGIN IMMEDIATE`, which takes SQLite's
-  write lock at once.
+  transaction) run on djox's writer connection: right away if they are
+  quick, otherwise on its writer thread, one after the other. Many can be
+  on their way at once: they never fight each other.
+- **Transactions**: a `djox.atomic()` block runs on the writer connection
+  too (`djox._writer_transactions`), and holds it until it ends. Django's
+  own write methods outside a block (`aget_or_create()`, `abulk_create()`...
+  on djox's threads, see `djox._threads`) run on a Django connection of
+  their own. djox's `ENGINE` starts transactions with `BEGIN IMMEDIATE`,
+  which takes SQLite's write lock at once.
 
 If both kinds write at the same time, one of them finds the file locked.
 SQLite then sleeps and retries, with sleeps that grow up to 100 ms, so a

@@ -12,40 +12,19 @@
 //! a connection kept for that. To keep the event loop responsive, SQLite
 //! stops the query once it has run for `quick_read_limit` (1 ms by
 //! default); the query then runs on a reader as usual. Nothing is lost but
-//! that moment. The SQL is remembered as slow, and the next 100 reads of it
-//! go straight to a reader. Then it gets another chance: a query is not
-//! always slow (a cold cache, a busy machine). Each time it runs out of time
-//! again, it waits twice as long for its next chance, so a query that is
-//! really slow soon costs almost nothing.
+//! that moment, and the SQL is remembered as slow, so its next reads go
+//! straight to a reader for a while (see `statement_speeds.rs`).
 //!
 //! When two threads want a quick read at the same moment, the second doesn't
 //! wait for the first: it sends its query to a reader.
 
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use djox_core::{Result, Rows, Value};
 
 use super::connection::SqliteConnection;
-
-/// The most slow statements remembered. A program has a few dozen kinds of
-/// query; past this many, the list starts over rather than growing forever.
-const MAX_SLOW_STATEMENTS: usize = 1000;
-
-/// How many reads of a statement go to a reader after it first ran out of time.
-const READS_TO_SKIP_AT_FIRST: u32 = 100;
-
-/// How many times that number doubles at most (to 100 × 2⁷ = 12,800 reads).
-const MAX_DOUBLINGS: u32 = 7;
-
-/// What the quick reader remembers of a statement that ran out of time.
-struct SlowStatement {
-    /// How many times it ran out of time.
-    times_too_slow: u32,
-    /// How many of its next reads still go to a reader, before another chance here.
-    reads_to_skip: u32,
-}
+use super::statement_speeds::StatementSpeeds;
 
 /// A reader connection for quick reads (see the module docs).
 pub(crate) struct QuickReader {
@@ -53,8 +32,8 @@ pub(crate) struct QuickReader {
     connection: Mutex<SqliteConnection>,
     /// The longest a quick read may run.
     time_limit: Duration,
-    /// The reads that ran out of time, by SQL (a `HashMap` is like a `dict`).
-    slow_statements: Mutex<HashMap<String, SlowStatement>>,
+    /// The reads that ran out of time lately.
+    speeds: Mutex<StatementSpeeds>,
 }
 
 impl QuickReader {
@@ -65,7 +44,7 @@ impl QuickReader {
         Ok(QuickReader {
             connection: Mutex::new(connection),
             time_limit,
-            slow_statements: Mutex::new(HashMap::new()),
+            speeds: Mutex::new(StatementSpeeds::default()),
         })
     }
 
@@ -96,35 +75,14 @@ impl QuickReader {
         }
     }
 
-    /// Whether `sql` ran out of time lately and this read goes to a reader
-    /// (one read fewer to skip, then).
+    /// Whether `sql` ran out of time lately and this read goes to a reader.
     fn skips_slow_statement(&self, sql: &str) -> bool {
-        let mut slow_statements = self.slow_statements.lock().unwrap();
-        // `get_mut()` is like `dict.get()`, with a value we may change in place.
-        match slow_statements.get_mut(sql) {
-            Some(statement) if statement.reads_to_skip > 0 => {
-                statement.reads_to_skip -= 1;
-                true
-            }
-            _ => false,
-        }
+        self.speeds.lock().unwrap().skips(sql)
     }
 
-    /// Note that `sql` ran out of time: skip its next reads, twice as many as last time.
+    /// Note that `sql` ran out of time.
     fn remember_slow(&self, sql: &str) {
-        let mut slow_statements = self.slow_statements.lock().unwrap();
-        if slow_statements.len() >= MAX_SLOW_STATEMENTS && !slow_statements.contains_key(sql) {
-            slow_statements.clear();
-        }
-        // `entry().or_insert()` is like `dict.setdefault()`.
-        let statement = slow_statements.entry(sql.to_string()).or_insert(SlowStatement {
-            times_too_slow: 0,
-            reads_to_skip: 0,
-        });
-        let doublings = statement.times_too_slow.min(MAX_DOUBLINGS);
-        // `<<` doubles a number that many times: `100 << 2` is 400.
-        statement.reads_to_skip = READS_TO_SKIP_AT_FIRST << doublings;
-        statement.times_too_slow += 1;
+        self.speeds.lock().unwrap().remember_slow(sql);
     }
 }
 
@@ -213,10 +171,14 @@ mod tests {
             count
         };
         assert!(reader.fetch_all(slow, &[]).is_none());
-        assert_eq!(skipped_reads(&reader), READS_TO_SKIP_AT_FIRST);
+        assert_eq!(
+            skipped_reads(&reader),
+            100,
+            "statement_speeds.rs skips 100 runs at first"
+        );
         // Its chance came, and it ran out of time again: twice as many reads skipped.
         assert!(reader.fetch_all(slow, &[]).is_none());
-        assert_eq!(skipped_reads(&reader), 2 * READS_TO_SKIP_AT_FIRST);
+        assert_eq!(skipped_reads(&reader), 2 * 100);
     }
 
     #[test]

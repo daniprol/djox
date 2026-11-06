@@ -105,6 +105,67 @@ async def test_quick_reads_can_be_turned_off(tmp_path: Path) -> None:
         assert await answer == (1,)
 
 
+async def test_a_small_write_is_done_right_away(books: djox.Database) -> None:
+    written = books.execute("INSERT INTO book (title) VALUES (%s)", ["Dune"])
+    # A quick write: run on this thread, on the writer connection itself.
+    assert written.done()
+    assert (await written).rows_affected == 1
+    inserted = books.fetch_all("INSERT INTO book (title) VALUES ('Emma') RETURNING id")
+    assert inserted.done()
+    assert await inserted == [(2,)]
+
+
+async def test_quick_writes_can_be_turned_off(tmp_path: Path) -> None:
+    with djox.Database.sqlite(tmp_path / "app.sqlite3", quick_write_limit=0) as database:
+        await database.execute("CREATE TABLE book (title TEXT)")
+        written = database.execute("INSERT INTO book (title) VALUES ('Dune')")
+        assert not written.done()
+        assert (await written).rows_affected == 1
+
+
+async def test_a_transaction_on_the_writer_connection_holds_back_other_writes(books: djox.Database) -> None:
+    connection = books.writer_connection()
+    cursor = connection.cursor()
+    assert cursor.execute_quickly("BEGIN IMMEDIATE", [])
+    cursor.execute("INSERT INTO book (title) VALUES (%s)", ["Dune"])
+    other_write = books.execute("INSERT INTO book (title) VALUES ('Emma')")
+    await asyncio.sleep(0.05)
+    assert not other_write.done(), "the writer waits for the transaction to end"
+    assert await books.fetch_one("SELECT count(*) FROM book") == (0,), "nothing is committed yet"
+    assert cursor.execute_quickly("COMMIT", [])
+    await other_write
+    assert await books.fetch_one("SELECT count(*) FROM book") == (2,)
+    connection.close()
+
+
+async def test_closing_a_writer_connection_rolls_back_its_transaction(books: djox.Database) -> None:
+    connection = books.writer_connection()
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("INSERT INTO book (title) VALUES ('Never')")
+    connection.close()
+    assert connection.closed
+    await books.execute("INSERT INTO book (title) VALUES ('Dune')")  # the writer goes on
+    assert await books.fetch_all("SELECT title FROM book") == [("Dune",)]
+    assert not books.closed, "the writer connection belongs to the database"
+
+
+def test_only_a_writer_connection_runs_statements_quickly(tmp_path: Path) -> None:
+    connection = djox.Connection.sqlite(tmp_path / "app.sqlite3")
+    assert connection.cursor().execute_quickly("SELECT 1") is False
+    connection.close()
+
+
+async def test_the_write_ahead_log_is_still_checkpointed(books: djox.Database, tmp_path: Path) -> None:
+    # A commit on the event loop's thread doesn't copy the log back into the
+    # database file (that waits for the disk): the writer thread does it later.
+    # 16 MB of covers, one by one: the log must not keep growing.
+    cover = b"x" * 4000
+    for number in range(4000):
+        await books.execute("INSERT INTO book (title, cover) VALUES (%s, %s)", [f"Book {number}", cover])
+    log_size = (tmp_path / "app.sqlite3-wal").stat().st_size
+    assert log_size < 8_000_000
+
+
 async def test_works_with_no_readers(tmp_path: Path) -> None:
     with djox.Database.sqlite(tmp_path / "app.sqlite3", readers=0) as database:
         assert await database.fetch_one("SELECT 1") == (1,)

@@ -57,6 +57,24 @@ The event loop never waits.
   it runs out again). If another thread is using that connection, the read
   doesn't wait: it goes to a reader. The same connection tells which
   statements write, so an `INSERT ... RETURNING` goes straight to the writer.
+- **Quick writes.** The same trick for writes: a small `INSERT`, `UPDATE`
+  or `DELETE` runs right on the calling thread, on the writer connection
+  itself (`writer.rs`), if the writer thread isn't using it. It never waits
+  for a lock (another process's), and SQLite stops it after
+  `quick_write_limit` (1 ms); outside a transaction a stopped statement is
+  simply rolled back, and it goes to the writer thread instead.
+- **Transactions on the writer.** A `djox.atomic()` block runs `BEGIN`, its
+  statements and `COMMIT` on the writer connection, through a
+  `djox.Connection` of its own (`Database.writer_connection()`). While its
+  transaction is open, nobody else runs a statement on the writer: the writer
+  thread waits before its next job. Inside a transaction SQLite can stop a
+  write only by rolling back the whole transaction, so there a write runs on
+  the calling thread only if the same SQL was quick the last time; otherwise
+  it runs on another thread.
+- **Checkpoints off the event loop.** SQLite copies its write-ahead log back
+  into the database file at the end of a commit, every 1,000 pages, and
+  that waits for the disk. A commit on the event loop's thread only notes it
+  (a WAL hook); the next statement on a thread made for waiting does it.
 - **Streams get a connection of their own.** `stream_rows()` (behind
   `aiterator()`) opens a reader connection on a thread of its own, which
   reads the next chunk each time Python asks for it. A slow loop holds only

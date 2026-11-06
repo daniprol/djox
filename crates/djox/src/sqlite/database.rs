@@ -6,17 +6,21 @@ use std::sync::{Arc, Mutex};
 use crossbeam_channel::Sender;
 use djox_core::{ChunkRequests, Database, Error, Executed, ReplySender, Result, Rows, Value};
 
-use super::connection::{Access, SqliteConnection};
+use super::connection::{Access, QuickOutcome, SqliteConnection};
+use super::placeholders::to_question_marks;
 use super::quick_reads::QuickReader;
 use super::readers::ReaderQueue;
 use super::settings::SqliteSettings;
-use super::worker::{Job, Jobs, start_worker};
+use super::worker::{Job, start_reader, start_writer};
+use super::writer::SharedWriter;
 
 /// A SQLite database with one writer connection and a few reader
 /// connections, each on its own thread (see the module docs for why).
 ///
 /// - `execute` and `execute_many` go to the writer, one at a time, in the
 ///   order they were sent, so they never fail with "database is locked".
+/// - `execute_quickly` runs a small write right on the calling thread, on
+///   the writer connection itself (see `writer.rs`).
 /// - `fetch_all` goes to whichever reader is free. A statement that writes
 ///   (like `INSERT ... RETURNING`) is passed on to the writer.
 /// - `fetch_all_quickly` runs a small read right on the calling thread, on a
@@ -33,6 +37,9 @@ pub struct SqliteDatabase {
     settings: SqliteSettings,
     /// The connection for quick reads, or `None` if they are off.
     quick_reader: Option<QuickReader>,
+    /// The writer connection, shared by the writer thread, quick writes and
+    /// transaction blocks (see `writer.rs`).
+    writer: Arc<SharedWriter>,
     /// What `open_with` was given to prepare each new connection, kept for
     /// the connections streams open later.
     prepare: Arc<Prepare>,
@@ -88,9 +95,8 @@ impl SqliteDatabase {
 
         // An unbounded channel is like Python's `queue.SimpleQueue`: sending never waits.
         let (writer_queue, writer_jobs) = crossbeam_channel::unbounded();
-        let writer_jobs = Jobs::Writer(writer_jobs);
-        start_worker("djox-sqlite-writer".to_string(), writer_connection, writer_jobs, None)
-            .map_err(could_not_start_thread)?;
+        let writer = Arc::new(SharedWriter::new(writer_connection, &settings)?);
+        start_writer(Arc::clone(&writer), writer_jobs).map_err(could_not_start_thread)?;
 
         let readers_queue = if settings.reader_count == 0 {
             None
@@ -100,8 +106,7 @@ impl SqliteDatabase {
             for (number, connection) in reader_connections.into_iter().enumerate() {
                 let name = format!("djox-sqlite-reader-{number}");
                 // `Arc::clone` hands out one more reference to the same queue.
-                let reader_jobs = Jobs::Readers(Arc::clone(&readers_queue));
-                start_worker(name, connection, reader_jobs, Some(writer_queue.clone()))
+                start_reader(name, connection, Arc::clone(&readers_queue), writer_queue.clone())
                     .map_err(could_not_start_thread)?;
             }
             Some(readers_queue)
@@ -115,6 +120,7 @@ impl SqliteDatabase {
             queues: Mutex::new(Some(queues)),
             settings,
             quick_reader,
+            writer,
             prepare: Arc::new(prepare),
         })
     }
@@ -122,6 +128,31 @@ impl SqliteDatabase {
     /// The settings the database was opened with.
     pub fn settings(&self) -> &SqliteSettings {
         &self.settings
+    }
+
+    /// The writer connection, for a transaction block that runs its
+    /// statements on it (`Database.writer_connection()` in Python).
+    pub fn writer(&self) -> Arc<SharedWriter> {
+        Arc::clone(&self.writer)
+    }
+
+    /// A quick write (see `writer.rs`): the output of `sql`, written with
+    /// Django's `%s` placeholders, if it ran right here, or `None`.
+    ///
+    /// A write that failed gives `None` too: it changed nothing (outside a
+    /// transaction, SQLite rolls back a failed statement), and the writer
+    /// thread runs it again and reports the error.
+    fn write_quickly(&self, sql: &str, parameters: &[Value], rows_allowed: bool) -> Option<super::StatementOutput> {
+        if self.is_closed() {
+            return None; // the usual way answers `Error::Closed`
+        }
+        match self
+            .writer
+            .write_quickly(&to_question_marks(sql), parameters, rows_allowed)
+        {
+            QuickOutcome::Ran(Ok(output)) => Some(output),
+            QuickOutcome::Ran(Err(_)) | QuickOutcome::GaveUp => None,
+        }
     }
 
     /// Puts a job in the writer's queue.
@@ -190,7 +221,12 @@ impl Database for SqliteDatabase {
             return None; // `fetch_all` answers `Error::Closed`
         }
         // `?` on an `Option` returns `None` right away when there is no quick reader.
-        self.quick_reader.as_ref()?.fetch_all(sql, parameters)
+        let quick_reader = self.quick_reader.as_ref()?;
+        if quick_reader.knows_statement_writes(sql) {
+            // `INSERT ... RETURNING`: a quick write.
+            return self.write_quickly(sql, parameters, true).map(|output| output.rows);
+        }
+        quick_reader.fetch_all(sql, parameters)
     }
 
     fn stream_rows(&self, sql: String, parameters: Vec<Value>, chunk_size: usize, requests: ChunkRequests) {
@@ -219,6 +255,14 @@ impl Database for SqliteDatabase {
 
     fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>) {
         self.send_to_writer(Job::Execute { sql, parameters, reply });
+    }
+
+    fn execute_quickly(&self, sql: &str, parameters: &[Value]) -> Option<Executed> {
+        let output = self.write_quickly(sql, parameters, false)?;
+        Some(Executed {
+            rows_affected: output.rows_affected.unwrap_or(0),
+            last_insert_id: output.last_insert_id,
+        })
     }
 
     fn execute_many(&self, sql: String, parameter_lists: Vec<Vec<Value>>, reply: ReplySender<Executed>) {
@@ -349,10 +393,16 @@ mod tests {
         let (_folder, database) = open(1);
         let rows = database.fetch_all_quickly("SELECT count(*) FROM book", &[]).unwrap();
         assert_eq!(rows.rows, [[Value::Integer(0)]]);
+        // A write that returns rows is a quick write.
+        let inserted = database
+            .fetch_all_quickly("INSERT INTO book (title) VALUES ('Dune') RETURNING id", &[])
+            .unwrap();
+        assert_eq!(inserted.rows, [[Value::Integer(1)]]);
+        let slow = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000000) \
+                    SELECT count(*) FROM n";
         assert!(
-            database
-                .fetch_all_quickly("INSERT INTO book (title) VALUES ('Dune') RETURNING id", &[])
-                .is_none()
+            database.fetch_all_quickly(slow, &[]).is_none(),
+            "too slow: for a reader"
         );
         database.close();
         assert!(database.fetch_all_quickly("SELECT 1", &[]).is_none(), "closed");

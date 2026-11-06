@@ -91,6 +91,7 @@ class Database:
         readers: int | None = None,
         timeout: float = 5.0,
         quick_read_limit: float = 0.001,
+        quick_write_limit: float = 0.001,
         prepare: Callable[[Connection], object] | None = None,
     ) -> Database:
         """Open a SQLite database file (created if missing) and put it in WAL mode.
@@ -105,6 +106,9 @@ class Database:
         for a small query, the trip to a reader thread takes longer than the
         query. `quick_read_limit` is the most seconds it may run there before
         it goes to a reader instead; 0 turns quick reads off.
+        `quick_write_limit` is the same for a small write (a *quick write*),
+        which runs on the writer connection itself; otherwise it goes to the
+        writer thread.
 
         `prepare`, if given, is called with each new connection before it
         starts working, to register SQL functions or run `PRAGMA`s. The
@@ -158,6 +162,13 @@ class Database:
     def close(self) -> None:
         """Close the database. Statements already sent still finish; new ones
         raise `DatabaseClosedError`. Closing twice does nothing."""
+
+    def writer_connection(self) -> Connection:
+        """A `Connection` on SQLite's writer connection itself, for
+        `djox.atomic()`. While a transaction is open on it, no other statement
+        runs on the writer; its cursors can run small statements right away
+        (`Cursor.execute_quickly()`). Closing it rolls back its open
+        transaction and leaves the writer open. Postgres: `NotSupportedError`."""
 
     @property
     def closed(self) -> bool:
@@ -279,6 +290,12 @@ class Cursor:
 
     def execute(self, sql: str, parameters: Parameters | None = None) -> Self:
         """Run a statement. Returns the cursor."""
+
+    def execute_quickly(self, sql: str, parameters: Parameters | None = None) -> bool:
+        """Run a statement right away if that needs no waiting, and return
+        `True` (fetch its rows as after `execute()`); `False` if it didn't run.
+        Only a connection from `Database.writer_connection()` runs statements
+        quickly; any other returns `False`."""
 
     def executemany(self, sql: str, parameter_lists: Iterable[Parameters]) -> Self:
         """Run an `INSERT`, `UPDATE`, `DELETE` or `REPLACE` once per item. Returns the cursor."""

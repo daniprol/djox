@@ -7,6 +7,8 @@ rows once it has.
 
 import asyncio
 import contextvars
+import datetime
+import decimal
 import threading
 
 import pytest
@@ -15,7 +17,7 @@ from django.db import IntegrityError, OperationalError, transaction
 from django.db import connections as django_connections
 
 import djox
-from tests.e2e.library.models import Author
+from tests.e2e.library.models import Author, Book
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -226,6 +228,78 @@ async def test_a_block_doesnt_wait_for_djangos_sync_thread() -> None:
         release.set()
         await busy
     assert await names() == ["Not waiting"]
+
+
+# ---------------------------------------------------------------- on djox's writer connection (SQLite)
+
+
+@pytest.mark.sqlite_only("a failed commit: SQLite checks foreign keys at COMMIT")
+async def test_a_failed_commit_rolls_back_and_raises() -> None:
+    # Django's SQLite foreign keys are checked when the transaction commits.
+    published = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
+
+    @djox.atomic
+    async def add_a_book_without_its_author() -> None:
+        await Author.objects.acreate(name="Rolled back")
+        await Book.objects.acreate(
+            title="No author", pages=1, price=decimal.Decimal("1.00"), published=published, author_id=999
+        )
+
+    with pytest.raises(IntegrityError, match="FOREIGN KEY"):
+        await add_a_book_without_its_author()
+    assert await names() == []
+    await Author.objects.acreate(name="The writer goes on")
+    assert await names() == ["The writer goes on"]
+
+
+async def test_a_cancelled_block_rolls_back() -> None:
+    started = asyncio.Event()
+
+    async def add_and_wait() -> None:
+        async with djox.atomic():
+            await Author.objects.acreate(name="Cancelled")
+            started.set()
+            await asyncio.sleep(10)
+
+    task = asyncio.create_task(add_and_wait())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await Author.objects.acreate(name="Next")
+    assert await names() == ["Next"]
+
+
+async def test_blocks_on_two_event_loops_take_turns() -> None:
+    # Each event loop has its own write turns, but both share djox's one
+    # writer connection: a block waits for the other loop's block to end.
+    def add_in_another_event_loop(prefix: str) -> None:
+        async def add_ten() -> None:
+            for number in range(10):
+                async with djox.atomic():
+                    await Author.objects.acreate(name=f"{prefix} {number}")
+                    await asyncio.sleep(0)
+                    await Author.objects.filter(name=f"{prefix} {number}").aupdate(name=f"{prefix} {number}!")
+
+        asyncio.run(add_ten())
+
+    await asyncio.gather(
+        asyncio.to_thread(add_in_another_event_loop, "A"),
+        asyncio.to_thread(add_in_another_event_loop, "B"),
+    )
+    assert len(await names()) == 20
+    assert all(name.endswith("!") for name in await names())
+
+
+async def test_deferred_transactions_run_on_a_connection_of_their_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    # With `DEFERRED`, a block takes the write lock only when it first writes,
+    # so it runs Django's transaction on a thread of its own, as on Postgres.
+    monkeypatch.setitem(django_connections["default"].settings_dict["OPTIONS"], "transaction_mode", "DEFERRED")
+    async with djox.atomic():
+        await Author.objects.acreate(name="Kept")
+        with pytest.raises(ChangedMyMindError):
+            await add_and_change_my_mind("Rolled back")
+    assert await names() == ["Kept"]
 
 
 # ---------------------------------------------------------------- inside a sync transaction
