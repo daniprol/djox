@@ -47,6 +47,9 @@ see. djox has several connections, so:
 - **Raw SQL in a `TestCase`**: `djox.connections[alias]` used directly doesn't
   see the test's transaction (djox's QuerySets do). Use
   `TransactionTestCase`, or `@pytest.mark.django_db(transaction=True)`.
+- **pytest-asyncio tests** without `transaction=True`: djox's queries (`aget()`,
+  `acreate()`, `asyncio.gather()` of several...) join the test's transaction and
+  are rolled back with it. `djox.atomic()` is the exception, see below.
 - **pytest-asyncio tests**: inside a sync `atomic()` block run by the event
   loop's own thread (a pytest-asyncio test without `transaction=True`, or an
   `asyncio.run()` inside `atomic()`), nothing else can use the transaction's

@@ -273,6 +273,9 @@ skips most of it:
 - **`prefetch_related()` keeps the note.** Its lookups live on the
   `QuerySet`, not in Django's `Query`, so the main query stays on the fast
   lane, on the djox thread that then runs Django's prefetching (`djox/prefetch.py`).
+  The prefetching query of a reverse foreign key is on the fast lane too: Django adds its
+  `author_id IN (...)` with `query.add_q()`, which would build Django's `Query`, so
+  `djox/_prefetch_filter.py` swaps that one Django function for a `filter()` in the recipe.
 - **Rust converts the values** (`src/conversions.rs`): text to `datetime`,
   `date` and `time`, a stored number to a `Decimal` rounded like Django
   rounds it, `0`/`1` to `bool`. Only when the column's converter is exactly

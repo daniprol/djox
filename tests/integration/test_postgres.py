@@ -86,6 +86,85 @@ async def test_values_come_back_as_python_objects(books: djox.Database) -> None:
     )
 
 
+async def test_arrays_come_back_as_lists(books: djox.Database) -> None:
+    row = await books.fetch_one(
+        "SELECT %s::integer[], %s::text[], %s::integer[], '{}'::integer[], %s::integer[][], %s::uuid[]",
+        [
+            "{1,2,3}",
+            '{"a","b c","say \\"hi\\""}',
+            "{1,NULL}",
+            "{{1,2},{3,4},{5,6}}",
+            "{a8098c1a-f86e-11da-bd1a-00112444be1e}",
+        ],
+    )
+    assert row == (
+        [1, 2, 3],
+        ["a", "b c", 'say "hi"'],
+        [1, None],
+        [],
+        [[1, 2], [3, 4], [5, 6]],
+        [uuid.UUID("a8098c1a-f86e-11da-bd1a-00112444be1e")],
+    ), "the items have the types psycopg gives them, `NULL` is `None`"
+    assert await books.fetch_one("SELECT NULL::integer[]") == (None,)
+
+
+async def test_a_python_list_is_sent_as_an_array(books: djox.Database) -> None:
+    assert await books.fetch_one("SELECT %s::integer[] @> %s::integer[]", [[1, 2, 3], [2]]) == (True,)
+    assert await books.fetch_one("SELECT %s::text[]", [["a", None, 'q"uote']]) == (["a", None, 'q"uote'],)
+
+
+async def test_ranges_come_back_as_psycopg_ranges(books: djox.Database) -> None:
+    from psycopg.types.range import Range
+
+    row = await books.fetch_one(
+        "SELECT int4range(1, 5), int8range(NULL, 5), numrange(1.5, 2.5, '[]'), 'empty'::int4range, "
+        "daterange('2026-01-01', '2026-02-01'), tstzrange('2026-01-01 00:00+00', NULL), '(1,10]'::int4range"
+    )
+    assert row == (
+        Range(1, 5, "[)"),
+        Range(None, 5, "()"),
+        Range(Decimal("1.5"), Decimal("2.5"), "[]"),
+        Range(empty=True),
+        Range(datetime.date(2026, 1, 1), datetime.date(2026, 2, 1), "[)"),
+        Range(datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC), None, "[)"),
+        Range(2, 11, "[)"),  # Postgres turns `(1,10]` into `[2,11)`, as it does for any discrete range
+    )
+    assert await books.fetch_all("SELECT ARRAY[int4range(1, 2), int4range(3, 4)]") == [([Range(1, 2), Range(3, 4)],)]
+
+
+async def test_a_psycopg_range_is_sent_as_a_range(books: djox.Database) -> None:
+    from psycopg.types.range import Range
+
+    sent: list[Any] = [
+        Range(1, 5),
+        Range(None, 5, "()"),
+        Range(empty=True),
+        Range(datetime.date(2026, 1, 1), datetime.date(2026, 2, 1)),
+    ]
+    row = await books.fetch_one("SELECT %s::int4range, %s::int4range, %s::int4range, %s::daterange", sent)
+    assert row == tuple(sent)
+    assert await books.fetch_one("SELECT %s::int4range @> %s::integer", [Range(1, 5), 3]) == (True,)
+
+
+async def test_hstore_comes_back_as_a_dict(books: djox.Database) -> None:
+    await books.execute("CREATE EXTENSION IF NOT EXISTS hstore")
+    row = await books.fetch_one("SELECT %s::hstore, ''::hstore, 'a=>NULL'::hstore", ['"a"=>"1", "b c"=>"d \\"e\\""'])
+    assert row == ({"a": "1", "b c": 'd "e"'}, {}, {"a": None})
+    # A dict is sent as an `hstore` too, like Django's `HStoreField` does.
+    assert await books.fetch_one("SELECT %s::hstore -> 'k'", [{"k": "v", "n": None}]) == ("v",)
+
+
+async def test_numbers_in_an_xor_filter_are_integers(books: djox.Database) -> None:
+    # Django writes `a XOR b XOR c` as the sum of `CASE WHEN a THEN 1 ELSE 0 END`s.
+    # Postgres can't tell the type of those `1`s and `0`s, and guesses `text`.
+    one_condition = "CASE WHEN %s THEN %s ELSE %s END"
+    sql = f"SELECT ({one_condition} + {one_condition} + {one_condition}) %% %s = %s"
+    parameters = [True, 1, 0, True, 1, 0, True, 1, 0, 2, 1]
+    assert await books.fetch_one(sql, parameters) == (True,)
+    # Statements that did not need the integers declared keep working beside it.
+    assert await books.fetch_one("SELECT %s::text", [5]) == ("5",)
+
+
 async def test_a_null_parameter_and_column(books: djox.Database) -> None:
     await books.execute("INSERT INTO book (title, pages, cover) VALUES (%s, %s, %s)", ["Dune", None, None])
     assert await books.fetch_one("SELECT pages, cover FROM book") == (None, None)

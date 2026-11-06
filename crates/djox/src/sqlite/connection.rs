@@ -557,6 +557,9 @@ pub(super) fn typed_to_sqlite(value: &Value) -> rusqlite::types::Value {
         )),
         Value::Duration(length) => Stored::Integer(length.num_microseconds().unwrap_or(i64::MAX)),
         Value::Uuid(uuid) => Stored::Text(uuid.hyphenated().to_string()),
+        // Arrays, ranges and hstores are read from Postgres only: Python's lists
+        // and dicts reach the database as text, so none of these is ever sent here.
+        Value::List(_) | Value::Range(_) | Value::Hstore(_) => Stored::Null,
     }
 }
 

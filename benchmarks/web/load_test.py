@@ -3,7 +3,8 @@
     cd benchmarks && uv run python web/load_test.py                 # SQLite and Postgres
     uv run python web/load_test.py --databases sqlite --duration 5   # quicker
 
-For each database, stack (`django`, `djox`) and API (`sync`, `async`, `drf`),
+For each database, stack (`django`, `djox`) and API (`sync`, `async`, `drf`,
+and `sync-asgi`: the sync views served under ASGI),
 it fills a fresh database (`app.py setup`), starts the app on one granian
 worker, and loads each endpoint with oha (32 connections, after a warm-up).
 Stacks take turns, round after round, and each number is the median of the
@@ -31,28 +32,29 @@ RESULTS = FOLDER.parent / "results" / "web.json"
 PORT = 8765
 BASE = f"http://127[.]0[.]0[.]1:{PORT}"  # oha reads the URL as a regex (random ids, below)
 STACKS = ["django", "djox"]
-APIS = ["sync", "async", "drf"]
+APIS = ["sync", "async", "drf", "sync-asgi"]
 CONNECTIONS = 32
 
 
 def endpoints(api: str) -> list[tuple[str, str, str, str | None]]:
     """(name, method, URL regex, JSON body) for each endpoint of an API, writes last."""
+    views = api.removesuffix("-asgi")  # `sync-asgi` serves the `/sync/` views
     slash = "/" if api == "drf" else ""  # DRF's router adds a trailing slash
     author_field = "author" if api == "drf" else "author_id"
-    book_path = rf"{BASE}/{api}/books/[1-9][0-9]{{0,3}}"  # a random book, 1 to 9999
+    book_path = rf"{BASE}/{views}/books/[1-9][0-9]{{0,3}}"  # a random book, 1 to 9999
     book = book_path + slash
-    author = rf"{BASE}/{api}/authors/[1-9][0-9]?"  # a random author, 1 to 99
+    author = rf"{BASE}/{views}/authors/[1-9][0-9]?"  # a random author, 1 to 99
     return [
         ("get one book", "GET", book, None),
-        ("list a page, with authors", "GET", rf"{BASE}/{api}/books{slash}[?]page=[1-9][0-9]?", None),
-        ("authors with stats", "GET", rf"{BASE}/{api}/authors{slash}[?]page=[1-5]", None),
+        ("list a page, with authors", "GET", rf"{BASE}/{views}/books{slash}[?]page=[1-9][0-9]?", None),
+        ("authors with stats", "GET", rf"{BASE}/{views}/authors{slash}[?]page=[1-5]", None),
         ("one author's stats", "GET", rf"{author}/stats{slash}", None),
         ("count a read", "POST", rf"{book_path}/read{slash}", None),
         ("update a book", "PATCH", book, '{"pages": 123}'),
         (
             "create a book",
             "POST",
-            rf"{BASE}/{api}/books{slash}",
+            rf"{BASE}/{views}/books{slash}",
             f'{{"title": "New book", "pages": 100, "price": "9.99", "{author_field}": 1}}',
         ),
     ]
@@ -110,7 +112,7 @@ def create_postgres_database() -> None:
 
 
 def run(database: str, stack: str, api: str, seconds: float) -> dict[str, dict[str, float]]:
-    server_kind = "asgi" if api == "async" else "wsgi"
+    server_kind = "asgi" if api in ("async", "sync-asgi") else "wsgi"
     environment = {**os.environ, "STACK": stack, "DATABASE": database, "SERVER": server_kind}
     subprocess.run([sys.executable, "app.py", "setup"], cwd=FOLDER, env=environment, check=True)
     interface, application = ("asginl", "app:asgi_app") if server_kind == "asgi" else ("wsgi", "app:wsgi_app")

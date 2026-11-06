@@ -45,6 +45,9 @@
 //! | `interval`                             | `Duration`    | `timedelta` |
 //! | `uuid`                                 | `Uuid`        | `uuid.UUID` |
 //! | `void` (what `SELECT pg_sleep(1)` returns) | `Null`     | `None`      |
+//! | arrays (`integer[]`, `text[][]`...)    | `List`        | `list` (a list of lists for more dimensions) |
+//! | ranges (`int4range`, `tstzrange`...)  | `Range`       | psycopg `Range` |
+//! | `hstore`                               | `Hstore`      | `dict` (a `NULL` value is `None`) |
 //!
 //! These are the objects psycopg gives Django's Postgres backend (Django
 //! asks it for JSON and IP addresses as text), so Django sees the same
