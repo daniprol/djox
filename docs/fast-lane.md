@@ -33,8 +33,9 @@ A query made of these calls, in any order Django accepts:
   `reverse()`, `distinct()`, and slices (`[10:20]`);
 - **`values()` and `values_list()`**, with names or expressions
   (`flat=True` and `named=True` included);
-- **`select_related()`**, and any `prefetch_related()` (the prefetching query of a reverse foreign key
-  takes the fast lane too);
+- **`select_related()`**, and any `prefetch_related()` (the prefetching query of a foreign key, forwards
+  or backwards, and of a many-to-many field takes the fast lane too: see
+  [related objects](related-objects.md));
 - **subqueries** of querysets made the same way: `Exists()` and `~Exists()`
   as filters or annotations, `Subquery()` with `OuterRef()`, and
   `pk__in=queryset` (see [Subqueries](#subqueries));

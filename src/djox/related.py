@@ -13,6 +13,10 @@ in the transaction this code is in, or on a pooled thread, with the write
 turn. Django's code still does the work (the foreign keys, the `through`
 rows, the `m2m_changed` signals), so the results are exactly Django's.
 
+For a many-to-many field, the class also gets a `get_prefetch_querysets()`
+that keeps `prefetch_related()`'s second query on the fast lane
+(`djox._prefetch_many_to_many`).
+
 `djox.Manager` has the mixin; so do the managers that `"djox"` in
 `INSTALLED_APPS` switches over (`djox.install`).
 """
@@ -23,6 +27,7 @@ from typing import Any
 from django.db import router
 
 from djox import _threads
+from djox._prefetch_many_to_many import use_fast_lane_for_prefetching
 
 # The async methods Django gives related managers, and the sync method each runs.
 RELATED_MANAGER_METHODS = {
@@ -52,6 +57,9 @@ class RunRelatedManagersOnDjox:
         for async_name, sync_name in RELATED_MANAGER_METHODS.items():
             if async_name in cls.__dict__:  # defined by this class itself, not inherited
                 setattr(cls, async_name, run_on_djox_threads(async_name, sync_name))
+        # Prefetching the objects of a many-to-many field takes the fast lane too.
+        if "get_prefetch_querysets" in cls.__dict__:
+            use_fast_lane_for_prefetching(cls)
 
 
 def run_on_djox_threads(async_name: str, sync_name: str) -> Callable[..., Coroutine[Any, Any, Any]]:

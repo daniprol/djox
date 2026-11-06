@@ -86,6 +86,46 @@ async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any
     return rows
 
 
+async def fetch_all_with_columns(alias: str, sql: str, parameters: Sequence[Any]) -> "tuple[list[str], list[Row]]":
+    """Like `fetch_all()`, but returns `(columns, rows)`: the column names too.
+
+    Django's raw queries (`Book.objects.raw()`) need them to tell which column
+    is which field. It runs where `fetch_all()` runs, in the same ways.
+    """
+    if hooks.added_hooks:
+        with hooks.around_query(alias, sql, parameters) as query:
+            return await fetch_all_with_columns_without_hooks(alias, query.sql, query.parameters)
+    return await fetch_all_with_columns_without_hooks(alias, sql, parameters)
+
+
+async def fetch_all_with_columns_without_hooks(
+    alias: str, sql: str, parameters: Sequence[Any]
+) -> "tuple[list[str], list[Row]]":
+    """`fetch_all_with_columns()`, once the hooks (`djox.hooks`) have seen the statement."""
+    started = time.perf_counter()
+    block = writer_transaction(alias)
+    transaction_wrapper = open_sync_transaction(alias) if block is None else None
+    if block is not None:
+        wrapper = django_connections[alias]
+        with wrapper.wrap_database_errors:
+            columns, rows = await block.fetch_all_with_columns(sql, parameters)
+        log_query(wrapper, sql, parameters, started)
+    elif transaction_wrapper is not None:
+        with transaction_wrapper.wrap_database_errors:
+            columns, rows = await asyncio.to_thread(
+                fetch_all_with_columns_on, transaction_wrapper.connection, sql, parameters
+            )
+        log_query(transaction_wrapper, sql, parameters, started)
+    else:
+        wrapper = django_connections[alias]
+        database = djox.connections.database_for(wrapper)
+        with wrapper.wrap_database_errors:
+            columns, rows = await database.fetch_all_with_columns(sql, parameters)
+        rows = as_sync_connections_return_them(wrapper, rows)
+        log_query(wrapper, sql, parameters, started)
+    return columns, rows
+
+
 async def stream_rows(alias: str, sql: str, parameters: Sequence[Any], chunk_size: int) -> "AsyncIterator[list[Row]]":
     """Run a query and yield its rows `chunk_size` at a time, each chunk read
     from the database when the previous one has been used (`aiterator()`).
@@ -313,6 +353,17 @@ def fetch_all_on(connection: Any, sql: str, parameters: Sequence[Any]) -> "list[
     try:
         cursor.execute(sql, parameters)
         return cursor.fetchall()  # type: ignore[no-any-return]  # the driver's cursor is untyped here
+    finally:
+        cursor.close()
+
+
+def fetch_all_with_columns_on(connection: Any, sql: str, parameters: Sequence[Any]) -> "tuple[list[str], list[Row]]":
+    """`fetch_all_on()`, with the column names too (PEP 249's `cursor.description`)."""
+    cursor = connection.cursor()
+    try:
+        cursor.execute(sql, parameters)
+        columns = [column[0] for column in cursor.description]
+        return columns, cursor.fetchall()
     finally:
         cursor.close()
 

@@ -14,7 +14,8 @@
 - **TLS on Postgres**: libpq's settings, as arguments:
   `djox.Database.postgres(url, sslmode="verify-full", sslrootcert="ca.pem")`
   (see [Postgres](postgres.md#tls)).
-- **Methods**: `execute()`, `execute_many()`, `fetch_all()`, `fetch_one()`.
+- **Methods**: `execute()`, `execute_many()`, `fetch_all()`, `fetch_one()`, and
+  `fetch_all_with_columns()` (`(columns, rows)`: the column names too).
 - **Placeholders are Django's**: `%s` (`%%` for a literal `%`).
 - **Futures**: each method sends the statement right away and returns an
   `asyncio.Future`. Await it, or pass several to `asyncio.gather()`.

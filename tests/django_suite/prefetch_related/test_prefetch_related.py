@@ -390,7 +390,7 @@ class PrefetchRelatedTests(TestDataMixin, TestCase):
         sql = queries[-1]["sql"]
         self.assertWhereContains(sql, self.author1.id)
 
-    @pytest.mark.django_adapted("djox keeps a reverse m2o prefetch's filter in its recipe: Django's add_q isn't called")
+    @pytest.mark.django_adapted("djox keeps a prefetch's filter in its recipe: Django's add_q isn't called with reuse_all")
     def test_filter_deferred(self):
         """
         Related filtering of prefetched querysets is deferred on m2m and
@@ -403,11 +403,13 @@ class PrefetchRelatedTests(TestDataMixin, TestCase):
                     Query,
                     "add_q",
                     autospec=True,
-                    side_effect=lambda self, q, reuse_all: add_q(self, q),
+                    # djox: reuse_all has a default, since djox's recipe check calls add_q() without it
+                    side_effect=lambda self, q, reuse_all=False: add_q(self, q),
                 ) as add_q_mock:
                     list(Book.objects.prefetch_related(relation))
-                    # djox: a reverse m2o (the second relation) is filtered by djox's recipe, not by add_q
-                    self.assertEqual(add_q_mock.call_count, 1 if relation == "authors" else 0)
+                    # djox: only Django's own prefetch filter calls add_q(reuse_all=True); djox's recipe takes it, for both
+                    reuse_all_calls = [call for call in add_q_mock.call_args_list if call.kwargs.get("reuse_all")]
+                    self.assertEqual(len(reuse_all_calls), 0)
 
     def test_named_values_list(self):
         qs = Author.objects.prefetch_related("books")
@@ -1136,6 +1138,7 @@ class CustomPrefetchTests(TestCase):
             with self.assertNumQueries(0):
                 self.assertEqual(person.cached_all_houses, all_houses)
 
+    @pytest.mark.django_adapted("djox keeps a prefetch's filter in its recipe: Django's add_q isn't called with reuse_all")
     def test_filter_deferred(self):
         """
         Related filtering of prefetched querysets is deferred until necessary.
@@ -1145,14 +1148,17 @@ class CustomPrefetchTests(TestCase):
             Query,
             "add_q",
             autospec=True,
-            side_effect=lambda self, q, reuse_all: add_q(self, q),
+            # djox: reuse_all has a default, since djox's recipe check calls add_q() without it
+            side_effect=lambda self, q, reuse_all=False: add_q(self, q),
         ) as add_q_mock:
             list(
                 House.objects.prefetch_related(
                     Prefetch("occupants", queryset=Person.objects.all())
                 )
             )
-            self.assertEqual(add_q_mock.call_count, 1)
+            # djox: only Django's own prefetch filter calls add_q(reuse_all=True); djox's recipe takes it
+            reuse_all_calls = [call for call in add_q_mock.call_args_list if call.kwargs.get("reuse_all")]
+            self.assertEqual(len(reuse_all_calls), 0)
 
 
 @pytest.mark.django_ported("prefetch_related.tests.DefaultManagerTests")
