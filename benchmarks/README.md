@@ -150,7 +150,7 @@ handler on djox. Requests per second, higher is better:
 
 ## ORM calls on SQLite
 
-The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters
+The same queries through each contender, on a SQLite file with 10,000 books, each with 3 chapters and 2 of 20 tags
 ([`run.py`](https://github.com/daniprol/djox/blob/main/benchmarks/run.py)). Microseconds per call, median of 5 rounds, lower is better.
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
@@ -167,6 +167,8 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 | 20 chapters with their book | 744 | 744 | 219 | n/a | 1,245 | 924 | 206 | n/a |
 | 1,000 chapters with their book | 15,373 | 15,678 | 5,423 | n/a | 17,241 | 13,811 | 7,469 | n/a |
 | 20 books with their chapters | 1,514 | 1,745 | 983 | n/a | 2,522 | 2,475 | 1,608 | n/a |
+| 20 chapters with their book (prefetched) | 791 | 1,128 | 325 | n/a | 1,777 | 1,662 | 728 | n/a |
+| 20 books with their tags | 1,416 | 1,565 | 742 | n/a | 2,288 | 2,282 | 1,270 | n/a |
 | 100 gets at once | n/a | n/a | n/a | n/a | 445 | 254 | 60 | 6 |
 | 100 get or create at once | n/a | n/a | n/a | n/a | 503 | 232 | 63 | n/a |
 | 100 mixed writes at once | n/a | n/a | n/a | n/a | 595 | 898 | 916 | n/a |
@@ -189,6 +191,16 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
   and Rust builds the chapters. 20 books with their chapters: sync 1,260 µs to 840 µs (same run, with and
   without it). The scenario uses `Prefetch("chapters", queryset=...)` so each contender's own manager builds the
   chapters.
+- **So does prefetching a foreign key forwards, and a many-to-many field** (the author of each book, the tags of
+  each book). Measured with and without it, in one run of the same VM:
+
+  | djox.Manager, µs | sync before | sync after | async before | async after | Django async |
+  |---|---|---|---|---|---|
+  | 20 chapters with their book (prefetched) | 874 | 325 | 1,192 | 728 | 1,523 |
+  | 20 books with their tags | 1,112 | 742 | 1,686 | 1,270 | 2,025 |
+
+  The many-to-many scenario passes `Prefetch("tags", queryset=Tag.objects.all())` where `Tag`'s default manager is
+  djox's: djox takes a many-to-many prefetch only for a related model with a djox default manager.
 - **Annotations, aggregates and `F()` take the fast lane too** (the general fast lane: any chain of calls reuses
   the SQL Django wrote once for its shape). Measured before and after it, in one run of the same VM:
 
@@ -201,7 +213,8 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
 - **`create()` takes the fast lane**: `acreate()` 268 µs against 441, `create()` 145 against 183. Django writes the
   model's `INSERT` once.
-- **`prefetch_related()` gains less** (1.9 ms against 2.4 ms async): the prefetching query still runs Django's code.
+- **`prefetch_related()` gains less than `select_related()`**: only its queries take the fast lane; Django's code
+  still matches the objects, on one of djox's threads.
 - **djox's `ENGINE` alone costs about nothing**: "djox sync" is within noise of Django.
 - **A short `djox.atomic()` block is slower** than one `sync_to_async()` around a sync `atomic()`: it pays a
   thread round trip per statement. What it buys is async code inside the transaction.
