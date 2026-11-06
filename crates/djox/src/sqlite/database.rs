@@ -390,7 +390,20 @@ mod tests {
 
     #[test]
     fn quick_reads_answer_small_reads_and_leave_the_rest() {
-        let (_folder, database) = open(1);
+        let folder = tempfile::tempdir().unwrap();
+        let mut settings = SqliteSettings::new(folder.path().join("app.sqlite3"));
+        // The first write to a new file can take over the default 1 ms on a
+        // busy CI machine (SQLite creates the write-ahead log), and would then
+        // run on the writer thread instead. A generous limit keeps this test
+        // about which statements take the quick way, not about the machine.
+        settings.quick_write_limit = std::time::Duration::from_secs(5);
+        let database = SqliteDatabase::open(settings).unwrap();
+        execute(
+            &database,
+            "CREATE TABLE book (id INTEGER PRIMARY KEY, title TEXT)",
+            vec![],
+        )
+        .unwrap();
         let rows = database.fetch_all_quickly("SELECT count(*) FROM book", &[]).unwrap();
         assert_eq!(rows.rows, [[Value::Integer(0)]]);
         // A write that returns rows is a quick write.
