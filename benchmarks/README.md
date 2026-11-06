@@ -106,13 +106,10 @@ Requests per second, higher is better. In brackets: djox against Django.
 
 | | Django | djox |
 |---|---:|---:|
-| get one book | 1,552 | 3,581 (2.3x) |
-| list a page, with authors | 714 | 1,525 (2.1x) |
-| read a book, in a transaction | 692 | 485 (0.7x) |
-| create a book | 1,866 | 2,746 (1.5x) |
-
-- **The transaction endpoint is slower on djox.** Each statement inside `djox.atomic()` pays a round trip to djox's
-  threads. This is the cost to fix next.
+| get one book | 1,208 | 2,466 (2.0x) |
+| list a page, with authors | 530 | 1,363 (2.6x) |
+| read a book, in a transaction | 568 | 916 (1.6x) |
+| create a book | 1,319 | 1,756 (1.3x) |
 
 ## ASGI handlers
 
