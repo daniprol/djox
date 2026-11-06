@@ -36,4 +36,4 @@ pub use error::{Error, Result};
 pub use reply::{Reply, ReplySender};
 pub use rows::{Executed, Rows};
 pub use stream::{ChunkRequests, RowStream};
-pub use value::Value;
+pub use value::{RangeValue, Value};

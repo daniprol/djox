@@ -28,6 +28,13 @@ break comes with a migration note.
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
   `OPTIONS` (`sslmode` from `disable` to `verify-full`, `sslrootcert`, `sslcert`, `sslkey`), also as arguments
   of `djox.Database.postgres()`. Built on rustls: nothing to install.
+- **Arrays, ranges and `hstore` from async Postgres code**: they come back as a `list`, psycopg's `Range` and
+  a `dict`, and lists, ranges and dicts work as parameters, so Django's `ArrayField`, range fields and
+  `HStoreField` filter in async code.
+- **Tests of async code in a sync transaction** that `TestCase` didn't open (pytest-django's `django_db`,
+  `async_to_sync()` inside `atomic()`).
+- **A django-bolt benchmark** (`benchmarks/bolt`): the same django-bolt app on Django's async ORM and on
+  djox (about 2x the requests per second on SQLite).
 
 ### Changed
 
@@ -37,6 +44,8 @@ break comes with a migration note.
 
 ### Fixed
 
+- **`XOR` filters on Postgres**: Django's `XOR` sums `CASE` results whose numbers djox sent as text, so
+  Postgres refused them ("operator does not exist: text + text").
 - `acreate()` now calls a model's own `save()`.
 - An `INSERT ... RETURNING` sent to `fetch_all()` goes straight to SQLite's writer thread, not through a
   reader.
