@@ -5,6 +5,7 @@ Stock Django against djox, on the same machine and the same data.
 | Benchmark | Measures | Script |
 |---|---|---|
 | [Web app](#web-app-requests-per-second) | Requests per second of a Django + DRF app | `web/load_test.py` |
+| [django-bolt](#django-bolt-requests-per-second) | Requests per second of the same models, served by django-bolt | `web/bolt_load_test.py` |
 | [ORM calls on SQLite](#orm-calls-on-sqlite) | Microseconds per ORM call | `run.py` |
 | [ORM calls on Postgres](#orm-calls-on-postgres) | Microseconds per ORM call | `postgres.py` |
 
@@ -17,6 +18,7 @@ uv run python run.py                 # ORM calls, SQLite (~2 min)
 uv run python postgres.py            # ORM calls, Postgres (needs DJOX_POSTGRES_URL)
 cargo install oha                    # the HTTP load tool, once
 uv run python web/load_test.py       # web app, SQLite and Postgres (~30 min)
+uv run python web/bolt_load_test.py  # django-bolt, SQLite (~5 min)
 ```
 
 - Postgres scripts use `DJOX_POSTGRES_URL` (default `postgresql://postgres:postgres@localhost/postgres`) and
@@ -93,6 +95,32 @@ Annotations, aggregates and `F()` on SQLite, measured after the tables above, wi
   run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
 - **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores). Differences
   under about 10% are noise.
+
+## django-bolt: requests per second
+
+The same shop models, served by [django-bolt](https://bolt.farhana.li/) (`web/bolt_app/`): a Rust HTTP server
+with `async` handlers ([`bolt_app/api.py`](https://github.com/daniprol/djox/blob/main/benchmarks/web/bolt_app/api.py)).
+Three endpoints, each awaiting its queries: get one book (`aget()`), a page of 20 books with their authors (`async for`
+over a `select_related()` join), and create a book (`acreate()`, status 201).
+
+- **Stacks**: the same handlers. djox only changes settings: its `ENGINE`, and `"djox"` in `INSTALLED_APPS`.
+  No middleware. `CONN_MAX_AGE = 0`.
+- **Server**: `manage.py runbolt --processes 1`, with its request logging sent to /dev/null.
+- **Load**: [oha](https://github.com/hatoo/oha), 32 connections, 2 s warm-up, then 5 s per endpoint. Stacks take turns,
+  3 rounds, each number is the median. SQLite only.
+
+Requests per second, higher is better. In brackets: djox against Django.
+
+| | Django | djox |
+|---|---:|---:|
+| get one book | 1,448 | 2,698 (1.9x) |
+| list a page, with authors | 688 | 1,537 (2.2x) |
+| create a book | 1,722 | 2,860 (1.7x) |
+
+- **django-bolt's HTTP layer is faster than granian and Django's ASGI handler**: Django's `aget` in a bolt handler
+  serves 7 times the requests of the async views in the table above. The gap between the two stacks is smaller than
+  there, because most of each request's time is now bolt's own work (its handler call, its thread hop to the
+  database, and the response), which djox doesn't change.
 
 ## ORM calls on SQLite
 
