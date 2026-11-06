@@ -211,6 +211,17 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
   | sum of pages (`aggregate(Sum())`) | 356 | 171 | 465 | 173 | 764 |
   | update with `F()` | 226 | 102 | 495 | 169 | 605 |
 
+- **Subqueries take the fast lane too** (`Exists()`, `Subquery()` with `OuterRef()`, `pk__in=queryset`), when the
+  inner queryset is a djox one. Measured before and after, in one run of the same VM:
+
+  | djox.Manager, µs | sync before | sync after | async before | async after | Django sync | Django async |
+  |---|---|---|---|---|---|---|
+  | 10 books with a chapter 2 (`filter(Exists())`) | 961 | 387 | 1,100 | 430 | 761 | 1,537 |
+  | 10 books with their last chapter (`annotate(Subquery())`) | 1,044 | 494 | 1,087 | 396 | 799 | 1,621 |
+  | 10 books in a subquery (`pk__in=queryset`) | 824 | 178 | 946 | 185 | 614 | 1,350 |
+
+  `pk__in=queryset` gains the most: djox sees the inner queryset's recipe. `Exists()` and `Subquery()` keep about
+  100 µs of Django's work: they build the inner `Query` as soon as they are created, before djox sees them.
 - **`create()` takes the fast lane**: `acreate()` 268 µs against 441, `create()` 145 against 183. Django writes the
   model's `INSERT` once.
 - **`prefetch_related()` gains less than `select_related()`**: only its queries take the fast lane; Django's code

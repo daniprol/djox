@@ -36,6 +36,9 @@ A query made of these calls, in any order Django accepts:
 - **`select_related()`**, and any `prefetch_related()` (the prefetching query of a foreign key, forwards
   or backwards, and of a many-to-many field takes the fast lane too: see
   [related objects](related-objects.md));
+- **subqueries** of querysets made the same way: `Exists()` and `~Exists()`
+  as filters or annotations, `Subquery()` with `OuterRef()`, and
+  `pk__in=queryset` (see [Subqueries](#subqueries));
 - then read or written with one of these methods:
 
 | Kind | Async | Sync |
@@ -50,10 +53,29 @@ A query made of these calls, in any order Django accepts:
 - Integer and UUID ids given as text (`pk="5"`, as URLs and DRF give them)
   take it too.
 
-Everything else runs the usual way, with the same results: subqueries
-(`Exists()`, `Subquery()`, `OuterRef()`), expression classes of your own,
+Everything else runs the usual way, with the same results: expression classes of your own,
 transforms in names (`published__year`), `XOR`, `extra()`, `only()` and
 `defer()`, `union()`, and models with parent models.
+
+## Subqueries
+
+```python
+editions = Edition.objects.filter(book=OuterRef("pk"), number__gte=2)
+Book.objects.filter(Exists(editions))
+Book.objects.annotate(latest=Subquery(editions.order_by("-number").values("number")[:1]))
+Author.objects.filter(pk__in=Book.objects.filter(pages__gt=500).values("author"))
+```
+
+- **The inner queryset must come from a djox manager** (a `djox.Manager`, or a
+  model chosen by `DJOX_MODELS`), and take the fast lane itself. Its values
+  (the `2` above) are values of the whole query, so the SQL is still written once.
+- **Left to Django**: subqueries of plain Django querysets, of querysets Django
+  changed (a call the fast lane leaves to Django, like `defer()`), an
+  `OuterRef()` through relations (`OuterRef("author__name")`), and
+  `Subquery()` with a `template` or extra arguments.
+- **Don't change `queryset.query` in place** (a private API) before passing
+  the queryset to `Exists()` or `Subquery()`: djox reads the subquery's shape
+  from the calls that made the queryset.
 
 ## New objects
 

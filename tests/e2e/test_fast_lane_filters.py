@@ -12,7 +12,8 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.core.exceptions import FieldError
 from django.db import connection, transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import F, Q
+from django.db.models.lookups import GreaterThan
 from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 
@@ -186,9 +187,7 @@ def test_errors_are_raised_where_django_raises_them() -> None:
 DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
     "a transform": lambda: Book.objects.filter(published__year=1965),
     "a transform through a join": lambda: Book.objects.filter(author__name__icontains="jane"),
-    "an expression in Q": lambda: Book.objects.filter(
-        Q(Exists(Edition.objects.filter(book=OuterRef("pk"), number=2))) | Q(title="Emma")
-    ),
+    "a lookup as an expression in Q": lambda: Book.objects.filter(Q(GreaterThan(F("pages"), 300)) | Q(title="Emma")),
     "an empty Q in Q": lambda: Book.objects.filter(Q(Q()) | Q(title="Emma")),
 }
 

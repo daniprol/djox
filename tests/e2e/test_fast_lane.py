@@ -206,7 +206,9 @@ async def test_numbers_too_big_for_the_column_are_left_to_django() -> None:
 
 # Querysets the fast lane leaves to Django, which still gives the right answer.
 DJANGO_QUERYSETS: dict[str, MakeQuerySet] = {
-    "a subquery": lambda: Book.objects.filter(Exists(Author.objects.filter(pk=OuterRef("author"), name="Jane Austen"))),
+    "a subquery of a plain Django queryset": lambda: Book.objects.filter(
+        Exists(models.QuerySet(Author).filter(pk=OuterRef("author"), name="Jane Austen"))
+    ),
     "icontains": lambda: Book.objects.filter(title__icontains="dune"),
     "select_related, then only": lambda: Book.objects.select_related("author").only("title", "author__name"),
     "only": lambda: Book.objects.only("title"),

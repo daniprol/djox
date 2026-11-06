@@ -25,6 +25,10 @@ break comes with a migration note.
   (`aggregate()` and `aaggregate()` too), `update()` with `F()`, `distinct()`, `values()` with expressions,
   and filters through reverse and many-to-many relations take the fast lane (a `Count()` annotation: 670 µs
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
+- **Subqueries on the fast lane**: `Exists()`, `~Exists()`, `Subquery()` with `OuterRef()`, and
+  `pk__in=queryset`, when the inner queryset is a djox queryset. The inner recipe's shape is part of the
+  query's shape, so Django writes the SQL once (`filter(Exists(...))`: 961 µs to 387 µs sync;
+  `pk__in=queryset`: 824 µs to 178 µs).
 - **Prefetching on the fast lane**: the query `prefetch_related()` runs for a reverse foreign key (an
   author's books) reuses Django's SQL for its shape and Rust builds the objects (20 books with their
   chapters: 1,260 µs to 840 µs sync). It does the same for a foreign key forwards (the author of each book:

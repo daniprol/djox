@@ -60,7 +60,7 @@ from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
 
 from djox import _fast_lane, _running, _saving, _threads
-from djox._fast_lane import arguments, checks
+from djox._fast_lane import arguments, checks, subqueries
 from djox._fast_lane import running as fast_lane
 from djox._fast_lane.recipe import QueryRecipe, Step
 from djox._fast_lane.running import PreparedQuery
@@ -110,6 +110,10 @@ class QuerySet(models.QuerySet[ModelType]):
         # A new QuerySet without a query means "all the objects": a recipe with no calls yet.
         if query is None and model is not None and _fast_lane.is_enabled():
             self._recipe = QueryRecipe()
+        if query is not None:
+            # A `Query` Django cloned for one of its methods, which then changes it:
+            # it no longer matches the recipe it was built from (see `djox._fast_lane.subqueries`).
+            subqueries.forget_recipe(query)
 
     # `@property` makes `queryset.query` call this method, like a computed attribute.
     @property
@@ -118,13 +122,17 @@ class QuerySet(models.QuerySet[ModelType]):
         recipe = self._recipe
         if recipe is not None:
             self._recipe = None
-            self._query = recipe.django_queryset(self.model).query  # pyrefly: ignore[missing-attribute]  # Django's
+            query = recipe.django_queryset(self.model).query
+            # Kept on the `Query`, so `Exists(queryset)` can take the fast lane too.
+            subqueries.remember_recipe(query, recipe)
+            self._query = query  # pyrefly: ignore[missing-attribute]  # Django's
         # Django's own property, which also applies a filter that a related manager deferred.
         return super().query
 
     @query.setter
     def query(self, value: Query) -> None:
         self._recipe = None
+        subqueries.forget_recipe(value)
         # Django's own setter (`super()` can't reach a property's setter).
         models.QuerySet.query.fset(self, value)  # type: ignore[attr-defined]
 

@@ -136,12 +136,44 @@ class Condition:
 
     @property
     def matches_nothing(self) -> bool:
-        """`in` with no values: nothing can match, so no SQL needs to run (like Django)."""
-        return self.lookup == "in" and not self.values
+        """`in` with no values: nothing can match, so no SQL needs to run (like Django).
+        (Not `in` with a subquery, whose values are the subquery's.)"""
+        if self.lookup != "in":
+            return False
+        value_count = self.detail[0]  # or `"expression"`, for a subquery
+        return bool(value_count == 0)
 
     def as_q_child(self) -> tuple[str, Any]:
         """This condition as a child of Django's `Q`: `("pages__gt", 500)`."""
         return (self.name, self.value)
+
+
+@dataclass(frozen=True)
+class FilterExpression:
+    """A filter written as an expression: `filter(Exists(...))`, `~Exists(...)`."""
+
+    expression: Any
+    """The expression as given, to give Django the same filter when it builds its `Query`."""
+
+    values: tuple[QueryValue, ...]
+    """The expression's values (for `Exists()`, those of its subquery)."""
+
+    expression_shape: Any
+    """The expression with its values left out (see `arguments.py`)."""
+
+    @property
+    def shape(self) -> tuple[Any, ...]:
+        """The part of the query's shape this filter adds."""
+        return ("expression", self.expression_shape)
+
+    @property
+    def matches_nothing(self) -> bool:
+        """Only Django knows, when it writes the SQL."""
+        return False
+
+    def as_q_child(self) -> Any:
+        """This filter as a child of Django's `Q`: the expression itself."""
+        return self.expression
 
 
 @dataclass(frozen=True)
@@ -162,8 +194,9 @@ class Where:
     `LEFT OUTER`), so it is part of the query's shape. The values are not.
     """
 
-    # `"Condition | Where"`: each child is a condition or another node, like a `Q` in a `Q`.
-    children: tuple["Condition | Where", ...]
+    # `"Condition | FilterExpression | Where"`: each child is a condition, an
+    # expression like `Exists(...)`, or another node, like a `Q` in a `Q`.
+    children: tuple["Condition | FilterExpression | Where", ...]
 
     connector: str = "AND"
     """`"AND"` or `"OR"` (Django's `Q.AND` and `Q.OR`)."""
@@ -206,7 +239,7 @@ class Where:
         """The children of the `Q` this node stands for: `Q` objects and `(name, value)` pairs."""
         q_children: list[Any] = []
         for child in self.children:
-            if isinstance(child, Condition):
+            if isinstance(child, (Condition, FilterExpression)):
                 q_children.append(child.as_q_child())
             else:
                 q_children.append(Q(*child.as_q_children(), _connector=child.connector, _negated=child.negated))

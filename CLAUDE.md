@@ -99,7 +99,9 @@ them, and it should teach them both along the way.
   dicts for `values()`, tuples for `values_list()`), converting dates,
   decimals and booleans like Django's converters (`src/conversions.rs`).
   Asking for `queryset.query` replays the recipe with Django's methods, so
-  everything else falls back to Django. Django writes the SQL on purpose: it
+  everything else falls back to Django. A `Query` built from a recipe keeps
+  it, so `Exists(queryset)` and `Subquery(queryset)` (which keep only a copy
+  of the `Query`) have a shape too (`subqueries.py`). Django writes the SQL on purpose: it
   is written once per shape, so a second SQL writer in Rust would buy no
   speed.
 - **Streams** (`aiterator()`): `Database.stream_rows()` reads a query on a
@@ -201,7 +203,9 @@ them, and it should teach them both along the way.
    `values()` and `values_list()`, with dates, decimals and booleans
    converted in Rust. `aiterator()` streams its rows (done). Any chain of
    calls is a recipe, so `annotate()`, `F()`, aggregates and joins through
-   any relation take it too (done). Next: subqueries, `bulk_create()`.
+   any relation take it too (done), and so do subqueries (`Exists()`,
+   `Subquery()`, `OuterRef()`, `pk__in=queryset`) of djox querysets (done).
+   Next: `bulk_create()`.
 7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`,
    with TLS (rustls, libpq's `sslmode` values). Next: reading arrays,
    ranges and `hstore` from async code.

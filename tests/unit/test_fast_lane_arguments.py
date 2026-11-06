@@ -6,10 +6,12 @@ import uuid
 from typing import Any
 
 import pytest
-from django.db.models import Count, Exists, F, Func, IntegerField, Q, Sum, Value
+from django.db import models
+from django.db.models import Count, Exists, F, Func, IntegerField, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Substr
+from django.db.models.lookups import GreaterThan
 
-from djox._fast_lane import arguments
+from djox._fast_lane import arguments, subqueries
 from djox._fast_lane.recipe import Condition, QueryRecipe, Where
 from tests.e2e.kinds.models import EveryKind
 from tests.e2e.library.models import Author, Book, Edition
@@ -92,7 +94,7 @@ def test_uuids_from_urls_are_prepared_like_uuids() -> None:
         ("published__year", 2020),  # a transform
         ("author__name__icontains", "frank"),  # a lookup the fast lane doesn't know, through a join
         ("title__icontains", "dune"),  # a lookup the fast lane doesn't know
-        ("pages", Exists(Book.objects.all())),  # a subquery
+        ("pages", Exists(models.QuerySet(Book))),  # a subquery of a plain Django queryset
         ("pages", 7.5),
         ("pages__gt", None),  # Django raises
         ("in_print__isnull", "yes"),  # Django raises
@@ -158,7 +160,8 @@ def test_a_filter_call_keeps_djangos_order_and_structure() -> None:
     [
         Q(pages__gt=1) ^ Q(title="Dune"),  # XOR
         Q(Q()),  # an empty `Q` inside
-        Q(Exists(Book.objects.all())),  # an expression
+        Q(Exists(models.QuerySet(Book))),  # a subquery of a plain Django queryset
+        Q(GreaterThan(F("pages"), 1)),  # a lookup as an expression
         Q(title__icontains="dune") | Q(pages=1),  # one condition the fast lane doesn't know
     ],
 )
@@ -209,7 +212,7 @@ def test_ordering_takes_names_and_expressions() -> None:
 @pytest.mark.parametrize(
     ("method", "args", "kwargs"),
     [
-        ("annotate", (), {"found": Exists(Book.objects.all())}),  # a subquery
+        ("annotate", (), {"found": Exists(models.QuerySet(Book))}),  # a subquery of a plain Django queryset
         ("annotate", (), {"custom": type("Custom", (Func,), {"function": "CUSTOM"})("pages")}),  # not Django's
         ("annotate", (), {"text": Value(["a list"])}),  # a value of a type Django can't pick a field for
         ("values", (F("title"),), {}),  # an expression where Django takes names
@@ -217,6 +220,63 @@ def test_ordering_takes_names_and_expressions() -> None:
 )
 def test_other_arguments_go_to_django(method: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
     assert arguments.step_for(Book, QueryRecipe(), method, args, kwargs) is None
+
+
+# ---------------------------------------------------------------- subqueries
+
+
+def editions_of_the_book(number: int) -> Any:
+    """The editions of the outer query's book with a number from `number` on."""
+    return Edition.objects.filter(book=OuterRef("pk"), number__gte=number)
+
+
+def test_a_subquery_is_shaped_by_its_recipe_and_its_values_are_values() -> None:
+    shape, values = shape_and_values(Book, "annotate", reprinted=Exists(editions_of_the_book(2)))
+    assert values == [2]
+    assert shape == shape_and_values(Book, "annotate", reprinted=Exists(editions_of_the_book(3)))[0]
+    assert shape != shape_and_values(Book, "annotate", reprinted=Subquery(editions_of_the_book(2).values("pk")[:1]))[0]
+
+
+def test_a_subquerys_values_may_move_to_any_clause() -> None:
+    step = arguments.filter_step(Book, QueryRecipe(), "filter", (Exists(editions_of_the_book(2)),), {})
+    assert step is not None
+    assert step.where is not None
+    assert [(value.value, value.is_plain) for value in step.where.values] == [(2, False)]
+    assert step.needs_check, "Django checks the names of OuterRef() once"
+
+
+def test_exists_and_not_exists_are_filters() -> None:
+    reprinted = where_for(Book, (Exists(editions_of_the_book(2)),), {})
+    not_reprinted = where_for(Book, (~Exists(editions_of_the_book(2)),), {})
+    assert reprinted is not None
+    assert not_reprinted is not None
+    assert reprinted.shape != not_reprinted.shape
+
+
+def test_in_a_queryset_is_a_subquery() -> None:
+    condition = condition_for(Author, "pk__in", Book.objects.filter(pages__gt="500").values("author"))
+    assert condition is not None
+    assert values_of(condition) == (500,), "prepared when `filter()` ran, like any filter value"
+    assert not condition.matches_nothing, "only an empty list matches nothing"
+
+
+def test_a_query_django_changed_forgets_its_recipe() -> None:
+    editions = Edition.objects.filter(number=1)
+    assert subqueries.recipe_of_query(editions.query) is not None
+    # `defer()` is Django's: it clones the `Query` and changes the clone.
+    assert subqueries.recipe_of_query(editions.defer("number").query) is None
+
+
+@pytest.mark.parametrize(
+    "subquery",
+    [
+        Exists(models.QuerySet(Edition).filter(book=OuterRef("pk"))),  # a plain Django queryset
+        Exists(Edition.objects.filter(book=OuterRef("author__name"))),  # an outer name through a relation
+        Subquery(Edition.objects.values("pk"), template="ARRAY(%(subquery)s)"),  # a template of its own
+    ],
+)
+def test_other_subqueries_go_to_django(subquery: Any) -> None:
+    assert arguments.step_for(Book, QueryRecipe(), "annotate", (), {"found": subquery}) is None
 
 
 # ---------------------------------------------------------------- update()

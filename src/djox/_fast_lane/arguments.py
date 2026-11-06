@@ -30,10 +30,15 @@ so the shape of `F("pages") + 1` is the class and the shape of each argument.
 A number, date or text in a `Value()` is a value, prepared like Django's
 `Value` prepares it (with the field Django picks for its type).
 
+**Subqueries** (`subquery_shape()`): `Exists(queryset)`, `Subquery(queryset)`
+and `pk__in=queryset`, when the queryset is a `djox.QuerySet` with a recipe
+(`subqueries.py` finds it). Their shape is the inner recipe's shape, and
+their values are its values. An `OuterRef("pk")` inside is a name, like `F("pk")`.
+
 Anything this file doesn't fully understand returns `None`: the `QuerySet`
 then hands the call to Django right away. That covers transforms
 (`published__year`), lookups other than `exact`, `gt`, `gte`, `lt`, `lte`,
-`in` and `isnull`, subqueries (`Exists()`, `Subquery()`), expression
+`in` and `isnull`, subqueries of plain Django querysets, expression
 classes of the program's own, `XOR`, and values of a type the field doesn't
 usually get (`filter(pages=7.5)`).
 
@@ -44,6 +49,7 @@ has to say which queries share their SQL, and what their values are.
 import datetime
 import decimal
 import uuid
+from dataclasses import replace
 from functools import lru_cache
 from typing import Any
 
@@ -52,12 +58,13 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db import models
 from django.db.models import Q, lookups
 from django.db.models.constants import LOOKUP_SEP
-from django.db.models.expressions import When
+from django.db.models.expressions import Exists, NegatedExpression, OuterRef, Subquery, When
 from django.db.models.fields import related_lookups
 from django.utils import timezone
 from django.utils.hashable import make_hashable
 
-from djox._fast_lane.recipe import Condition, QueryRecipe, QueryValue, Step, Where
+from djox._fast_lane import subqueries
+from djox._fast_lane.recipe import Condition, FilterExpression, QueryRecipe, QueryValue, Step, Where
 
 # The lookup classes the fast lane knows, by lookup name: Django's plain ones,
 # the integer ones (which refuse numbers too big for the column) and the ones
@@ -303,15 +310,17 @@ class ArgumentReader:
         """The `Where` for the children of a `Q` (or of a `filter()` call), or `None`."""
         if connector not in (Q.AND, Q.OR) or not children:
             return None  # `XOR` has SQL of its own on some databases; an empty `Q()` adds nothing
-        noted: list[Condition | Where] = []
+        noted: list[Condition | FilterExpression | Where] = []
         for child in children:
-            node: Condition | Where | None = None
+            node: Condition | FilterExpression | Where | None = None
             # A `Q` exactly: a subclass may build its filters its own way.
             if type(child) is Q:
                 node = self.where_for(list(child.children), child.connector, child.negated)
             elif type(child) is tuple and len(child) == 2 and isinstance(child[0], str):
                 node = self.condition_for(child[0], child[1])
-            # Anything else (an expression like `Exists(...)`) leaves `node` at `None`.
+            elif type(child) in (Exists, NegatedExpression):
+                node = self.filter_expression(child)  # `Exists(...)`, or `~Exists(...)`
+            # Anything else (another expression, like a lookup `GreaterThan(...)`) leaves `node` at `None`.
             if node is None:
                 return None
             noted.append(node)
@@ -336,8 +345,8 @@ class ArgumentReader:
         if value is None:
             # Django reads `exact=None` as `isnull=True`, and refuses `None` for the other lookups.
             return Condition(name, given, "isnull", (), detail=True) if lookup == "exact" else None
-        if hasattr(value, "resolve_expression") and lookup != "in":
-            return self.expression_condition(name, value, lookup)
+        if hasattr(value, "resolve_expression") and (lookup != "in" or isinstance(value, models.QuerySet)):
+            return self.expression_condition(name, value, lookup)  # `F("chapters")`, or a subquery for `in`
         # Django's lookups prepare a relation's value with the field it points to.
         target_field = getattr(field, "target_field", None) or field
         integer_range = issubclass(lookup_class, lookups.IntegerFieldOverflow)
@@ -366,9 +375,24 @@ class ArgumentReader:
         if self.found_something_not_simple:
             return None
         self.needs_check = True
-        values = tuple(self.values[first_value:])
-        del self.values[first_value:]  # they belong to the condition, which the `Where` collects
+        values = self.take_values_since(first_value)
         return Condition(name, expression, lookup, values, detail=("expression", shape))
+
+    def filter_expression(self, expression: Any) -> FilterExpression | None:
+        """The `FilterExpression` for a filter written as an expression, like
+        `Exists(...)`. Django checks it once, like any expression."""
+        first_value = len(self.values)
+        shape = self.shape_of(expression)
+        if self.found_something_not_simple:
+            return None
+        return FilterExpression(expression, self.take_values_since(first_value), shape)
+
+    def take_values_since(self, first_value: int) -> tuple[QueryValue, ...]:
+        """The values read since `first_value`, taken out of `values`: they
+        belong to one filter, and the `Where` collects them from there."""
+        values = tuple(self.values[first_value:])
+        del self.values[first_value:]
+        return values
 
     def field_and_lookup(
         self, name: str
@@ -436,6 +460,17 @@ class ArgumentReader:
             return (Q, where.shape)
         if isinstance(argument, models.Field):
             return field_shape(argument)  # like `output_field=DecimalField(max_digits=5)`
+        if isinstance(argument, models.QuerySet):
+            # A queryset as a value, like `pk__in=Book.objects.values("author")`: a subquery.
+            return self.subquery_shape(type(argument), argument.model, subqueries.recipe_of_queryset(argument))
+        if isinstance(argument, Subquery):
+            output_field = argument.__dict__.get("output_field")  # the one given, if any
+            output_field_shape = None if output_field is None else field_shape(output_field)
+            recipe = subqueries.recipe_of_subquery(argument)
+            model = argument.query.model
+            if model is None:
+                return self.not_simple()  # a `Query` of no model (Django's own, never made from a recipe)
+            return (self.subquery_shape(type(argument), model, recipe), output_field_shape)
         if is_djangos_expression(argument):
             return self.expression_shape(argument, for_save)
         return self.not_simple()
@@ -447,6 +482,8 @@ class ArgumentReader:
         self.needs_check = True
         if type(expression) is models.Value:
             return self.value_shape(expression, for_save)
+        if type(expression) is OuterRef:
+            return self.outer_reference_shape(expression)
         if type(expression) is When:
             # `When(pages__gt=500, then=...)` turns its filters into a `Q`
             # (`condition`), prepared like any filter.
@@ -473,6 +510,29 @@ class ArgumentReader:
         self.values.append(QueryValue(value, output_field, "save" if for_save else "value"))
         return (models.Value, type(value), output_field_shape)
 
+    def outer_reference_shape(self, reference: OuterRef) -> Any:
+        """The shape of an `OuterRef("pk")` in a subquery: a name of the outer
+        query's model. That model isn't known here, so a name through
+        relations, which might end in a transform, is left to Django (see
+        `names_a_transform()`)."""
+        name = reference.name  # type: ignore[attr-defined]  # Django's (`F.name`), missing from django-stubs
+        if isinstance(name, str):
+            return (OuterRef, name) if LOOKUP_SEP not in name else self.not_simple()
+        return (OuterRef, self.shape_of(name))  # `OuterRef(OuterRef("pk"))`, from a subquery in a subquery
+
+    def subquery_shape(self, kind: type, model: type[models.Model], recipe: QueryRecipe | None) -> Any:
+        """The shape of a subquery of `model` made from `recipe`: its kind
+        (`Exists`, `Subquery` or the queryset's class) and the recipe's shape.
+        The recipe's values are the subquery's values."""
+        if recipe is None:
+            return self.not_simple()  # a plain Django queryset: Django's way
+        self.uses_expressions = True
+        self.needs_check = True  # Django checks the outer call once (a wrong `OuterRef()` name...)
+        for value in recipe.values:
+            # In the outer query, Django may write the subquery in any clause.
+            self.values.append(replace(value, is_plain=False))
+        return (kind, model, recipe.shape)
+
     def not_simple(self) -> Any:
         """Note that this call has something the fast lane leaves to Django."""
         self.found_something_not_simple = True
@@ -481,7 +541,7 @@ class ArgumentReader:
 
 def is_djangos_expression(argument: Any) -> bool:
     """Whether `argument` is one of Django's own expressions (`F`, `Count`,
-    `Case`...), but not a subquery or a filter written as an expression.
+    `Case`...), but not a queryset or a filter written as a lookup.
 
     The SQL of Django's expressions depends only on their arguments (and the
     time zone, see `timezone_names()`). An expression class of the

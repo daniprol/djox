@@ -25,6 +25,7 @@ and errors are the same. `DJOX_FAST_LANE = False` in the settings turns it off.
 |------------------|-----------------------------------------------------------------------|
 | `recipe.py`      | `QueryRecipe`: the calls a `QuerySet` keeps; building Django's `QuerySet` from them |
 | `arguments.py`   | Reading each call's arguments into a shape and values, like Django's lookups |
+| `subqueries.py`  | The recipe behind a subquery (`Exists()`, `Subquery()`, `pk__in=queryset`) |
 | `checks.py`      | Django checks each new kind of call once, so its errors come at its moment |
 | `statements.py`  | The SQL of each shape, written once by Django and kept                |
 | `parameters.py`  | Which value makes each of Django's parameters                         |
