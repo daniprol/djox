@@ -45,6 +45,16 @@ break comes with a migration note.
 - **Arrays, ranges and `hstore` from async Postgres code**: they come back as a `list`, psycopg's `Range` and
   a `dict`, and lists, ranges and dicts work as parameters, so Django's `ArrayField`, range fields and
   `HStoreField` filter in async code.
+- **`aget_or_create()`, `ain_bulk()`, `abulk_create()` and `abulk_update()` run on djox**: Django's steps,
+  each statement awaited, with `djox.atomic()` where Django uses `atomic()`, instead of Django's sync method
+  on a thread (`aget_or_create()` of a new row: 510 µs to 250 µs; `ain_bulk()` of 100 books: 1,220 µs to
+  363 µs). On SQLite, `aget_or_create()` looks again inside its block, which holds the write lock, so
+  tasks at once create a row once.
+- **`bulk_update()` and `abulk_update()` on the fast lane**: djox keeps the `UPDATE` Django writes for each
+  shape of batch, and only computes the parameters (100 books: about 10 ms to 0.6 ms). `in_bulk()` takes the
+  fast lane too.
+- A nested `djox.atomic(savepoint=False)` on SQLite no longer needs Django's thread: if it raises, it marks
+  the block for rollback, like Django's.
 - **Tests of async code in a sync transaction** that `TestCase` didn't open (pytest-django's `django_db`,
   `async_to_sync()` inside `atomic()`).
 
@@ -56,6 +66,8 @@ break comes with a migration note.
 
 ### Fixed
 
+- Inside a `djox.atomic()` block on SQLite, a statement that failed in a nested block (a savepoint) no longer
+  stops the rest of the block once Django rolled the savepoint back.
 - **`XOR` filters on Postgres**: Django's `XOR` sums `CASE` results whose numbers djox sent as text, so
   Postgres refused them ("operator does not exist: text + text").
 - `acreate()` now calls a model's own `save()`.

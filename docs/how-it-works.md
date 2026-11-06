@@ -189,9 +189,14 @@ method:
   dates), which must happen once. djox sends the signals with `asend()`, runs
   Django's `_save_table()` once, takes the `INSERT` from it, and awaits it.
 
-Methods that need a transaction or several statements (`aget_or_create()`,
-`abulk_create()`, deletes that cascade, `prefetch_related()`, `asave()` on a
-`djox.Model`) run Django's sync method unchanged, on a small pool of djox's
+`aget_or_create()`, `ain_bulk()`, `abulk_create()` and `abulk_update()`
+take Django's steps one by one (`djox/query.py`, `djox/_bulk_create.py`,
+`djox/_bulk_update.py`): Django's checks, each statement awaited on djox, and
+`djox.atomic()` where Django uses `atomic()`.
+
+Other methods that need a transaction or several statements
+(`aupdate_or_create()`, deletes that cascade, `prefetch_related()`,
+`asave()` on a `djox.Model`) run Django's sync method unchanged, on a small pool of djox's
 own threads (`djox/_threads.py`), instead of Django's single worker thread.
 Each pooled thread keeps its Django connection open, and runs Django's
 `close_old_connections()` once per request, like a request thread

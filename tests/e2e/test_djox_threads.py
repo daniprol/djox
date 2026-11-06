@@ -1,8 +1,10 @@
 """Django's methods that need a transaction, on djox's own threads.
 
-`aget_or_create()`, `abulk_create()`, `Model.asave()`... run Django's sync
-method unchanged, on a thread from djox's pool instead of Django's single
-"sync thread". Inside a transaction they run on its thread and join it.
+`aupdate_or_create()`, `Model.asave()`, and the methods djox runs itself
+when they need Django's code (`aget_or_create()` with sync signal
+receivers...) run Django's sync method unchanged, on a thread from djox's
+pool instead of Django's single "sync thread". Inside a transaction they
+run on its thread and join it.
 """
 
 import asyncio
@@ -37,45 +39,11 @@ def book(title: str, author: Author, pages: int = 100) -> Book:
 # ---------------------------------------------------------------- QuerySet methods
 
 
-async def test_aget_or_create_creates_once_then_gets() -> None:
-    author, created = await Author.objects.aget_or_create(name="Octavia E. Butler")
-    assert created is True
-    again, created = await Author.objects.aget_or_create(name="Octavia E. Butler")
-    assert (again.pk, created) == (author.pk, False)
-
-
-@pytest.mark.sqlite_only(
-    "SQLite's one writer makes get_or_create() safe without a unique constraint; Postgres needs one, as in Django"
-)
-async def test_get_or_create_at_once_creates_one_row() -> None:
-    # Writers take turns, so twenty tasks asking at once create one author.
-    results = await asyncio.gather(*(Author.objects.aget_or_create(name="Ursula K. Le Guin") for _ in range(20)))
-    assert [created for _, created in results].count(True) == 1
-    assert await Author.objects.acount() == 1
-
-
 async def test_aupdate_or_create_updates_or_creates() -> None:
     author, created = await Author.objects.aupdate_or_create(name="Jane Austen", defaults={"name": "Jane Austen"})
     assert created is True
     updated, created = await Author.objects.aupdate_or_create(name="Jane Austen", defaults={"name": "J. Austen"})
     assert (updated.pk, updated.name, created) == (author.pk, "J. Austen", False)
-
-
-async def test_abulk_create_and_abulk_update() -> None:
-    author = await Author.objects.acreate(name="Frank Herbert")
-    books = await Book.objects.abulk_create([book("Dune", author), book("Dune Messiah", author)])
-    assert all(saved.pk is not None for saved in books)
-    for saved in books:
-        saved.pages = 500
-    assert await Book.objects.abulk_update(books, ["pages"]) == 2
-    assert [pages async for pages in Book.objects.values_list("pages", flat=True)] == [500, 500]
-
-
-async def test_ain_bulk_maps_ids_to_objects() -> None:
-    first = await Author.objects.acreate(name="First")
-    second = await Author.objects.acreate(name="Second")
-    found = await Author.objects.ain_bulk([first.pk, second.pk])
-    assert {pk: author.name for pk, author in found.items()} == {first.pk: "First", second.pk: "Second"}
 
 
 # ---------------------------------------------------------------- djox.Model

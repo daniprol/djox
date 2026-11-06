@@ -155,23 +155,31 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
 | | django sync | djox sync | djox.Manager sync | sqlite3 | django async | djox safe lane | djox.Manager | djox |
 |---|---|---|---|---|---|---|---|---|
-| get one book by id | 218 | 214 | 64 | 4 | 517 | 245 | 51 | 6 |
-| fetch 20 books | 474 | 522 | 124 | 24 | 963 | 592 | 141 | 27 |
-| fetch 1,000 books | 8,355 | 7,760 | 2,753 | 588 | 9,834 | 10,881 | 2,989 | 810 |
-| count | 290 | 263 | 93 | 61 | 568 | 306 | 89 | 58 |
-| update one book | 119 | 130 | 58 | 10 | 378 | 323 | 193 | 115 |
-| insert one book | 183 | 195 | 145 | 47 | 441 | 401 | 268 | 136 |
-| two inserts in a transaction | 319 | 346 | 332 | 60 | 645 | 1,485 | 1,280 | n/a |
-| get or create (exists) | 202 | 218 | 61 | n/a | 578 | 253 | 58 | n/a |
-| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 624 | 1,060 | 863 | n/a |
-| 20 chapters with their book | 744 | 744 | 219 | n/a | 1,245 | 924 | 206 | n/a |
-| 1,000 chapters with their book | 15,373 | 15,678 | 5,423 | n/a | 17,241 | 13,811 | 7,469 | n/a |
-| 20 books with their chapters | 1,514 | 1,745 | 983 | n/a | 2,522 | 2,475 | 1,608 | n/a |
-| 20 chapters with their book (prefetched) | 791 | 1,128 | 325 | n/a | 1,777 | 1,662 | 728 | n/a |
-| 20 books with their tags | 1,416 | 1,565 | 742 | n/a | 2,288 | 2,282 | 1,270 | n/a |
-| 100 gets at once | n/a | n/a | n/a | n/a | 445 | 254 | 60 | 6 |
-| 100 get or create at once | n/a | n/a | n/a | n/a | 503 | 232 | 63 | n/a |
-| 100 mixed writes at once | n/a | n/a | n/a | n/a | 595 | 898 | 916 | n/a |
+| get one book by id | 115 | 120 | 38 | 2 | 280 | 133 | 39 | 3 |
+| fetch 20 books | 299 | 314 | 87 | 16 | 531 | 333 | 92 | 17 |
+| fetch 1,000 books | 5,374 | 5,901 | 1,620 | 375 | 6,571 | 5,786 | 2,188 | 348 |
+| count | 168 | 157 | 58 | 44 | 320 | 163 | 62 | 35 |
+| update one book | 72 | 69 | 49 | 6 | 248 | 114 | 61 | 7 |
+| insert one book | 94 | 104 | 69 | 24 | 222 | 121 | 81 | 27 |
+| two inserts in a transaction | 184 | 205 | 199 | 26 | 360 | 277 | 170 | n/a |
+| get or create (exists) | 119 | 119 | 40 | n/a | 291 | 138 | 41 | n/a |
+| get or create (new) | 275 | 318 | 136 | n/a | 508 | 641 | 223 | n/a |
+| bulk create 100 books | 1,260 | 1,494 | 1,568 | n/a | 1,906 | 1,798 | 1,750 | n/a |
+| bulk update 100 books | 7,122 | 7,427 | 688 | n/a | 7,534 | 7,757 | 822 | n/a |
+| in bulk 100 books | 813 | 799 | 300 | n/a | 1,108 | 1,101 | 320 | n/a |
+| one insert, or two in a transaction | n/a | n/a | n/a | n/a | 304 | 210 | 129 | n/a |
+| 20 chapters with their book | 434 | 560 | 132 | n/a | 814 | 579 | 138 | n/a |
+| 1,000 chapters with their book | 9,873 | 10,660 | 3,968 | n/a | 12,191 | 10,283 | 4,005 | n/a |
+| 20 books with their chapters | 1,235 | 1,435 | 715 | n/a | 1,685 | 1,624 | 1,008 | n/a |
+| 20 chapters with their book (prefetched) | 747 | 813 | 231 | n/a | 1,327 | 1,193 | 477 | n/a |
+| 20 books with their tags | 1,161 | 1,171 | 486 | n/a | 1,659 | 1,709 | 881 | n/a |
+| 10 books with a chapter count | 367 | 431 | 106 | n/a | 709 | 482 | 118 | n/a |
+| 10 books by chapter title | 288 | 346 | 81 | n/a | 561 | 371 | 108 | n/a |
+| sum of pages | 257 | 267 | 130 | n/a | 528 | 318 | 127 | n/a |
+| update with F() | 132 | 126 | 89 | n/a | 334 | 185 | 79 | n/a |
+| 100 gets at once | n/a | n/a | n/a | n/a | 262 | 157 | 42 | 4 |
+| 100 get or create at once | n/a | n/a | n/a | n/a | 263 | 155 | 43 | n/a |
+| 100 mixed writes at once | n/a | n/a | n/a | n/a | 305 | 224 | 113 | n/a |
 
 | Contender | What runs |
 |---|---|
@@ -181,12 +189,12 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 | djox safe lane | `djox.Manager()` with `DJOX_FAST_LANE = False`: Django builds everything, djox runs the SQL |
 | sqlite3 / djox | Hand-written SQL on Python's `sqlite3` / on `djox.Database`. The floors |
 
-- **The fast lane makes sync code 3 times faster**: `get()` 64 µs against 218, `count()` 93 against 290.
-- **Async `aget()` is 10 times faster** than Django's (51 µs against 517), and 1,000 books 3 times. A small read
-  runs right on the calling thread ([quick reads](https://daniprol.github.io/djox/sqlite/)), within 50 µs of
+- **The fast lane makes sync code 3 times faster**: `get()` 38 µs against 115, `count()` 58 against 168.
+- **Async `aget()` is 7 times faster** than Django's (39 µs against 280), and 1,000 books 3 times. A small read
+  runs right on the calling thread ([quick reads](https://daniprol.github.io/djox/sqlite/)), within 40 µs of
   hand-written SQL.
-- **`select_related()` takes the fast lane too**: 20 chapters with their book take 219 µs sync against 744, and
-  206 µs async against 1,245. Django writes the join once; Rust builds both objects of each row.
+- **`select_related()` takes the fast lane too**: 20 chapters with their book take 132 µs sync against 434, and
+  138 µs async against 814. Django writes the join once; Rust builds both objects of each row.
 - **Prefetching takes the fast lane too**: the chapters' query (`WHERE book_id IN (...)`) reuses Django's SQL
   and Rust builds the chapters. 20 books with their chapters: sync 1,260 µs to 840 µs (same run, with and
   without it). The scenario uses `Prefetch("chapters", queryset=...)` so each contender's own manager builds the
@@ -201,6 +209,12 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 
   The many-to-many scenario passes `Prefetch("tags", queryset=Tag.objects.all())` where `Tag`'s default manager is
   djox's: djox takes a many-to-many prefetch only for a related model with a djox default manager.
+- **`bulk_update()` takes the fast lane**: djox keeps the `UPDATE` Django writes for each shape of batch (a `CASE
+  WHEN` per object) and only computes the parameters. 100 books: 688 µs sync against 7,122, 822 µs async against
+  7,534. `in_bulk()` of 100 books: 300 µs against 813.
+- **`aget_or_create()`, `ain_bulk()`, `abulk_create()` and `abulk_update()` are awaited step by step**, not run on
+  a thread: a new row with `aget_or_create()` takes 223 µs against Django's 508. `abulk_create()` of 100 books: 1,750 µs
+  against 1,906; Django still writes each batch's `INSERT`, and preparing the values takes most of the time.
 - **Annotations, aggregates and `F()` take the fast lane too** (the general fast lane: any chain of calls reuses
   the SQL Django wrote once for its shape). Measured before and after it, in one run of the same VM:
 

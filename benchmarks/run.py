@@ -189,6 +189,24 @@ def alternating(first: Callable[[], Any], second: Callable[[], Any]) -> Callable
     return lambda: first() if next(calls) % 2 == 0 else second()
 
 
+# Ids for "get or create (new)", one per call. Negative, so they never meet
+# the ids SQLite gives new books (one more than the largest id).
+new_ids = itertools.count(-1, -1)
+
+
+def books_to_create() -> list[Book]:
+    """100 new books, for `bulk_create()`."""
+    return [Book(**new_book()) for _ in range(100)]
+
+
+def books_to_update() -> list[Book]:
+    """Books 1 to 100 with a new page count, for `bulk_update(..., ["pages"])`."""
+    return [Book(id=book_id, pages=200) for book_id in range(1, 101)]
+
+
+HUNDRED_IDS = list(range(1, 101))
+
+
 def two_inserts_in_a_transaction(alias: str) -> None:
     """The sync way: Django's `atomic()` around two `create()`s."""
     with transaction.atomic(using=alias):
@@ -254,6 +272,10 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("default"),
         "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
+        "get or create (new)": lambda: Book.objects.get_or_create(id=next(new_ids), defaults=new_book()),
+        "bulk create 100 books": lambda: Book.objects.bulk_create(books_to_create()),
+        "bulk update 100 books": lambda: Book.objects.bulk_update(books_to_update(), ["pages"]),
+        "in bulk 100 books": lambda: Book.objects.in_bulk(HUNDRED_IDS),
         **listed(related_querysets(Book.objects, Chapter.objects, Tag.django_objects)),
         **listed(expression_querysets(Book.objects)),
         "sum of pages": lambda: sum_of_pages(Book.objects),
@@ -295,6 +317,10 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
             sync_to_async(lambda: two_inserts_in_a_transaction("default")),
         ),
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
+        "get or create (new)": lambda: Book.objects.aget_or_create(id=next(new_ids), defaults=new_book()),
+        "bulk create 100 books": lambda: Book.objects.abulk_create(books_to_create()),
+        "bulk update 100 books": lambda: Book.objects.abulk_update(books_to_update(), ["pages"]),
+        "in bulk 100 books": lambda: Book.objects.ain_bulk(HUNDRED_IDS),
         **fetched(related_querysets(Book.objects, Chapter.objects, Tag.django_objects)),
         **fetched(expression_querysets(Book.objects)),
         "sum of pages": lambda: Book.objects.filter(pages__gt=500).aaggregate(total=Sum("pages")),
@@ -350,6 +376,10 @@ def make_djox_sync(
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("djox"),
         "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
+        "get or create (new)": lambda: books.get_or_create(id=next(new_ids), defaults=new_book()),
+        "bulk create 100 books": lambda: books.bulk_create(books_to_create()),
+        "bulk update 100 books": lambda: books.bulk_update(books_to_update(), ["pages"]),
+        "in bulk 100 books": lambda: books.in_bulk(HUNDRED_IDS),
         **listed(related_querysets(books, chapter_manager.db_manager("djox"), tag_manager.db_manager("djox"))),
         **listed(expression_querysets(books)),
         "sum of pages": lambda: sum_of_pages(books),
@@ -380,6 +410,10 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "two inserts in a transaction": two_inserts,
         "one insert, or two in a transaction": alternating(lambda: books.acreate(**new_book()), two_inserts),
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
+        "get or create (new)": lambda: books.aget_or_create(id=next(new_ids), defaults=new_book()),
+        "bulk create 100 books": lambda: books.abulk_create(books_to_create()),
+        "bulk update 100 books": lambda: books.abulk_update(books_to_update(), ["pages"]),
+        "in bulk 100 books": lambda: books.ain_bulk(HUNDRED_IDS),
         **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"), Tag.objects.db_manager("djox"))),
         **fetched(expression_querysets(books)),
         "sum of pages": lambda: books.filter(pages__gt=500).aaggregate(total=Sum("pages")),
@@ -434,6 +468,10 @@ REPEATS = {
     "insert one book": 500,
     "two inserts in a transaction": 300,
     "get or create (exists)": 500,
+    "get or create (new)": 300,
+    "bulk create 100 books": 50,
+    "bulk update 100 books": 50,
+    "in bulk 100 books": 100,
     "one insert, or two in a transaction": 300,
     "20 chapters with their book": 1000,
     "1,000 chapters with their book": 30,
@@ -454,6 +492,17 @@ CONCURRENT_SCENARIOS = {
 }
 
 
+def chosen(operations: dict[str, Any]) -> dict[str, Any]:
+    """The scenarios named on the command line (any part of a name), or all of them.
+
+    `uv run python run.py bulk "get or create"` runs only those scenarios.
+    """
+    words = sys.argv[1:]
+    if not words:
+        return operations
+    return {scenario: operation for scenario, operation in operations.items() if any(w in scenario for w in words)}
+
+
 def main() -> None:
     create_database()
     results: dict[str, dict[str, float]] = {}
@@ -466,7 +515,7 @@ def main() -> None:
         ("sqlite3", make_sqlite3()),
     ]:
         results[name] = {
-            scenario: time_sync(operation, REPEATS[scenario]) for scenario, operation in operations.items()
+            scenario: time_sync(operation, REPEATS[scenario]) for scenario, operation in chosen(operations).items()
         }
         report(name, results[name])
 
@@ -480,9 +529,9 @@ def main() -> None:
             # Read whenever a QuerySet is made, so it can change between contenders.
             settings.DJOX_FAST_LANE = fast_lane
             results[name] = {}
-            for scenario, operation in operations.items():
+            for scenario, operation in chosen(operations).items():
                 results[name][scenario] = await time_async(operation, REPEATS[scenario])
-            for concurrent, scenario in CONCURRENT_SCENARIOS.items():
+            for concurrent, scenario in chosen(CONCURRENT_SCENARIOS).items():
                 if scenario in operations:
                     results[name][concurrent] = await time_concurrent(operations[scenario], CONCURRENT_TASKS)
             report(name, results[name])
@@ -493,7 +542,8 @@ def main() -> None:
         f"{platform.system()} {platform.machine()}, Python {platform.python_version()}, Django {django.get_version()}"
     )
     output = {"machine": machine, "book_count": BOOK_COUNT, "microseconds_per_call": results}
-    (Path(__file__).parent / "results" / "latest.json").write_text(json.dumps(output, indent=2) + "\n")
+    if not sys.argv[1:]:  # a run of some scenarios only doesn't replace the saved results
+        (Path(__file__).parent / "results" / "latest.json").write_text(json.dumps(output, indent=2) + "\n")
     print(markdown_table(results, machine))
 
 

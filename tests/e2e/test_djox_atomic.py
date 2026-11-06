@@ -99,6 +99,35 @@ async def test_a_failed_write_in_a_nested_block_only_undoes_that_block() -> None
     assert await names() == ["Kept"]
 
 
+async def test_a_nested_block_without_a_savepoint_shares_the_blocks_fate() -> None:
+    # Like in Django: if it raises, nothing more runs and the whole block rolls back.
+    async def add_and_change_my_mind_without_savepoint() -> None:
+        async with djox.atomic(savepoint=False):
+            await Author.objects.acreate(name="Rolled back too")
+            raise ChangedMyMindError
+
+    async def fail_inside_and_go_on() -> None:
+        async with djox.atomic():
+            await Author.objects.acreate(name="Rolled back")
+            with pytest.raises(ChangedMyMindError):
+                await add_and_change_my_mind_without_savepoint()
+            await Author.objects.acount()
+
+    with pytest.raises(transaction.TransactionManagementError):
+        await fail_inside_and_go_on()
+    assert await names() == []
+
+
+async def test_after_a_failed_nested_block_the_block_goes_on() -> None:
+    async with djox.atomic():
+        await Author.objects.acreate(name="Kept")
+        with pytest.raises(IntegrityError):
+            async with djox.atomic():
+                await Author.objects.acreate(name=None)  # type: ignore[misc]  # a missing name, on purpose
+        await Author.objects.acreate(name="Kept too")
+    assert await names() == ["Kept", "Kept too"]
+
+
 async def test_durable_refuses_to_be_nested() -> None:
     async with djox.atomic():
         with pytest.raises(RuntimeError, match="durable"):
@@ -110,10 +139,10 @@ async def test_durable_refuses_to_be_nested() -> None:
 
 
 async def test_djangos_own_async_methods_join_the_block() -> None:
-    # `aget_or_create()` is Django's own method (djox falls back to it).
+    # `aupdate_or_create()` is Django's own method (djox falls back to it).
     async def get_or_create_and_change_my_mind() -> None:
         async with djox.atomic():
-            author, created = await Author.objects.aget_or_create(name="Octavia E. Butler")
+            author, created = await Author.objects.aupdate_or_create(name="Octavia E. Butler")
             assert created is True
             assert await Author.objects.filter(pk=author.pk).aexists(), "djox sees Django's write"
             raise ChangedMyMindError

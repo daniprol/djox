@@ -74,6 +74,21 @@ transforms in names (`published__year`), `XOR`, `extra()`, `only()` and
   `UPDATE` first), and, from async code, models with sync `pre_save` or
   `post_save` receivers.
 
+## Many objects at once
+
+- **`bulk_update()` and `abulk_update()`**: Django writes each batch's
+  `UPDATE` with a `CASE WHEN` per object, which takes far longer than running
+  it (about 8 ms for 100 books). djox keeps the SQL of each shape of batch
+  (the fields, the number of objects and the type of each value) and only
+  computes the parameters: 100 books in about 0.6 ms, 16 times faster. A
+  value that is an expression (`F("pages") + 1`), or the same object twice,
+  is Django's way.
+- **`in_bulk()` and `ain_bulk()`**: their query is a `filter(pk__in=...)` on
+  the fast lane (100 books: 2.7 times faster sync, 3.7 times async).
+- **`abulk_create()`** awaits each batch's `INSERT` on djox, without a thread.
+  Django still writes each batch's SQL: preparing each value takes most of
+  the time either way, so keeping it would save less than a fifth.
+
 ## How it stays correct
 
 - **The SQL is Django's.** A query is noted as its chain of calls. The first

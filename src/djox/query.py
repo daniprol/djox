@@ -21,11 +21,14 @@ by Django's own code. Three ways are used, depending on the method:
   again with the answer, to shape the result itself (`compiler.replay()`).
 - **Create**: `acreate()`. Django's steps of `save()`, with the `INSERT`
   on the fast lane, awaited on djox (`djox._saving`).
+- **Several statements**: `aget_or_create()`, `ain_bulk()`, `abulk_create()`,
+  `abulk_update()`. Django's steps, written again here (or in
+  `djox._bulk_create` and `djox._bulk_update`), with each statement awaited
+  on djox, and `djox.atomic()` where Django uses `atomic()`.
 
-Methods that need a transaction or several statements (`aget_or_create()`,
-`aupdate_or_create()`, `abulk_create()`, `abulk_update()`, cascading
-`adelete()`, `ain_bulk()`, `prefetch_related()`, models with parent models)
-run Django's sync method unchanged, on one of djox's own threads
+Other methods that need a transaction or several statements
+(`aupdate_or_create()`, cascading `adelete()`, `prefetch_related()`, models
+with parent models) run Django's sync method unchanged, on one of djox's own threads
 (`djox._threads`): not on Django's single sync thread, where every Django
 async call in the process waits its turn. Inside a transaction, they run on
 the transaction's thread, so they join it.
@@ -46,20 +49,24 @@ from collections.abc import AsyncIterator, Callable, Collection, Iterable, Itera
 from typing import Any, TypeVar
 
 from asgiref.sync import sync_to_async
-from django.db import NotSupportedError, connections, models, transaction
+from django.core.exceptions import FieldDoesNotExist
+from django.db import IntegrityError, NotSupportedError, connections, models, transaction
 from django.db.models import prefetch_related_objects
 from django.db.models.deletion import Collector
 from django.db.models.query import (
     MAX_GET_RESULTS,  # how many rows `get()` reads at most
     FlatValuesListIterable,
+    ModelIterable,
     NamedValuesListIterable,
     ValuesIterable,
     ValuesListIterable,
 )
 from django.db.models.sql import Query
 from django.db.models.sql.constants import MULTI
+from django.db.models.utils import resolve_callables
 
-from djox import _fast_lane, _running, _saving, _threads
+from djox import _bulk_create, _bulk_update, _fast_lane, _running, _saving, _threads
+from djox import transaction as djox_transaction
 from djox._fast_lane import arguments, checks
 from djox._fast_lane import running as fast_lane
 from djox._fast_lane.recipe import QueryRecipe, Step
@@ -740,23 +747,142 @@ class QuerySet(models.QuerySet[ModelType]):
         if hasattr(self, "_fetch_mode"):  # Django 6.1 and later
             obj._state.fetch_mode = self._fetch_mode  # pyrefly: ignore[read-only]  # django-stubs: read-only
 
-    # -------------------------------------------- Django's methods, on djox's threads
+    # -------------------------------------------- several statements, awaited one by one
 
     async def aget_or_create(self, defaults: Mapping[str, Any] | None = None, **kwargs: Any) -> tuple[ModelType, bool]:
         """Django's `get_or_create()`: the object matching `kwargs`, or a new
-        one, and whether it was created.
+        one, and whether it was created. Django's steps, each awaited on djox:
 
-        The lookup comes first, with `aget()` on djox. Only when nothing
-        matches does Django's `get_or_create()` run, on one of djox's threads
-        (see `djox._threads`): it looks again, and creates the object, while
-        no one else writes, so two tasks can't both create it.
+        1. `aget(**kwargs)`;
+        2. if nothing matched, `acreate()` inside `djox.atomic()` (a
+           savepoint, in a transaction), so a failed `INSERT` doesn't spoil
+           the transaction around it;
+        3. if the `INSERT` fails on a unique column (`IntegrityError`),
+           another task created the object meanwhile: `aget()` finds it.
+
+        One step more than Django: the block looks again before creating. On
+        SQLite the block holds the file's write lock, so no other writer can
+        create the object between that look and the `INSERT`, even without a
+        unique column.
         """
-        if runs_on_djox(self.db):
-            try:
-                return await self.aget(**kwargs), False
-            except self.model.DoesNotExist:  # type: ignore[attr-defined]  # each model class has its own
-                pass
-        return await self._run_django_method(lambda: self.get_or_create(defaults, **kwargs), writes=True)
+        using = self._alias_for_write()  # like Django, it reads from the database it writes to
+        if not runs_on_djox(using):
+            return await super().aget_or_create(defaults, **kwargs)
+        found = await self._get_or_none(kwargs)
+        if found is not None:
+            return found, False
+        # Django's: `kwargs` without lookups (`title__iexact`), then `defaults`.
+        parameters = self._extract_model_params(defaults, **kwargs)  # type: ignore[attr-defined]
+        try:
+            async with djox_transaction.atomic(using=using):
+                found = await self._get_or_none(kwargs)  # look again (see above)
+                if found is not None:
+                    return found, False
+                # A default may be a function (`defaults={"code": make_code}`): call it now, like Django.
+                return await self.acreate(**dict(resolve_callables(parameters))), True
+        except IntegrityError:
+            found = await self._get_or_none(kwargs)
+            if found is None:
+                raise  # the `IntegrityError`: something else went wrong
+            return found, False
+
+    async def _get_or_none(self, kwargs: dict[str, Any]) -> ModelType | None:
+        """`aget(**kwargs)`, or `None` if nothing matches."""
+        try:
+            return await self.aget(**kwargs)
+        except self.model.DoesNotExist:  # type: ignore[attr-defined]  # each model class has its own
+            return None
+
+    def in_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, ModelType]:
+        """Django's `in_bulk()`: the objects whose `field_name` is in
+        `id_list` (or all of them), by that value. Its query takes the fast
+        lane when it can (`_queryset_for_in_bulk()`)."""
+        ids = None if id_list is None else tuple(id_list)  # an iterator could be read only once
+        queryset = self._queryset_for_in_bulk(ids, field_name) if runs_on_djox(self.db) else None
+        if queryset is None:
+            return super().in_bulk(ids, field_name=field_name)
+        return {getattr(obj, field_name): obj for obj in queryset}
+
+    async def ain_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, ModelType]:
+        """Django's `in_bulk()`, with its query awaited on djox."""
+        if not runs_on_djox(self.db):
+            return await super().ain_bulk(id_list, field_name=field_name)
+        ids = None if id_list is None else tuple(id_list)
+        queryset = self._queryset_for_in_bulk(ids, field_name)
+        if queryset is None:
+            return await self._run_django_method(lambda: self.in_bulk(ids, field_name=field_name), writes=False)
+        return {getattr(obj, field_name): obj async for obj in queryset}
+
+    def _queryset_for_in_bulk(self, ids: tuple[Any, ...] | None, field_name: str) -> "QuerySet[ModelType] | None":
+        """What `in_bulk()` runs, noted in the recipe: the objects whose
+        `field_name` is in `ids` (all of them, for `None`). `None` if Django
+        should run it: it raises for a slice or a field that isn't unique,
+        returns other things after `values()`, and splits a long list of ids
+        into several queries."""
+        recipe = self._recordable_recipe()
+        if recipe is None or recipe.is_sliced or recipe.has_step("distinct"):
+            return None
+        if self._iterable_class is not ModelIterable:
+            return None  # `values()`, `values_list()`
+        if not is_unique_field(self.model, field_name):
+            return None
+        if ids is None:
+            return self._with_recipe(recipe)
+        if not in_one_query(self.db, self.model, ids):
+            return None
+        filtered = self._with_filter_noted(recipe, "filter", (), {f"{field_name}__in": ids})
+        if filtered is None:
+            return None
+        return self._with_recipe(filtered)
+
+    async def abulk_create(
+        self,
+        objs: Iterable[ModelType],  # Django's name
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Collection[str] | None = None,
+        unique_fields: Collection[str] | None = None,
+    ) -> list[ModelType]:
+        """Django's `bulk_create()`, with each batch's `INSERT` awaited on djox (`djox._bulk_create`)."""
+        using = self._alias_for_write()
+        if not runs_on_djox(using):
+            return await super().abulk_create(
+                objs, batch_size, ignore_conflicts, update_conflicts, update_fields, unique_fields
+            )
+        if not _bulk_create.creates_on_djox(self.model):
+            return await self._run_django_method(
+                lambda: self.bulk_create(
+                    objs,
+                    batch_size=batch_size,
+                    ignore_conflicts=ignore_conflicts,
+                    update_conflicts=update_conflicts,
+                    update_fields=update_fields,
+                    unique_fields=unique_fields,
+                ),
+                writes=True,
+            )
+        options = _bulk_create.Options(batch_size, ignore_conflicts, update_conflicts, update_fields, unique_fields)
+        return await _bulk_create.bulk_create(self, objs, options)
+
+    def bulk_update(self, objs: Iterable[ModelType], fields: Iterable[str], batch_size: int | None = None) -> int:
+        """Django's `bulk_update()`. Each batch's `UPDATE` takes the fast lane when it can (`djox._bulk_update`)."""
+        self._alias_for_write()  # the batches go to the database for writes
+        if not _bulk_update.updates_on_djox(self):
+            return super().bulk_update(objs, fields, batch_size)
+        return _bulk_update.bulk_update_now(self, objs, fields, batch_size)
+
+    async def abulk_update(
+        self, objs: Iterable[ModelType], fields: Iterable[str], batch_size: int | None = None
+    ) -> int:
+        """Django's `bulk_update()`, with each batch's `UPDATE` awaited on djox (`djox._bulk_update`)."""
+        if not runs_on_djox(self._alias_for_write()):
+            return await super().abulk_update(objs, fields, batch_size)
+        if not _bulk_update.updates_on_djox(self):
+            return await self._run_django_method(lambda: self.bulk_update(objs, fields, batch_size), writes=True)
+        return await _bulk_update.bulk_update(self, objs, fields, batch_size)
+
+    # -------------------------------------------- Django's methods, on djox's threads
 
     async def aupdate_or_create(
         self,
@@ -768,38 +894,6 @@ class QuerySet(models.QuerySet[ModelType]):
         return await self._run_django_method(
             lambda: self.update_or_create(defaults, create_defaults, **kwargs), writes=True
         )
-
-    async def abulk_create(
-        self,
-        objs: Iterable[ModelType],  # Django's name
-        batch_size: int | None = None,
-        ignore_conflicts: bool = False,
-        update_conflicts: bool = False,
-        update_fields: Collection[str] | None = None,
-        unique_fields: Collection[str] | None = None,
-    ) -> list[ModelType]:
-        """Django's `bulk_create()`, on one of djox's threads."""
-        return await self._run_django_method(
-            lambda: self.bulk_create(
-                objs,
-                batch_size=batch_size,
-                ignore_conflicts=ignore_conflicts,
-                update_conflicts=update_conflicts,
-                update_fields=update_fields,
-                unique_fields=unique_fields,
-            ),
-            writes=True,
-        )
-
-    async def abulk_update(
-        self, objs: Iterable[ModelType], fields: Iterable[str], batch_size: int | None = None
-    ) -> int:
-        """Django's `bulk_update()`, on one of djox's threads."""
-        return await self._run_django_method(lambda: self.bulk_update(objs, fields, batch_size), writes=True)
-
-    async def ain_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, ModelType]:
-        """Django's `in_bulk()`, on one of djox's threads."""
-        return await self._run_django_method(lambda: self.in_bulk(id_list, field_name=field_name), writes=False)
 
     async def aexplain(self, *, format: str | None = None, **options: Any) -> str:  # noqa: A002  (Django's name)
         """Django's `explain()`, on one of djox's threads."""
@@ -954,3 +1048,34 @@ def is_slice_bound(bound: object) -> bool:
 def runs_on_djox(alias: str) -> bool:
     """Whether the Django database `alias` uses one of djox's `ENGINE`s."""
     return engine.alias_runs_on_djox(alias)
+
+
+def is_unique_field(model: type[models.Model], field_name: str) -> bool:
+    """Whether `in_bulk()` may look objects up by `field_name`: the primary
+    key, or a unique field that isn't a relation (reading a relation would
+    fetch the related object)."""
+    meta = model._meta
+    if field_name == "pk":
+        return len(meta.pk_fields) == 1  # not a composite primary key
+    try:
+        field = meta.get_field(field_name)
+    except FieldDoesNotExist:
+        return False  # Django raises
+    if not isinstance(field, models.Field) or field.is_relation:
+        return False  # a relation, or a reverse one
+    alone_in_a_unique_constraint = [
+        constraint.fields[0] for constraint in meta.total_unique_constraints if len(constraint.fields) == 1
+    ]
+    return bool(field.unique) or field_name in alone_in_a_unique_constraint
+
+
+def in_one_query(alias: str, model: type[models.Model], ids: tuple[Any, ...]) -> bool:
+    """Whether Django's `in_bulk()` looks `ids` up in one query. It splits a
+    longer list into several queries, by a rule that changed in Django 6.0:
+    both rules are checked."""
+    connection = connections[alias]
+    largest = connection.features.max_query_params  # Django 5.2's rule
+    if largest and len(ids) > largest:
+        return False
+    batch_size = connection.ops.bulk_batch_size([model._meta.pk], ids)  # Django 6.0's rule
+    return not batch_size or len(ids) <= batch_size

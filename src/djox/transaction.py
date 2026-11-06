@@ -101,6 +101,8 @@ class Atomic:
         self.outermost_block = AsyncExitStack()
         # The outermost block's transaction on djox's writer connection, if it runs there.
         self.writer_transaction: _writer_transactions.WriterTransaction | None = None
+        # For a nested block that simply shares that transaction (see `shared_writer_transaction()`).
+        self.shared_transaction: _writer_transactions.WriterTransaction | None = None
 
     async def __aenter__(self) -> None:
         """Start the transaction (or, in a nested block, a savepoint)."""
@@ -110,6 +112,10 @@ class Atomic:
         sync_transaction = _running.open_sync_transaction(alias)
         self.django_atomic = transaction.atomic(using=self.using, savepoint=self.savepoint, durable=self.durable)
         is_outermost = transaction_thread.get() is None and sync_transaction is None
+        if not is_outermost:
+            self.shared_transaction = self.shared_writer_transaction(alias)
+            if self.shared_transaction is not None:
+                return
 
         def enter() -> None:
             # This runs on the transaction's thread: Django's `atomic()` uses that thread's connection.
@@ -155,6 +161,12 @@ class Atomic:
         self.django_atomic = None
         writer_transaction = self.writer_transaction
         self.writer_transaction = None
+        shared_transaction = self.shared_transaction
+        self.shared_transaction = None
+        if shared_transaction is not None:
+            if exception is not None:
+                shared_transaction.mark_for_rollback(exception)
+            return
         try:
             if writer_transaction is not None:
                 await writer_transaction.end(exception_type, exception, traceback)
@@ -162,6 +174,24 @@ class Atomic:
                 await sync_to_async(django_atomic.__exit__, thread_sensitive=True)(exception_type, exception, traceback)
         finally:
             await self.end_outermost_block()
+
+    def shared_writer_transaction(self, alias: str) -> "_writer_transactions.WriterTransaction | None":
+        """For a nested block with `savepoint=False`, the transaction on djox's
+        writer connection it shares, or `None`.
+
+        Django's `atomic(savepoint=False)` inside another block starts
+        nothing: if the nested block raises, it only marks the transaction
+        for rollback. While Django hasn't joined the transaction (see
+        `djox._writer_transactions`), djox does that itself, on the event
+        loop, with no trip to the block's thread. `bulk_create()` and
+        `bulk_update()` use such blocks.
+        """
+        if self.savepoint or self.durable:
+            return None  # a savepoint, or Django's error for a durable block inside another
+        writer_transaction = _running.writer_transaction(alias)
+        if writer_transaction is None or writer_transaction.django_atomic is not None:
+            return None
+        return writer_transaction
 
     async def start_on_the_writer(self, alias: str) -> None:
         """Start the outermost block on djox's writer connection (see
