@@ -321,6 +321,14 @@ pub fn row_to_python<'py>(py: Python<'py>, row: Vec<Value>) -> PyResult<Bound<'p
     PyTuple::new(py, items)
 }
 
+/// `(columns, rows)`: the column names as a list of strings, then all rows (see `rows_to_python()`).
+pub fn columns_and_rows_to_python(py: Python<'_>, rows: Rows) -> PyResult<Bound<'_, PyTuple>> {
+    // The names are copied first, because `rows_to_python()` takes `rows` whole.
+    let columns = PyList::new(py, &rows.columns)?;
+    let rows = rows_to_python(py, rows)?;
+    PyTuple::new(py, [columns.into_any(), rows.into_any()])
+}
+
 /// All rows as a Python list of tuples, like `cursor.fetchall()`.
 pub fn rows_to_python(py: Python<'_>, rows: Rows) -> PyResult<Bound<'_, PyList>> {
     let list = PyList::empty(py);

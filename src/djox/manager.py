@@ -20,18 +20,20 @@ from typing import TypeVar
 from django.db import models
 
 from djox.query import QuerySet
+from djox.raw import AsyncRawQueries
 from djox.related import RunRelatedManagersOnDjox
 
 ModelType = TypeVar("ModelType", bound=models.Model)
 
 
-class Manager(RunRelatedManagersOnDjox, models.Manager[ModelType]):
+class Manager(AsyncRawQueries, RunRelatedManagersOnDjox, models.Manager[ModelType]):
     """Django's `Manager`, handing out `djox.QuerySet`s.
 
     A manager's methods (`Book.objects.filter()`, `Book.objects.aget()`...)
     all start from `get_queryset()`, so that is the main change. The mixin
     sends related managers' async methods (`author.books.aadd()`...) to
-    djox's threads (see `djox.related`).
+    djox's threads (see `djox.related`), and `araw()` runs raw SQL on djox
+    (see `djox.raw`).
     """
 
     def get_queryset(self) -> QuerySet[ModelType]:

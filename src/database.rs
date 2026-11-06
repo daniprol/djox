@@ -29,7 +29,7 @@ use pyo3::types::PyTuple;
 use crate::answers::{finished_future, future_for_answer, future_for_stream_answer};
 use crate::connection::PythonConnection;
 use crate::errors::{NotSupportedError, to_python_error};
-use crate::values::{parameters_from_python, row_to_python, rows_to_python};
+use crate::values::{columns_and_rows_to_python, parameters_from_python, row_to_python, rows_to_python};
 
 /// A database used from async code. Make one with a backend's constructor,
 /// like `Database.sqlite("app.sqlite3")` or `Database.postgres("postgresql://localhost/app")`.
@@ -185,6 +185,28 @@ impl PythonDatabase {
         }
         // `|py, rows: Rows| ...` is a closure, Rust's `lambda`.
         let (future, reply) = future_for_answer(py, |py, rows: Rows| Ok(rows_to_python(py, rows)?.into_any()))?;
+        self.backend.fetch_all(sql, parameters, reply);
+        Ok(future)
+    }
+
+    /// Runs a query and returns `(columns, rows)`: the column names, then
+    /// all the rows. Raw queries need the names, to know which column is which field.
+    #[pyo3(signature = (sql, parameters = None))]
+    fn fetch_all_with_columns<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parameters = parameters_from_python(parameters)?;
+        if let Some(rows) = self.fetch_all_quickly(py, &sql, &parameters) {
+            return finished_future(py, columns_and_rows_to_python(py, rows)?.into_any());
+        }
+        let (future, reply) =
+            future_for_answer(
+                py,
+                |py, rows: Rows| Ok(columns_and_rows_to_python(py, rows)?.into_any()),
+            )?;
         self.backend.fetch_all(sql, parameters, reply);
         Ok(future)
     }

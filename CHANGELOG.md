@@ -8,6 +8,10 @@ break comes with a migration note.
 
 ### Added
 
+- **`Manager.araw()`**: Django's `raw()` for async code. `await Book.objects.araw(sql, params)` gives the
+  instances, and `async for` works too. djox runs the SQL and Django builds the instances (columns matched to
+  fields, `translations`, extra columns as attributes). `djox.Database.fetch_all_with_columns()` gives the
+  column names it needs.
 - **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
   when that can't block it, instead of hopping to a thread twice per request (an empty async view: 1.3 ms to
   0.16 ms). A request's sync code (a sync view, sync middleware) runs on one of djox's pooled threads instead
