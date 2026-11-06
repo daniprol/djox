@@ -65,10 +65,14 @@ from djox._fast_lane import running as fast_lane
 from djox._fast_lane.recipe import QueryRecipe, Step
 from djox._fast_lane.running import PreparedQuery
 from djox._fast_lane.statements import Kind
+from djox._prefetch_filter import use_fast_lane_for_prefetching
 from djox._results import results_from_rows
 from djox.backends import engine
 from djox.backends.sqlite3 import compiler
 from djox.prefetch import aprefetch_related_objects
+
+# Prefetching queries take the fast lane too (see `djox._prefetch_filter` for why this changes a Django function).
+use_fast_lane_for_prefetching()
 
 # The model class of a `QuerySet`, like `Book` in `QuerySet[Book]`.
 ModelType = TypeVar("ModelType", bound=models.Model, covariant=True)
@@ -199,6 +203,18 @@ class QuerySet(models.QuerySet[ModelType]):
         if step.needs_check:
             return checks.recipe_with(self.model, recipe, step)
         return recipe.with_step(step)
+
+    def _filter_for_prefetch(self, field_name: str, instances: Iterable[models.Model]) -> "QuerySet[ModelType] | None":
+        """The rows related to `instances` through the foreign key `field_name`,
+        noted in the recipe like `filter(field_name__in=instances)`, or `None`
+        if the recipe can't take it (see `djox._prefetch_filter`)."""
+        recipe = self._recordable_recipe()
+        if recipe is None:
+            return None
+        noted = self._with_filter_noted(recipe, "filter", (), {f"{field_name}__in": list(instances)})
+        if noted is None:
+            return None
+        return self._with_recipe(noted)
 
     def annotate(self, *args: Any, **kwargs: Any) -> "QuerySet[ModelType]":
         """Django's `annotate()`, noted in the recipe when the fast lane understands it."""

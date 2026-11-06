@@ -231,14 +231,70 @@ async def test_prefetch_related_gives_djangos_objects() -> None:
         assert titles_by_author(authors) == expected
         assert len(queries) == 2, "using the books runs no more queries"
     assert queryset._recipe is not None, "the authors' query ran on the fast lane"
-    assert len(fast_statements()) == 1
+    assert len(fast_statements()) == 2, "and so did the books' query"
 
 
 @pytest.mark.usefixtures("library")
 def test_prefetch_related_takes_the_fast_lane_in_sync_code_too() -> None:
     authors = list(Author.objects.prefetch_related("books").order_by("pk"))
     assert titles_by_author(authors) == [("Frank Herbert", ["Dune", "Dune Messiah"]), ("Jane Austen", ["Emma"])]
-    assert len(fast_statements()) == 1
+    assert len(fast_statements()) == 2, "the authors' query, and the books' query"
+
+
+@pytest.mark.usefixtures("library")
+def test_the_prefetching_query_is_a_filter_on_the_foreign_key_and_reuses_its_sql() -> None:
+    list(Author.objects.prefetch_related("books").order_by("pk"))
+    books_sql = [found.sql for found in fast_statements() if "library_book" in found.sql]
+    assert len(books_sql) == 1
+    assert 'WHERE "library_book"."author_id" IN (%s, %s)' in books_sql[0]
+    list(Author.objects.prefetch_related("books").order_by("pk"))
+    assert len(fast_statements()) == 2, "the second time, both shapes were known already"
+
+
+@pytest.mark.usefixtures("library")
+def test_prefetching_for_one_author_and_for_two_gives_each_their_books() -> None:
+    one = list(Author.objects.filter(name="Jane Austen").prefetch_related("books"))
+    two = list(Author.objects.order_by("pk").prefetch_related("books"))
+    assert titles_by_author(one) == [("Jane Austen", ["Emma"])]
+    assert titles_by_author(two) == [("Frank Herbert", ["Dune", "Dune Messiah"]), ("Jane Austen", ["Emma"])]
+
+
+@pytest.mark.usefixtures("library")
+def test_a_prefetch_object_with_its_own_filter_and_order_is_djangos_answer() -> None:
+    def make_queryset() -> Any:
+        long_books = Book.objects.filter(pages__gt=300).order_by("-title")
+        return Author.objects.order_by("pk").prefetch_related(Prefetch("books", queryset=long_books))
+
+    def describe(authors: list[Author]) -> list[Any]:
+        return [[book.title for book in author.books.all()] for author in authors]
+
+    expected = djangos(lambda: describe(list(make_queryset())))
+    statements.statements.clear()
+    assert describe(list(make_queryset())) == expected == [["Dune"], ["Emma"]]
+    assert len(fast_statements()) == 2
+
+
+@pytest.mark.usefixtures("library")
+def test_a_sliced_prefetch_queryset_is_left_to_django() -> None:
+    # Django filters a slice with a window function, per author.
+    def make_queryset() -> Any:
+        return Author.objects.order_by("pk").prefetch_related(
+            Prefetch("books", queryset=Book.objects.order_by("title")[:1], to_attr="first_book")
+        )
+
+    def describe(authors: list[Author]) -> list[Any]:
+        return [[book.title for book in author.first_book] for author in authors]  # type: ignore[attr-defined]
+
+    expected = djangos(lambda: describe(list(make_queryset())))
+    assert describe(list(make_queryset())) == expected == [["Dune"], ["Emma"]]
+
+
+@pytest.mark.usefixtures("library")
+def test_a_prefetch_queryset_that_is_not_djoxs_is_left_to_django() -> None:
+    plain_books: models.QuerySet[Book] = models.QuerySet(Book).order_by("title")
+    authors = list(Author.objects.order_by("pk").prefetch_related(Prefetch("books", queryset=plain_books)))
+    assert titles_by_author(authors) == [("Frank Herbert", ["Dune", "Dune Messiah"]), ("Jane Austen", ["Emma"])]
+    assert len(fast_statements()) == 1, "only the authors' query"
 
 
 @pytest.mark.usefixtures("library")

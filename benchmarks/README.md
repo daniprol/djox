@@ -112,7 +112,7 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
 | one insert, or two in a transaction | n/a | n/a | n/a | n/a | 624 | 1,060 | 863 | n/a |
 | 20 chapters with their book | 744 | 744 | 219 | n/a | 1,245 | 924 | 206 | n/a |
 | 1,000 chapters with their book | 15,373 | 15,678 | 5,423 | n/a | 17,241 | 13,811 | 7,469 | n/a |
-| 20 books with their chapters | 2,004 | 1,883 | 1,546 | n/a | 2,414 | 2,390 | 1,872 | n/a |
+| 20 books with their chapters | 1,514 | 1,745 | 983 | n/a | 2,522 | 2,475 | 1,608 | n/a |
 | 100 gets at once | n/a | n/a | n/a | n/a | 445 | 254 | 60 | 6 |
 | 100 get or create at once | n/a | n/a | n/a | n/a | 503 | 232 | 63 | n/a |
 | 100 mixed writes at once | n/a | n/a | n/a | n/a | 595 | 898 | 916 | n/a |
@@ -131,6 +131,10 @@ The same queries through each contender, on a SQLite file with 10,000 books, eac
   hand-written SQL.
 - **`select_related()` takes the fast lane too**: 20 chapters with their book take 219 µs sync against 744, and
   206 µs async against 1,245. Django writes the join once; Rust builds both objects of each row.
+- **Prefetching takes the fast lane too**: the chapters' query (`WHERE book_id IN (...)`) reuses Django's SQL
+  and Rust builds the chapters. 20 books with their chapters: sync 1,260 µs to 840 µs (same run, with and
+  without it). The scenario uses `Prefetch("chapters", queryset=...)` so each contender's own manager builds the
+  chapters.
 - **Annotations, aggregates and `F()` take the fast lane too** (the general fast lane: any chain of calls reuses
   the SQL Django wrote once for its shape). Measured before and after it, in one run of the same VM:
 

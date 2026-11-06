@@ -21,6 +21,10 @@ await djox.aprefetch_related_objects(books, "editions")  # on a list you already
 
 - Runs the main query (on the fast lane when it is simple), then Django's own
   `prefetch_related_objects()`, unchanged, together on one of djox's threads.
+- **The prefetching query takes the fast lane** too, for the books of an author (a reverse
+  foreign key) when the books' queryset is a `djox.QuerySet`: its `WHERE author_id IN (...)` is
+  noted in the recipe, so Django's SQL for it is reused and Rust builds the books. Many-to-many,
+  sliced `Prefetch()` querysets and querysets that aren't djox's stay Django's.
 - One more query per relation, and one round trip from the event loop for all
   of them.
 - Every kind of relation, and `Prefetch()` objects, work as in Django.

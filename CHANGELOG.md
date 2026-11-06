@@ -20,6 +20,9 @@ break comes with a migration note.
   (`aggregate()` and `aaggregate()` too), `update()` with `F()`, `distinct()`, `values()` with expressions,
   and filters through reverse and many-to-many relations take the fast lane (a `Count()` annotation: 670 µs
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
+- **Prefetching on the fast lane**: the query `prefetch_related()` runs for a reverse foreign key (an
+  author's books) reuses Django's SQL for its shape and Rust builds the objects (20 books with their
+  chapters: 1,260 µs to 840 µs sync).
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
