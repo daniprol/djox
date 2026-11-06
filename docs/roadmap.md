@@ -19,7 +19,6 @@ djox grows in small steps, each useful on its own. Steps 0 to 8 are in
 
 ## Next
 
-- **Postgres**: reading arrays, ranges and `hstore` from async code.
 - **More of the fast lane**: subqueries (`Exists()`, `Subquery()`),
   `bulk_create()`, prefetching through a foreign key or many-to-many.
 

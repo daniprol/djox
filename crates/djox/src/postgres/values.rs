@@ -22,7 +22,7 @@ use std::error::Error as StdError;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use bytes::BytesMut;
-use djox_core::Value;
+use djox_core::{RangeValue, Value};
 use tokio_postgres::types::{Format, FromSql, IsNull, Kind, ToSql, Type, to_sql_checked};
 
 /// What `ToSql` and `FromSql` return when they fail: any error, boxed.
@@ -126,8 +126,44 @@ fn text_of(value: &Value) -> Option<String> {
         Value::Uuid(uuid) => uuid.hyphenated().to_string(),
         // Never reached: bytes always go in binary (`is_sent_in_binary`).
         Value::Blob(_) => return None,
+        // Never reached: these only come from Postgres. Python's lists, ranges
+        // and dicts arrive as text (see `src/values.rs`).
+        Value::List(_) | Value::Range(_) | Value::Hstore(_) => return None,
     };
     Some(text)
+}
+
+/// The parameter types that declare every integer a `bigint` and leave the
+/// others for Postgres to infer, or `None` when no parameter is an integer.
+///
+/// Normally Postgres infers each parameter's type from where it is used
+/// (`WHERE pages > $1` makes `$1` an integer). Where nothing says, as in
+/// `CASE WHEN ... THEN $1 ELSE $2 END`, it guesses `text`, and then
+/// `text + text` doesn't exist. Django writes its `XOR` filters that way.
+/// psycopg pastes `1` into the SQL, so Postgres sees a number; here the
+/// statement is prepared again with the integers declared.
+pub fn integer_types(parameters: &[Value]) -> Option<Vec<Type>> {
+    let mut types = Vec::with_capacity(parameters.len());
+    let mut has_integer = false;
+    for value in parameters {
+        if matches!(value, Value::Integer(_)) {
+            types.push(Type::INT8);
+            has_integer = true;
+        } else {
+            // `UNKNOWN`: let Postgres infer this one, as it does when no types are given.
+            types.push(Type::UNKNOWN);
+        }
+    }
+    if has_integer { Some(types) } else { None }
+}
+
+/// Whether Postgres refused a statement because no operator or function fits
+/// its parameters' types (SQLSTATE `42883`): the case `integer_types` fixes.
+pub fn is_missing_operator(error: &tokio_postgres::Error) -> bool {
+    match error.code() {
+        Some(code) => code.code() == "42883",
+        None => false,
+    }
 }
 
 /// One column of a result row, read as a djox value.
@@ -182,18 +218,162 @@ impl<'a> FromSql<'a> for Column {
     }
 }
 
-/// Types without a fixed number in Postgres: an extension's `citext` and the
-/// program's own `enum`s are text. Anything else isn't supported yet.
+/// Types without a fixed number in Postgres: arrays, ranges, an extension's
+/// `citext` and `hstore`, and the program's own `enum`s. Anything else isn't
+/// supported yet.
 fn read_other_type(column_type: &Type, raw: &[u8]) -> Result<Value, ConversionError> {
-    let is_text = column_type.name() == "citext" || matches!(column_type.kind(), Kind::Enum(_));
-    if is_text {
-        return Ok(Value::Text(text_from_bytes(raw)?));
+    // `Kind` says what sort of type this is. `Kind::Array(item_type)` carries
+    // the type of the array's items, so one branch reads every array type.
+    match column_type.kind() {
+        Kind::Array(item_type) => return array_value(item_type, raw),
+        Kind::Range(bound_type) => return range_value(bound_type, raw),
+        Kind::Enum(_) => return Ok(Value::Text(text_from_bytes(raw)?)),
+        _ => {}
     }
-    Err(format!("djox can't read the Postgres type {} yet", column_type.name()).into())
+    match column_type.name() {
+        "citext" => Ok(Value::Text(text_from_bytes(raw)?)),
+        "hstore" => hstore_value(raw),
+        name => Err(format!("djox can't read the Postgres type {name} yet").into()),
+    }
 }
 
 fn text_from_bytes(raw: &[u8]) -> Result<String, ConversionError> {
     Ok(std::str::from_utf8(raw)?.to_string())
+}
+
+/// Reads a big-endian `i32` at `position`, like `struct.unpack_from(">i", ...)`.
+fn read_i32(raw: &[u8], position: usize) -> Result<i32, ConversionError> {
+    match raw.get(position..position + 4) {
+        Some(four) => Ok(i32::from_be_bytes([four[0], four[1], four[2], four[3]])),
+        None => Err("a Postgres value ended too early".into()),
+    }
+}
+
+/// Reads one length-prefixed piece at `position`: a big-endian `i32` length,
+/// then that many bytes. A length of -1 is `NULL` (`None`). Returns the piece
+/// and the position after it.
+fn read_piece(raw: &[u8], position: usize) -> Result<(Option<&[u8]>, usize), ConversionError> {
+    let length = read_i32(raw, position)?;
+    let start = position + 4;
+    if length < 0 {
+        return Ok((None, start));
+    }
+    let end = start + length as usize;
+    match raw.get(start..end) {
+        Some(piece) => Ok((Some(piece), end)),
+        None => Err("a Postgres value ended too early".into()),
+    }
+}
+
+/// One item of an array or bound of a range, read as the type it has. A
+/// `NULL` item has no bytes, so it never reaches `from_sql`.
+fn item_value(item_type: &Type, piece: Option<&[u8]>) -> Result<Value, ConversionError> {
+    match piece {
+        Some(bytes) => Ok(Column::from_sql(item_type, bytes)?.0),
+        None => Ok(Value::Null),
+    }
+}
+
+/// An array in binary, as a list (a list of lists for more dimensions).
+///
+/// The header is the number of dimensions, a flag for "has NULLs", the
+/// items' type, and for each dimension its length and its first index
+/// (Postgres arrays can start at any number; Python lists start at 0, so
+/// we ignore it, like psycopg). Then come all the items, row by row, each
+/// with its length.
+fn array_value(item_type: &Type, raw: &[u8]) -> Result<Value, ConversionError> {
+    let dimension_count = read_i32(raw, 0)?;
+    // An empty array has no dimensions at all.
+    if dimension_count <= 0 {
+        return Ok(Value::List(Vec::new()));
+    }
+    let mut dimensions = Vec::new();
+    let mut position = 12;
+    for _ in 0..dimension_count {
+        dimensions.push(read_i32(raw, position)? as usize);
+        position += 8;
+    }
+    let mut item_count = 1;
+    for length in &dimensions {
+        item_count *= length;
+    }
+    let mut items = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        let (piece, after) = read_piece(raw, position)?;
+        items.push(item_value(item_type, piece)?);
+        position = after;
+    }
+    Ok(nest_items(&mut items.into_iter(), &dimensions))
+}
+
+/// Cuts the flat list of items into lists of lists, one level per dimension.
+/// `[2, 3]` takes 2 lists of 3 items. (The iterator hands out the items one
+/// by one, like Python's `iter()` and `next()`.)
+fn nest_items(items: &mut std::vec::IntoIter<Value>, dimensions: &[usize]) -> Value {
+    let mut list = Vec::with_capacity(dimensions[0]);
+    for _ in 0..dimensions[0] {
+        if dimensions.len() == 1 {
+            // `next()` is `None` when the iterator is empty; the lengths were checked, so it isn't.
+            list.push(items.next().unwrap_or(Value::Null));
+        } else {
+            list.push(nest_items(items, &dimensions[1..]));
+        }
+    }
+    Value::List(list)
+}
+
+/// A range in binary: a flags byte, then the lower and upper bounds when
+/// they exist, each with its length.
+///
+/// Flags: 1 empty, 2 lower end included, 4 upper end included, 8 no lower
+/// end, 16 no upper end.
+fn range_value(bound_type: &Type, raw: &[u8]) -> Result<Value, ConversionError> {
+    let Some(&flags) = raw.first() else {
+        return Err("a Postgres range ended too early".into());
+    };
+    let mut range = RangeValue {
+        lower: None,
+        upper: None,
+        lower_is_included: flags & 2 != 0,
+        upper_is_included: flags & 4 != 0,
+        is_empty: flags & 1 != 0,
+    };
+    if range.is_empty {
+        return Ok(Value::Range(Box::new(range)));
+    }
+    let mut position = 1;
+    if flags & 8 == 0 {
+        let (piece, after) = read_piece(raw, position)?;
+        range.lower = Some(item_value(bound_type, piece)?);
+        position = after;
+    }
+    if flags & 16 == 0 {
+        let (piece, _) = read_piece(raw, position)?;
+        range.upper = Some(item_value(bound_type, piece)?);
+    }
+    Ok(Value::Range(Box::new(range)))
+}
+
+/// An `hstore` in binary: the number of pairs, then each key and each value
+/// (a `NULL` value has length -1), all as text.
+fn hstore_value(raw: &[u8]) -> Result<Value, ConversionError> {
+    let pair_count = read_i32(raw, 0)?;
+    let mut pairs = Vec::new();
+    let mut position = 4;
+    for _ in 0..pair_count {
+        let (key, after_key) = read_piece(raw, position)?;
+        let (value, after_value) = read_piece(raw, after_key)?;
+        let Some(key) = key else {
+            return Err("a Postgres hstore has a key that is NULL".into());
+        };
+        let value = match value {
+            Some(bytes) => Some(text_from_bytes(bytes)?),
+            None => None,
+        };
+        pairs.push((text_from_bytes(key)?, value));
+        position = after_value;
+    }
+    Ok(Value::Hstore(pairs))
 }
 
 /// Reads a big-endian `u16` at `position`, like `struct.unpack_from(">H", ...)`.
@@ -385,5 +565,116 @@ mod tests {
         assert!(!is_sent_in_binary(&Value::Integer(1 << 40), &Type::INT4));
         assert!(!is_sent_in_binary(&Value::Integer(5), &Type::NUMERIC));
         assert!(!is_sent_in_binary(&Value::Text("5".into()), &Type::INT4));
+    }
+
+    /// An `integer[]` in binary: dimensions, "has NULLs", item type (23), then each
+    /// dimension's length and first index, then the items with their lengths.
+    fn integer_array(dimensions: &[i32], items: &[Option<i32>]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(dimensions.len() as i32).to_be_bytes());
+        raw.extend_from_slice(&i32::from(items.contains(&None)).to_be_bytes());
+        raw.extend_from_slice(&23_i32.to_be_bytes());
+        for length in dimensions {
+            raw.extend_from_slice(&length.to_be_bytes());
+            raw.extend_from_slice(&1_i32.to_be_bytes());
+        }
+        for item in items {
+            match item {
+                Some(number) => {
+                    raw.extend_from_slice(&4_i32.to_be_bytes());
+                    raw.extend_from_slice(&number.to_be_bytes());
+                }
+                None => raw.extend_from_slice(&(-1_i32).to_be_bytes()),
+            }
+        }
+        raw
+    }
+
+    fn numbers(values: &[i64]) -> Value {
+        Value::List(values.iter().map(|number| Value::Integer(*number)).collect())
+    }
+
+    #[test]
+    fn arrays_read_as_lists_with_nulls_and_more_dimensions() {
+        let flat = integer_array(&[3], &[Some(1), None, Some(3)]);
+        assert_eq!(
+            array_value(&Type::INT4, &flat).unwrap(),
+            Value::List(vec![Value::Integer(1), Value::Null, Value::Integer(3)])
+        );
+        let grid = integer_array(&[2, 2], &[Some(1), Some(2), Some(3), Some(4)]);
+        assert_eq!(
+            array_value(&Type::INT4, &grid).unwrap(),
+            Value::List(vec![numbers(&[1, 2]), numbers(&[3, 4])])
+        );
+        // An empty array has no dimensions.
+        assert_eq!(
+            array_value(&Type::INT4, &integer_array(&[], &[])).unwrap(),
+            Value::List(vec![])
+        );
+        assert!(array_value(&Type::INT4, &flat[..flat.len() - 2]).is_err(), "cut short");
+    }
+
+    #[test]
+    fn ranges_read_their_ends_and_brackets() {
+        // flags 2 (lower included), then the lower and upper ends, 4 bytes each.
+        let mut raw = vec![2];
+        for end in [1_i32, 5] {
+            raw.extend_from_slice(&4_i32.to_be_bytes());
+            raw.extend_from_slice(&end.to_be_bytes());
+        }
+        let Value::Range(range) = range_value(&Type::INT4, &raw).unwrap() else {
+            panic!("not a range");
+        };
+        assert_eq!(
+            (range.lower, range.upper),
+            (Some(Value::Integer(1)), Some(Value::Integer(5)))
+        );
+        assert_eq!(
+            (range.lower_is_included, range.upper_is_included, range.is_empty),
+            (true, false, false)
+        );
+
+        // flags 1 is the empty range; flags 8 + 4 has no lower end and includes the upper.
+        let Value::Range(empty) = range_value(&Type::INT4, &[1]).unwrap() else {
+            panic!("not a range");
+        };
+        assert!(empty.is_empty);
+        let mut open = vec![8 | 4];
+        open.extend_from_slice(&4_i32.to_be_bytes());
+        open.extend_from_slice(&9_i32.to_be_bytes());
+        let Value::Range(open) = range_value(&Type::INT4, &open).unwrap() else {
+            panic!("not a range");
+        };
+        assert_eq!(
+            (open.lower, open.upper, open.upper_is_included),
+            (None, Some(Value::Integer(9)), true)
+        );
+    }
+
+    #[test]
+    fn hstore_reads_keys_and_null_values() {
+        let mut raw = 2_i32.to_be_bytes().to_vec();
+        for (key, value) in [("a", Some("1")), ("b", None)] {
+            raw.extend_from_slice(&(key.len() as i32).to_be_bytes());
+            raw.extend_from_slice(key.as_bytes());
+            match value {
+                Some(text) => {
+                    raw.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                    raw.extend_from_slice(text.as_bytes());
+                }
+                None => raw.extend_from_slice(&(-1_i32).to_be_bytes()),
+            }
+        }
+        assert_eq!(
+            hstore_value(&raw).unwrap(),
+            Value::Hstore(vec![("a".into(), Some("1".into())), ("b".into(), None)])
+        );
+    }
+
+    #[test]
+    fn integers_are_declared_only_when_there_are_some() {
+        assert!(integer_types(&[Value::Text("a".into())]).is_none());
+        let types = integer_types(&[Value::Integer(1), Value::Null]).unwrap();
+        assert_eq!(types, [Type::INT8, Type::UNKNOWN]);
     }
 }

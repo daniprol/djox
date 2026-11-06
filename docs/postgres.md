@@ -94,5 +94,14 @@ djox reads `DATABASES`, not libpq's environment variables (`PGSSLMODE`,
 
 And from async code:
 
-- **Array, range and `hstore` columns** raise `ProgrammingError` ("djox can't
-  read the Postgres type ... yet"). Sync queries are unaffected.
+- **Arrays, ranges and `hstore`** come back as Django's sync side gets them
+  from psycopg: a `list` (a list of lists for more dimensions, `None` for a
+  `NULL` item), psycopg's `Range` (`Range(1, 5, "[)")`, `Range(empty=True)`),
+  and a `dict`. They also work as parameters, so `tags__contains=[...]`,
+  `pages__overlap=Range(...)` and `notes__owner=...` filter in async code.
+- **Multiranges** (`int4multirange`...) and arrays of types djox can't read
+  raise `ProgrammingError` ("djox can't read the Postgres type ... yet").
+  Sync queries are unaffected.
+- **`XOR` filters** (`Q(a) ^ Q(b)`) work. Postgres can't tell the type of the
+  `1`s and `0`s Django sums, so djox prepares the statement again with
+  integers declared as `bigint`. (`aiterator()` doesn't do this yet.)

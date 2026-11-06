@@ -9,7 +9,20 @@ from os import PathLike
 from types import TracebackType
 from typing import Any, Protocol, Self, TypeAlias
 
-# What a query parameter can be (see `src/values.rs`).
+class RangeLike(Protocol):
+    """psycopg's `Range` (what Django's range fields hold), seen by its parts. psycopg is optional."""
+
+    @property
+    def lower(self) -> Any: ...
+    @property
+    def upper(self) -> Any: ...
+    @property
+    def bounds(self) -> str: ...
+    @property
+    def isempty(self) -> bool: ...
+
+# What a query parameter can be (see `src/values.rs`). A list or tuple is a
+# Postgres array, a dict an `hstore`, a psycopg `Range` a range.
 Parameter: TypeAlias = (
     bool
     | int
@@ -24,6 +37,10 @@ Parameter: TypeAlias = (
     | decimal.Decimal
     | uuid.UUID
     | datetime.timedelta
+    | list[Any]
+    | tuple[Any, ...]
+    | dict[Any, Any]
+    | RangeLike
     | None
 )
 # What a row value can be: SQLite's storage classes, and the typed values Postgres returns.
@@ -39,6 +56,9 @@ RowValue: TypeAlias = (
     | datetime.time
     | datetime.timedelta
     | uuid.UUID
+    | list[Any]
+    | dict[str, str | None]
+    | RangeLike
     | None
 )
 # A row, as `fetch_all()` and the cursors return it.
