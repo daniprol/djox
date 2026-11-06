@@ -27,7 +27,9 @@ break comes with a migration note.
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
 - **Prefetching on the fast lane**: the query `prefetch_related()` runs for a reverse foreign key (an
   author's books) reuses Django's SQL for its shape and Rust builds the objects (20 books with their
-  chapters: 1,260 µs to 840 µs sync).
+  chapters: 1,260 µs to 840 µs sync). It does the same for a foreign key forwards (the author of each book:
+  874 µs to 325 µs sync) and a many-to-many field (the tags of each book: 1,112 µs to 742 µs sync). A
+  many-to-many field needs a djox default manager on the related model and a queryset with no calls.
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
 - **Quick SQLite writes**: a small async write (`aupdate()` of one row, `acreate()`, a fast `adelete()`) runs
