@@ -34,6 +34,12 @@ ENDPOINTS = [
     ("get one book", "GET", rf"{BASE}/books/[1-9][0-9]{{0,3}}", None),
     ("list a page, with authors", "GET", rf"{BASE}/books[?]page=[1-9][0-9]?", None),
     (
+        "read a book, in a transaction",
+        "POST",
+        rf"{BASE}/books/[1-9][0-9]{{0,3}}/read",
+        None,
+    ),
+    (
         "create a book",
         "POST",
         f"{BASE}/books",

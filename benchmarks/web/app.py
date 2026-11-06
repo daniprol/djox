@@ -99,7 +99,7 @@ from django.db.models import Avg, Count, F, Max, Sum  # noqa: E402
 from django.http import HttpRequest, JsonResponse  # noqa: E402
 from django.urls import include, path  # noqa: E402
 from rest_framework import decorators, response, routers, serializers, viewsets  # noqa: E402
-from shop.models import Author, Book  # noqa: E402
+from shop.models import Author, Book, Read  # noqa: E402
 
 
 def book_as_dict(book: Book) -> dict[str, object]:
@@ -308,10 +308,11 @@ def setup() -> None:
             cursor.execute("PRAGMA journal_mode = WAL")  # stored in the file
     else:
         with connection.cursor() as cursor:
-            cursor.execute("DROP TABLE IF EXISTS shop_book, shop_author")
+            cursor.execute("DROP TABLE IF EXISTS shop_read, shop_book, shop_author")
     with connection.schema_editor() as editor:
         editor.create_model(Author)
         editor.create_model(Book)
+        editor.create_model(Read)
     authors = Author.objects.bulk_create(Author(name=f"Author {number}") for number in range(AUTHOR_COUNT))
     published = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
     Book.objects.bulk_create(

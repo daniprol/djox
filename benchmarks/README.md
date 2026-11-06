@@ -100,8 +100,14 @@ Annotations, aggregates and `F()` on SQLite, measured after the tables above, wi
 
 The same shop models, served by [django-bolt](https://bolt.farhana.li/) (`web/bolt_app/`): a Rust HTTP server
 with `async` handlers ([`bolt_app/api.py`](https://github.com/daniprol/djox/blob/main/benchmarks/web/bolt_app/api.py)).
-Three endpoints, each awaiting its queries: get one book (`aget()`), a page of 20 books with their authors (`async for`
-over a `select_related()` join), and create a book (`acreate()`, status 201).
+Four endpoints, each awaiting its queries:
+
+- get one book (`aget()`),
+- a page of 20 books with their authors (`async for` over a `select_related()` join),
+- read a book, in one transaction: a `get`, an `UPDATE` with `F()`, and an `INSERT` into a read log. Stock Django's
+  transaction runs in a thread (`sync_to_async`), since Django has no async `atomic()`. djox uses its own async
+  `djox.atomic()`.
+- create a book (`acreate()`, status 201).
 
 - **Stacks**: the same handlers. djox only changes settings: its `ENGINE`, and `"djox"` in `INSTALLED_APPS`.
   No middleware. `CONN_MAX_AGE = 0`.
@@ -113,14 +119,18 @@ Requests per second, higher is better. In brackets: djox against Django.
 
 | | Django | djox |
 |---|---:|---:|
-| get one book | 1,448 | 2,698 (1.9x) |
-| list a page, with authors | 688 | 1,537 (2.2x) |
-| create a book | 1,722 | 2,860 (1.7x) |
+| get one book | 1,552 | 3,581 (2.3x) |
+| list a page, with authors | 714 | 1,525 (2.1x) |
+| read a book, in a transaction | 692 | 485 (0.7x) |
+| create a book | 1,866 | 2,746 (1.5x) |
 
-- **django-bolt's HTTP layer is faster than granian and Django's ASGI handler**: Django's `aget` in a bolt handler
-  serves 7 times the requests of the async views in the table above. The gap between the two stacks is smaller than
-  there, because most of each request's time is now bolt's own work (its handler call, its thread hop to the
-  database, and the response), which djox doesn't change.
+- **The transaction endpoint is slower on djox.** Each statement inside `djox.atomic()` pays a round trip to djox's
+  threads, and this endpoint has three statements in one transaction. The ORM benchmark shows the same: a short
+  `djox.atomic()` block is slower than one `sync_to_async()` around a sync `atomic()`. This is the open cost to fix
+  next, not a reason to skip the transaction case.
+- **django-bolt's HTTP layer is faster than granian and Django's ASGI handler**: stock Django's `get()` inside a bolt
+  handler serves 7 times the requests of the async views in the web table above. The gap between the two stacks is
+  smaller than there, because most of each request's time is now bolt's own work, which djox doesn't change.
 
 ## ORM calls on SQLite
 
