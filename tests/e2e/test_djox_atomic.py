@@ -179,6 +179,72 @@ async def test_on_commit_runs_after_the_commit_only() -> None:
     assert committed == ["first", "no transaction: right away"]
 
 
+async def test_on_commit_awaits_an_async_function_after_the_commit() -> None:
+    committed: list[str] = []
+
+    async def write_after_commit() -> None:
+        # Like a real callback: it uses the database, and sees the committed row.
+        await Author.objects.acreate(name="Second")
+        committed.append(f"saw {await Author.objects.acount()} authors")
+
+    async def never_runs() -> None:
+        committed.append("rolled back")
+
+    @djox.atomic
+    async def plan_and_change_my_mind() -> None:
+        await djox.on_commit(never_runs)
+        raise ChangedMyMindError
+
+    async with djox.atomic():
+        await Author.objects.acreate(name="First")
+        await djox.on_commit(write_after_commit)
+        assert committed == [], "not before the commit"
+    assert committed == ["saw 2 authors"]
+
+    with pytest.raises(ChangedMyMindError):
+        await plan_and_change_my_mind()
+    assert committed == ["saw 2 authors"]
+
+
+async def test_robust_async_on_commit_logs_its_error_and_goes_on(caplog: pytest.LogCaptureFixture) -> None:
+    ran: list[str] = []
+
+    async def fails() -> None:
+        raise ChangedMyMindError
+
+    async def next_one() -> None:
+        ran.append("next")
+
+    async with djox.atomic():
+        await djox.on_commit(fails, robust=True)
+        await djox.on_commit(next_one)
+    assert ran == ["next"]
+    assert "robust call" in caplog.text
+
+
+async def test_on_commit_runs_an_async_function_right_away_outside_a_transaction() -> None:
+    ran: list[str] = []
+
+    async def note() -> None:
+        ran.append("ran")
+
+    await djox.on_commit(note)
+    assert ran == ["ran"]
+
+
+# ---------------------------------------------------------------- select_for_update
+
+
+async def test_select_for_update_works_inside_a_block() -> None:
+    author = await Author.objects.acreate(name="Frank Herbert")
+    async with djox.atomic():
+        locked = await Author.objects.select_for_update().aget(pk=author.pk)
+        locked.name = "Frank Patrick Herbert"
+        await locked.asave()
+        assert [row async for row in Author.objects.select_for_update().filter(pk=author.pk)] == [locked]
+    assert await names() == ["Frank Patrick Herbert"]
+
+
 # ---------------------------------------------------------------- many at once
 
 

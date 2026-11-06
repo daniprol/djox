@@ -8,6 +8,7 @@ break comes with a migration note.
 
 ### Added
 
+- **Async `on_commit()` callbacks**: `await djox.on_commit(send_email)` accepts an `async def`, awaited after the commit.
 - **`Manager.araw()`**: Django's `raw()` for async code. `await Book.objects.araw(sql, params)` gives the
   instances, and `async for` works too. djox runs the SQL and Django builds the instances (columns matched to
   fields, `translations`, extra columns as attributes). `djox.Database.fetch_all_with_columns()` gives the

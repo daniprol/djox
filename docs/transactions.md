@@ -23,8 +23,9 @@ async with djox.atomic():
 await djox.on_commit(send_welcome_email)
 ```
 
-- Runs a (sync) function once the transaction commits, like Django's
-  `transaction.on_commit()`.
+- Runs a function once the transaction commits, like Django's
+  `transaction.on_commit()`. An `async def` is awaited once the block has
+  ended, so it can use the database freely.
 - Never if it rolls back; right away outside a transaction.
 
 ## What joins the transaction
@@ -35,6 +36,10 @@ Everything inside the block:
 - **Django's own async methods** (`aget_or_create()`...) and your own
   `sync_to_async()` functions run on the transaction's thread, so sync code
   there (`transaction.set_rollback(True)`, `Model.save()`...) is in it too.
+- **Row locks**: `select_for_update()` works in the block, locking the rows
+  until it ends (`await Book.objects.select_for_update().aget(pk=1)`).
+  On SQLite it does nothing, as in Django: the block already has the
+  file's one write turn.
 - **Tasks started inside the block** (`asyncio.gather()`) share it. They must
   finish before the block ends.
 

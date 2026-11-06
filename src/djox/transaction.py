@@ -55,8 +55,11 @@ a nested block (a savepoint is a stack: two at once would mix).
 """
 
 import functools
+import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
+from contextvars import ContextVar
 from types import TracebackType
 from typing import Any, ParamSpec, TypeVar, overload
 
@@ -72,6 +75,16 @@ from djox._threads import (
     tidy_connections,
     transaction_thread,
 )
+
+logger = logging.getLogger("djox")
+
+# An `async def` passed to `on_commit()`, and whether to log its errors (`robust`).
+AsyncCallback = tuple[Callable[[], Awaitable[object]], bool]
+
+# The async callbacks of the open outermost block, run once it has ended.
+# The list is shared by the block's tasks, which is why a ContextVar holds it:
+# each task sees the same list object.
+async_callbacks: ContextVar[list[AsyncCallback] | None] = ContextVar("djox_async_callbacks", default=None)
 
 Parameters = ParamSpec("Parameters")
 Result = TypeVar("Result")
@@ -101,6 +114,8 @@ class Atomic:
         self.outermost_block = AsyncExitStack()
         # The outermost block's transaction on djox's writer connection, if it runs there.
         self.writer_transaction: _writer_transactions.WriterTransaction | None = None
+        # The async `on_commit()` callbacks of the outermost block (`None` in a nested one).
+        self.callbacks_after_commit: list[AsyncCallback] | None = None
 
     async def __aenter__(self) -> None:
         """Start the transaction (or, in a nested block, a savepoint)."""
@@ -162,6 +177,10 @@ class Atomic:
                 await sync_to_async(django_atomic.__exit__, thread_sensitive=True)(exception_type, exception, traceback)
         finally:
             await self.end_outermost_block()
+        # After the block's thread and write turn are given back: a callback
+        # that writes would otherwise wait for a turn this block still holds.
+        if self.callbacks_after_commit is not None:
+            await run_async_callbacks(self.callbacks_after_commit)
 
     async def start_on_the_writer(self, alias: str) -> None:
         """Start the outermost block on djox's writer connection (see
@@ -183,8 +202,15 @@ class Atomic:
         steps.callback(transaction_thread.reset, thread_token)
         block_token = _running.note_writer_transaction(alias, writer_transaction)
         steps.callback(_running.writer_transactions.reset, block_token)
+        self.collect_async_callbacks()
         await writer_transaction.begin()
         self.writer_transaction = writer_transaction
+
+    def collect_async_callbacks(self) -> None:
+        """Start the list of async `on_commit()` callbacks the block's tasks add to."""
+        self.callbacks_after_commit = []
+        token = async_callbacks.set(self.callbacks_after_commit)
+        self.outermost_block.callback(async_callbacks.reset, token)
 
     async def start_outermost_block(self, alias: str) -> None:
         """Wait for the write turn, then give the block a pooled thread of its
@@ -200,6 +226,7 @@ class Atomic:
         await steps.enter_async_context(ThreadSensitiveContext(executor=thread))
         token = transaction_thread.set(thread)
         steps.callback(transaction_thread.reset, token)
+        self.collect_async_callbacks()
 
     async def end_outermost_block(self) -> None:
         """Undo `start_outermost_block()` (nothing, for a nested block)."""
@@ -239,12 +266,43 @@ def atomic(
     return Atomic(using, savepoint, durable)
 
 
-async def on_commit(function: Callable[[], object], using: str | None = None, robust: bool = False) -> None:
+async def on_commit(
+    function: Callable[[], object] | Callable[[], Awaitable[object]], using: str | None = None, robust: bool = False
+) -> None:
     """Run `function` once the current transaction commits, like Django's `transaction.on_commit()`.
 
     Outside a transaction it runs right away. If the transaction rolls back,
-    it never runs. `function` is a plain (sync) function; it runs on the
-    transaction's thread, right after the commit. `robust=True` logs its
-    exceptions instead of raising them.
+    it never runs. `function` is a plain function or an `async def`. A plain
+    function runs on the transaction's thread, right after the commit. An
+    `async def` is awaited on the event loop once the block has ended, so it
+    can use the database freely. `robust=True` logs exceptions instead of
+    raising them.
     """
-    await sync_to_async(transaction.on_commit, thread_sensitive=True)(function, using, robust)
+    if not inspect.iscoroutinefunction(function):
+        await sync_to_async(transaction.on_commit, thread_sensitive=True)(function, using, robust)
+        return
+    # Django only calls plain functions. Ours just notes the async function in
+    # the list of the open block (or in a list of its own, outside a block,
+    # where Django calls it at once); the list is awaited after the commit.
+    callbacks = async_callbacks.get()
+    in_a_block = callbacks is not None
+    if callbacks is None:
+        callbacks = []
+
+    def note_it() -> None:
+        callbacks.append((function, robust))
+
+    await sync_to_async(transaction.on_commit, thread_sensitive=True)(note_it, using)
+    if not in_a_block:
+        await run_async_callbacks(callbacks)
+
+
+async def run_async_callbacks(callbacks: list[AsyncCallback]) -> None:
+    """Await the async `on_commit()` callbacks in order, like Django runs the sync ones."""
+    for function, robust in callbacks:
+        try:
+            await function()
+        except Exception:
+            if not robust:
+                raise
+            logger.exception("Error calling %r in on_commit() (robust call).", function)
