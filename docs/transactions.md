@@ -32,7 +32,7 @@ await djox.on_commit(send_welcome_email)
 Everything inside the block:
 
 - **djox's queries** run on the transaction's connection.
-- **Django's own async methods** (`aget_or_create()`...) and your own
+- **Django's own async methods** (`aupdate_or_create()`...) and your own
   `sync_to_async()` functions run on the transaction's thread, so sync code
   there (`transaction.set_rollback(True)`, `Model.save()`...) is in it too.
 - **Tasks started inside the block** (`asyncio.gather()`) share it. They must
@@ -48,7 +48,7 @@ Everything inside the block:
     Until the block ends, nothing else runs on the writer.
 
     Django joins only when the block needs it: the first time Django's sync
-    code runs in the block (`aget_or_create()`, a nested block,
+    code runs in the block (`aupdate_or_create()`, a nested block with a savepoint,
     `djox.on_commit()`, your `sync_to_async()` functions), the block's
     thread points its Django connection at the writer connection and starts
     Django's own `atomic()` there. Django then ends the block, as in sync code.
@@ -71,8 +71,8 @@ default) takes the write lock when a block starts. djox writes in two ways:
   on djox's writer connection: right away when they are quick, or on its
   writer thread, one after the other.
 - **Transactions**: `djox.atomic()` blocks run on the writer connection too;
-  methods on djox's threads like `aget_or_create()` outside a block each run
-  on a Django connection of their own.
+  methods on djox's threads like `aupdate_or_create()` outside a block each
+  run on a Django connection of their own.
 
 Left alone, SQLite would make one of them sleep and retry (up to 100 ms per
 sleep). Instead, djox has them take turns in asyncio:

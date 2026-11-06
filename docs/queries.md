@@ -27,24 +27,41 @@ count = await Book.objects.filter(author__name="Frank Herbert").acount()
 | `acreate()` | djox, on the [fast lane](fast-lane.md#new-objects) (signals are sent with `asend()`); a djox thread for models with their own `save()`, or sync `pre_save`/`post_save` receivers |
 | `aupdate()` | djox |
 | `adelete()` | djox when Django can delete with one statement (no `on_delete` work, no delete signal receivers); else a djox thread |
-| `aget_or_create()` | djox for the lookup, a djox thread to create |
-| `aupdate_or_create()`, `abulk_create()`, `abulk_update()`, `ain_bulk()`, `aexplain()` | a djox thread |
+| `aget_or_create()` | djox: the lookup, then the `INSERT` in a `djox.atomic()` block ([below](#several-statements)) |
+| `ain_bulk()`, `abulk_update()` | djox, on the [fast lane](fast-lane.md#many-objects-at-once) |
+| `abulk_create()` | djox, one `INSERT` per batch |
+| `aupdate_or_create()`, `aexplain()` | a djox thread |
 | `prefetch_related()` | a djox thread ([Related objects](related-objects.md)) |
 | `acreate()`, `aupdate()` on models with parent models (multi-table inheritance) | a djox thread |
 | `asave()` of a new object, on a `djox.Model` | djox, like `acreate()` |
 | `asave()`, `adelete()`, `arefresh_from_db()` on an instance | a djox thread ([Choose the models](models.md)) |
 | related managers: `author.books.acreate()`, `pizza.toppings.aadd()`, `aremove()`, `aclear()`, `aset()`... | a djox thread (their queries, like `author.books.filter(...)`, run on djox) |
 
+## Several statements
+
+`aget_or_create()`, `ain_bulk()`, `abulk_create()` and `abulk_update()` take
+Django's steps one by one, each statement awaited on djox:
+
+- **Django's checks and errors**, in Django's order.
+- **Django's transactions**: where Django uses `atomic()` (several batches,
+  the `INSERT` of `get_or_create()`), djox uses `djox.atomic()`.
+- **`aget_or_create()` looks again inside its block** before creating. On
+  SQLite the block holds the write lock, so twenty tasks asking for the same
+  row at once create it once, even without a unique column.
+- **Left to Django**, on a djox thread: `abulk_create()` of models with
+  `order_with_respect_to`, `abulk_update()` on a filtered QuerySet or a model
+  with parent models, and `ain_bulk()` after `values()`, on a field that isn't
+  unique, or with more ids than one query takes.
+
 ## "A djox thread"
 
 Some methods are long Django code with several queries and a transaction
-(`aget_or_create()`, `abulk_create()`...). djox runs that code unchanged, on
-one of its own threads:
+(`aupdate_or_create()`, deletes that cascade...). djox runs that code
+unchanged, on one of its own threads:
 
 - **A small pool**, each thread keeping its connection open.
 - **No queueing** behind each other, or behind Django's single worker thread.
-- **Writes take turns** on SQLite, so twenty tasks running `aget_or_create()`
-  for the same row create it once ([Writes take turns](transactions.md#writes-take-turns)).
+- **Writes take turns** on SQLite ([Writes take turns](transactions.md#writes-take-turns)).
 - **Inside a transaction** they run on the transaction's thread, so they join
   it.
 - **`CONN_MAX_AGE` and `CONN_HEALTH_CHECKS` work as usual**: once per request,

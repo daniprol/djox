@@ -114,9 +114,14 @@ them, and it should teach them both along the way.
   (`RelatedModel` in `src/results.rs`). `prefetch_related()` keeps the note;
   Django's own prefetching runs unchanged on a djox thread
   (`src/djox/prefetch.py` says why it isn't awaited query by query).
+- **Several statements, awaited** (`src/djox/query.py`, `_bulk_create.py`,
+  `_bulk_update.py`): `aget_or_create()`, `ain_bulk()`, `abulk_create()` and
+  `abulk_update()` follow Django's steps, each statement awaited on djox,
+  with `djox.atomic()` where Django uses `atomic()`. `bulk_update()` keeps
+  each batch shape's `UPDATE` (`_fast_lane/bulk_updates.py`).
 - **djox's threads** (`src/djox/_threads.py`): Django's sync methods that
-  djox doesn't split (`get_or_create()`, `bulk_create()`, `Model.save()` on a
-  `djox.Model`...) run unchanged on a small pool of djox's threads, not on
+  djox doesn't split (`update_or_create()`, cascading `delete()`,
+  `Model.save()` on a `djox.Model`...) run unchanged on a small pool of djox's threads, not on
   Django's single sync thread. Each pooled thread runs Django's
   `close_old_connections()` once per request, so `CONN_MAX_AGE` works.
   Related managers (`author.books.aadd()`) run there too (`related.py`).
@@ -201,7 +206,9 @@ them, and it should teach them both along the way.
    `values()` and `values_list()`, with dates, decimals and booleans
    converted in Rust. `aiterator()` streams its rows (done). Any chain of
    calls is a recipe, so `annotate()`, `F()`, aggregates and joins through
-   any relation take it too (done). Next: subqueries, `bulk_create()`.
+   any relation take it too (done). `bulk_update()` and `in_bulk()` take it,
+   and the bulk `a`-methods and `aget_or_create()` are awaited step by step
+   (done). Next: subqueries.
 7. Postgres (done): `Database.postgres()` and `djox.backends.postgresql`,
    with TLS (rustls, libpq's `sslmode` values). Next: reading arrays,
    ranges and `hstore` from async code.

@@ -16,10 +16,11 @@ djox grows in small steps, each useful on its own. Steps 0 to 8 are in
 | 8 | Related objects: `select_related()` on the fast lane, `prefetch_related()` off the event loop |
 | 9 | Speed (unreleased): `djox.asgi`, quick SQLite reads, `Q()`, `exclude()` and joins through foreign keys on the fast lane, `create()` and `asave()` too |
 | 10 | The general fast lane (unreleased): any chain of calls is a recipe, so `annotate()`, `F()`, aggregates and joins through any relation take the fast lane |
+| 11 | Several statements awaited (unreleased): `aget_or_create()`, `ain_bulk()`, `abulk_create()` and `abulk_update()` run on djox, not on a thread; `bulk_update()` and `in_bulk()` on the fast lane |
 
 ## Next
 
 - **More of the fast lane**: subqueries (`Exists()`, `Subquery()`),
-  `bulk_create()`, prefetching through a foreign key or many-to-many.
+  prefetching through a foreign key or many-to-many.
 
 Need something else? [Open an issue](https://github.com/daniprol/djox/issues).

@@ -159,7 +159,10 @@ class WriterTransaction:
         """Like Django's cursors inside `atomic()`: after an error that forbids
         committing, nothing runs until the block is rolled back."""
         if self.django_wrapper is not None:
+            # Once Django has joined, its record is the one that counts: rolling
+            # back a nested block's savepoint clears it, and the block goes on.
             self.django_wrapper.validate_no_broken_transaction()
+            return
         if self.needs_rollback:
             raise transaction.TransactionManagementError(
                 "An error occurred in the current transaction. You can't execute queries until the end of the "
