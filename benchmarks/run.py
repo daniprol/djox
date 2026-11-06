@@ -72,7 +72,7 @@ django.setup()
 
 from asgiref.sync import sync_to_async  # noqa: E402
 from django.db import connection, models, transaction  # noqa: E402  (needs the settings above)
-from django.db.models import Count, F, Sum  # noqa: E402
+from django.db.models import Count, F, Prefetch, Sum  # noqa: E402
 
 import djox  # noqa: E402
 
@@ -179,8 +179,12 @@ def related_querysets(books: models.Manager, chapters: models.Manager) -> dict[s
     return {
         "20 chapters with their book": lambda: chapters.select_related("book").filter(number=2).order_by("id")[:20],
         "1,000 chapters with their book": lambda: chapters.select_related("book").order_by("id")[:1000],
+        # The chapters' queryset comes from the contender's manager: `Chapter`'s default
+        # manager is Django's, so a plain `"chapters"` would always be prefetched by Django.
         "20 books with their chapters": lambda: (
-            books.filter(pages__gt=500).order_by("-pages", "id").prefetch_related("chapters")[:20]
+            books.filter(pages__gt=500)
+            .order_by("-pages", "id")
+            .prefetch_related(Prefetch("chapters", queryset=chapters.all()))[:20]
         ),
     }
 
