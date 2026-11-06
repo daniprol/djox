@@ -5,6 +5,7 @@ Stock Django against djox, on the same machine and the same data.
 | Benchmark | Measures | Script |
 |---|---|---|
 | [Web app](#web-app-requests-per-second) | Requests per second of a Django + DRF app | `web/load_test.py` |
+| [django-bolt](#django-bolt-requests-per-second) | Requests per second of the same models, served by django-bolt | `web/bolt_load_test.py` |
 | [ASGI handlers](#asgi-handlers) | Django's ASGI handler against djox's, sync and async views | `web/handlers.py`, `web/load_test.py --apis sync-asgi` |
 | [ORM calls on SQLite](#orm-calls-on-sqlite) | Microseconds per ORM call | `run.py` |
 | [ORM calls on Postgres](#orm-calls-on-postgres) | Microseconds per ORM call | `postgres.py` |
@@ -18,6 +19,7 @@ uv run python run.py                 # ORM calls, SQLite (~2 min)
 uv run python postgres.py            # ORM calls, Postgres (needs DJOX_POSTGRES_URL)
 cargo install oha                    # the HTTP load tool, once
 uv run python web/load_test.py       # web app, SQLite and Postgres (~30 min)
+uv run python web/bolt_load_test.py  # django-bolt, SQLite (~5 min)
 ```
 
 - Postgres scripts use `DJOX_POSTGRES_URL` (default `postgresql://postgres:postgres@localhost/postgres`) and
@@ -94,6 +96,23 @@ Annotations, aggregates and `F()` on SQLite, measured after the tables above, wi
   run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
 - **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores). Differences
   under about 10% are noise.
+
+## django-bolt: requests per second
+
+The shop models served by [django-bolt](https://bolt.farhana.li/) (`web/bolt_app/`), with four `async` handlers.
+Both stacks run the same handlers. SQLite, one process, oha with 32 connections, median of 3 rounds.
+
+Requests per second, higher is better. In brackets: djox against Django.
+
+| | Django | djox |
+|---|---:|---:|
+| get one book | 1,552 | 3,581 (2.3x) |
+| list a page, with authors | 714 | 1,525 (2.1x) |
+| read a book, in a transaction | 692 | 485 (0.7x) |
+| create a book | 1,866 | 2,746 (1.5x) |
+
+- **The transaction endpoint is slower on djox.** Each statement inside `djox.atomic()` pays a round trip to djox's
+  threads. This is the cost to fix next.
 
 ## ASGI handlers
 

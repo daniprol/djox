@@ -14,3 +14,10 @@ class Book(models.Model):
     published = models.DateTimeField()
     author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="books")
     read_count = models.IntegerField(default=0)  # how many times the book was read: `F("read_count") + 1`
+
+
+class Read(models.Model):
+    """A log of reads of a book: one row per read, written in the same transaction as the counter."""
+
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="reads")
+    read_at = models.DateTimeField()
