@@ -5,6 +5,7 @@ Stock Django against djox, on the same machine and the same data.
 | Benchmark | Measures | Script |
 |---|---|---|
 | [Web app](#web-app-requests-per-second) | Requests per second of a Django + DRF app | `web/load_test.py` |
+| [ASGI handlers](#asgi-handlers) | Django's ASGI handler against djox's, sync and async views | `web/handlers.py`, `web/load_test.py --apis sync-asgi` |
 | [ORM calls on SQLite](#orm-calls-on-sqlite) | Microseconds per ORM call | `run.py` |
 | [ORM calls on Postgres](#orm-calls-on-postgres) | Microseconds per ORM call | `postgres.py` |
 
@@ -40,8 +41,8 @@ A small shop app ([`web/app.py`](https://github.com/daniprol/djox/blob/main/benc
 - **Stacks**: the same code. djox only changes settings: its `ENGINE`, and `"djox"` in `INSTALLED_APPS`.
 - **Server**: [granian](https://github.com/emmett-framework/granian), one worker process, one thread. WSGI for sync
   views and DRF, ASGI for async views: Django's handler on Django, djox's (`djox.asgi`) on djox. No middleware.
-- **Connections**: kept between requests under WSGI. Under ASGI, `CONN_MAX_AGE = 0`, as Django's docs advise. On
-  Postgres, Django's own connection pool (`"pool": True`).
+- **Connections**: kept between requests under WSGI, and under djox's ASGI handler. Under Django's ASGI handler,
+  `CONN_MAX_AGE = 0`, as Django's docs advise. On Postgres, Django's own connection pool (`"pool": True`).
 - **Load**: [oha](https://github.com/hatoo/oha), 32 connections, 2 s warm-up, then 5 s per endpoint. Stacks take
   turns, round after round (3 by default, `--rounds 5` for more); each number is the median. No request
   failed.
@@ -93,6 +94,43 @@ Annotations, aggregates and `F()` on SQLite, measured after the tables above, wi
   run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
 - **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores). Differences
   under about 10% are noise.
+
+## ASGI handlers
+
+Django's ASGI handler starts a new thread for every request (two, for a sync view), and hops to it for the request
+signals. djox's (`djox.asgi`) sends the signals on the event loop when that can't block, and runs a request's sync
+code on one of its pooled threads, which keep their connections between requests.
+
+In this process, no HTTP ([`web/handlers.py`](https://github.com/daniprol/djox/blob/main/benchmarks/web/handlers.py)):
+the same djox stack and views, only the handler changes (with `CONN_MAX_AGE = 0` under Django's, as its docs
+advise; kept connections under djox's). Microseconds per request, median of 7 rounds, lower is better:
+
+| | One at a time, Django's handler | One at a time, djox's handler | 32 at once, Django's handler | 32 at once, djox's handler |
+|---|---:|---:|---:|---:|
+| a sync view: get one book | 2,719 | 797 (3.4x) | 2,667 | 1,666 (1.6x) |
+| an async view: get one book | 1,524 | 266 (5.7x) | 1,310 | 226 (5.8x) |
+| a sync view: list a page, with authors | 2,878 | 1,292 (2.2x) | 3,174 | 2,116 (1.5x) |
+| an async view: list a page, with authors | 1,860 | 507 (3.7x) | 1,572 | 450 (3.5x) |
+
+Over HTTP, the web app's sync views served under ASGI (`load_test.py --apis sync-asgi`), and its async views
+again, on SQLite (granian, one worker, oha with 32 connections, 3 rounds): Django's handler on Django, djox's
+handler on djox. Requests per second, higher is better:
+
+| | Async views, Django | Async views, djox | Sync views under ASGI, Django | Sync views under ASGI, djox |
+|---|---:|---:|---:|---:|
+| get one book | 266 | 2,264 (8.5x) | 259 | 693 (2.7x) |
+| list a page, with authors | 120 | 1,439 (12.0x) | 129 | 524 (4.1x) |
+| authors with stats | 123 | 804 (6.5x) | 120 | 418 (3.5x) |
+| one author's stats | 245 | 1,984 (8.1x) | 249 | 711 (2.9x) |
+| count a read | 280 | 1,129 (4.0x) | 292 | 693 (2.4x) |
+| update a book | 291 | 1,194 (4.1x) | 294 | 735 (2.5x) |
+| create a book | 277 | 1,098 (4.0x) | 271 | 694 (2.6x) |
+
+- **Sync views under ASGI: 2.4 to 4.1 times the requests.** No thread to start per request, and connections kept
+  (Django opens one per request under ASGI). Each sync request still hops to a thread twice (the view, then
+  closing its connections), so WSGI serves sync views faster than either handler.
+- **Async views on djox don't pay for a thread at all**: 4 to 12 times Django's handler.
+- In this process, the handler alone (same stack) is worth 1.5 to 5.8 times. Over HTTP, djox's ORM adds its share.
 
 ## ORM calls on SQLite
 

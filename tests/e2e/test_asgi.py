@@ -1,4 +1,5 @@
-"""`djox.asgi`: Django's ASGI handler, with the request signals on the event loop when that is safe."""
+"""`djox.asgi`: Django's ASGI handler, with the request signals on the event loop when that is safe,
+and a pooled thread for each request's sync code."""
 
 import asyncio
 import io
@@ -7,7 +8,9 @@ from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.core.signals import request_finished, request_started
+from django.db import connection, connections
 from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse
 from django.test import override_settings
 from django.urls import path
@@ -31,6 +34,39 @@ def sync_author_view(request: HttpRequest, author_id: int) -> JsonResponse:
     return JsonResponse({"name": Author.objects.get(pk=author_id).name})
 
 
+# What the sync views below saw, one entry per request.
+threads_seen: list[threading.Thread] = []
+connections_seen: list[Any] = []
+
+
+def thread_view(request: HttpRequest) -> HttpResponse:
+    threads_seen.append(threading.current_thread())
+    return HttpResponse("ok")
+
+
+def connection_view(request: HttpRequest) -> HttpResponse:
+    Author.objects.exists()
+    # `connection.connection` is the database connection Django opened on this thread.
+    connections_seen.append(connection.connection)
+    if "close" in request.GET:
+        connection.close()  # so the next test starts with a fresh connection
+    return HttpResponse("ok")
+
+
+# The task `background_view` starts, which outlives its request.
+background_tasks: list["asyncio.Task[str]"] = []
+request_over = asyncio.Event()
+
+
+async def background_view(request: HttpRequest) -> HttpResponse:
+    async def later() -> str:
+        await request_over.wait()
+        return await sync_to_async(lambda: "ran after the request")()
+
+    background_tasks.append(asyncio.create_task(later()))
+    return HttpResponse("ok")
+
+
 async def failing_view(request: HttpRequest) -> HttpResponse:
     raise ValueError("the view failed")
 
@@ -51,6 +87,9 @@ async def slow_view(request: HttpRequest) -> HttpResponse:
 urlpatterns = [
     path("authors/<int:author_id>", author_view),
     path("sync-authors/<int:author_id>", sync_author_view),
+    path("thread", thread_view),
+    path("connection", connection_view),
+    path("background", background_view),
     path("failing", failing_view),
     path("file", file_view),
     path("slow", slow_view),
@@ -62,15 +101,17 @@ urlpatterns = [
 
 def scope(url: str) -> dict[str, Any]:
     """An ASGI scope for `GET url`, like an ASGI server makes."""
+    # `partition()` splits at the first "?": ("/path", "?", "query") or ("/path", "", "").
+    url_path, _, query = url.partition("?")
     return {
         "type": "http",
         "asgi": {"version": "3.0"},
         "http_version": "1.1",
         "method": "GET",
         "scheme": "http",
-        "path": url,
-        "raw_path": url.encode(),
-        "query_string": b"",
+        "path": url_path,
+        "raw_path": url_path.encode(),
+        "query_string": query.encode(),
         "root_path": "",
         "headers": [(b"host", b"testserver")],
         "client": ("127.0.0.1", 50000),
@@ -222,3 +263,42 @@ async def test_a_client_that_leaves_cancels_the_view_and_finishes_the_request(re
     await asyncio.wait_for(request, timeout=5)
     assert client.messages_sent == [], "no response was sent"
     assert recorder.threads == ["started on the event loop", "finished on the event loop"]
+
+
+async def test_sync_views_run_on_a_pooled_thread_not_a_new_one_per_request() -> None:
+    threads_seen.clear()
+    await get("/thread")
+    await get("/thread")
+    first, second = threads_seen
+    assert first is second, "the second request reused the first one's thread"
+    assert first is not threading.current_thread()
+    assert first.name.startswith("djox")
+
+
+async def test_a_pooled_request_thread_keeps_its_connection_with_conn_max_age(
+    author: Author, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `None` keeps connections forever (new connections read this dict).
+    monkeypatch.setitem(connections.settings["default"], "CONN_MAX_AGE", None)
+    connections_seen.clear()
+    await get("/connection")
+    await get("/connection?close")
+    first, second = connections_seen
+    assert first is second
+
+
+async def test_a_pooled_request_thread_closes_its_connection_by_default(author: Author) -> None:
+    # Django's default `CONN_MAX_AGE` is 0: close the connection when the request finishes.
+    connections_seen.clear()
+    await get("/connection")
+    await get("/connection")
+    first, second = connections_seen
+    assert first is not second
+
+
+async def test_a_task_that_outlives_its_request_can_still_run_sync_code() -> None:
+    background_tasks.clear()
+    request_over.clear()
+    await get("/background")
+    request_over.set()
+    assert await asyncio.wait_for(background_tasks[0], timeout=5) == "ran after the request"

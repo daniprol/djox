@@ -10,7 +10,8 @@ break comes with a migration note.
 
 - **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
   when that can't block it, instead of hopping to a thread twice per request (an empty async view: 1.3 ms to
-  0.16 ms).
+  0.16 ms). A request's sync code (a sync view, sync middleware) runs on one of djox's pooled threads instead
+  of a new thread per request, so `CONN_MAX_AGE` keeps connections under ASGI too.
 - **Quick SQLite reads**: a small async read runs right on the calling thread, stopped after
   `quick_read_limit` (a new option, 1 ms) and sent to a reader then (`aget()`: 174 µs to 52 µs).
 - **The fast lane takes more**: `Q()` objects, `exclude()`, and names through foreign keys and one-to-one
