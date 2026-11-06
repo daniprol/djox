@@ -6,6 +6,8 @@ break comes with a migration note.
 
 ## [Unreleased]
 
+- **Async `on_commit()` callbacks**: `await djox.on_commit(send_email)` accepts an `async def`, awaited after the commit.
+
 ### Added
 
 - **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
