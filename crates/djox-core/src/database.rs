@@ -35,8 +35,10 @@ pub trait Database: Send + Sync {
 
     /// Runs a query right here, on the calling thread, if the backend can
     /// answer it within a moment: a *quick read*. Returns `None` when it
-    /// can't (the statement writes, takes longer, or the backend has no quick
-    /// reads); then send it with [`Database::fetch_all`] as usual.
+    /// can't (it takes longer, or the backend has no quick reads); then send
+    /// it with [`Database::fetch_all`] as usual. A statement that writes and
+    /// returns rows (`INSERT ... RETURNING`) may be a quick write (see
+    /// [`Database::execute_quickly`]).
     ///
     /// For a small query, sending it to another thread and waiting for the
     /// answer takes longer than running it. The calling thread waits for a
@@ -61,6 +63,16 @@ pub trait Database: Send + Sync {
 
     /// Runs a statement that changes data (`INSERT`, `UPDATE`, `DELETE`...).
     fn execute(&self, sql: String, parameters: Vec<Value>, reply: ReplySender<Executed>);
+
+    /// Runs a write right here, on the calling thread, if the backend can do
+    /// it within a moment: a *quick write*, like a quick read
+    /// ([`Database::fetch_all_quickly`]). Returns `None` when it can't (the
+    /// database is busy, the statement takes longer or fails, or the backend
+    /// has no quick writes); nothing was changed then, and the caller sends
+    /// it with [`Database::execute`] as usual. The default answers `None`.
+    fn execute_quickly(&self, _sql: &str, _parameters: &[Value]) -> Option<Executed> {
+        None
+    }
 
     /// Runs the same statement once for each list of parameters, in one
     /// transaction: either all of them are kept or none is.

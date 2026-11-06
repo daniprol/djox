@@ -23,6 +23,12 @@ transactions. Underneath, every query runs on the SQLite bundled in djox.
   calling thread, which is ten times faster than the trip to a reader thread.
   SQLite stops it after `quick_read_limit` (1 ms), and it then runs on a
   reader, so the event loop is never held longer.
+- **Quick writes**: a small async write (`aupdate()` of one row, `acreate()`)
+  runs right on the calling thread too, on the writer connection itself,
+  when the writer is free. It never waits for a lock, and SQLite stops it
+  after `quick_write_limit` (1 ms); it then goes to the writer thread.
+  `djox.atomic()` blocks run their statements the same way
+  ([transactions](transactions.md)).
 
 ## Why the `ENGINE` matters
 
@@ -50,6 +56,7 @@ transactions. Underneath, every query runs on the SQLite bundled in djox.
 | `init_command`     | `""`          | SQL run on every new connection, `;`-separated                  |
 | `readers`          | 1 per core, at most 4 | Reader connections of `djox.connections[alias]`          |
 | `quick_read_limit` | `0.001`       | Seconds a small async read may run on the calling thread; `0`: never |
+| `quick_write_limit` | `0.001`      | The same for a small async write, and the statements of a `djox.atomic()` block |
 
 An unknown option (like `detect_types`, an option of Python's `sqlite3`)
 raises `ImproperlyConfigured`.

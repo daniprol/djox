@@ -18,13 +18,23 @@
 //! thread B held the connection and ran a Python SQL function (which needs
 //! the GIL), both would wait forever. So: **release the GIL first, then take
 //! the connection** (`py.detach(...)` around every `lock()`).
+//!
+//! # A connection on the writer
+//!
+//! `Database.writer_connection()` makes a `djox.Connection` on the async
+//! database's own writer connection, shared with its writer thread (see
+//! `crates/djox/src/sqlite/writer.rs`). `djox.atomic()` runs its transaction
+//! there, and its cursors can run a small statement right away
+//! (`Cursor.execute_quickly()`), without waiting for anything.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use djox::Value;
-use djox::sqlite::{Access, SqliteConnection, SqliteSettings, StatementOutput, is_data_change};
+use djox::sqlite::{
+    Access, QuickOutcome, SharedWriter, SqliteConnection, SqliteSettings, StatementOutput, is_data_change,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -38,9 +48,8 @@ use crate::functions::{new_aggregate_state, scalar_function};
 /// connection, `autocommit`) sits behind a `Mutex`, so threads can share it.
 #[pyclass(name = "Connection", module = "djox", frozen)]
 pub struct PythonConnection {
-    /// The connection, or `None` once it is closed (or given back to the
-    /// async database that lent it, see [`PythonConnection::lend`]).
-    sqlite: Mutex<Option<SqliteConnection>>,
+    /// Where the SQLite connection is.
+    sqlite: Place,
     /// `False` makes a write open a transaction that stays open until
     /// `commit()` or `rollback()` (see the `autocommit` property).
     autocommit: Mutex<bool>,
@@ -48,12 +57,34 @@ pub struct PythonConnection {
     location: String,
 }
 
+/// Where a `djox.Connection`'s SQLite connection is. (A Rust `enum` is a
+/// value that is exactly one of a few kinds, each with its own data.)
+enum Place {
+    /// A connection of its own, or `None` once it is closed (or given back to
+    /// the async database that lent it, see [`PythonConnection::lend`]).
+    Own(Mutex<Option<SqliteConnection>>),
+    /// The writer connection of an async database, shared with its writer
+    /// thread, or `None` once this `djox.Connection` is closed; and this
+    /// connection's number there, which tells whose transaction is open.
+    Writer(Mutex<Option<Arc<SharedWriter>>>, u64),
+}
+
 impl PythonConnection {
     /// Wraps a connection the async `Database` is opening, so Python code can
     /// prepare it. [`PythonConnection::take_back`] returns it afterwards.
     pub fn lend(sqlite: SqliteConnection, location: String) -> PythonConnection {
         PythonConnection {
-            sqlite: Mutex::new(Some(sqlite)),
+            sqlite: Place::Own(Mutex::new(Some(sqlite))),
+            autocommit: Mutex::new(true),
+            location,
+        }
+    }
+
+    /// A connection on an async database's writer connection (see the module docs).
+    pub fn share_writer(writer: Arc<SharedWriter>, location: String) -> PythonConnection {
+        let user = writer.new_user_number();
+        PythonConnection {
+            sqlite: Place::Writer(Mutex::new(Some(writer)), user),
             autocommit: Mutex::new(true),
             location,
         }
@@ -61,17 +92,54 @@ impl PythonConnection {
 
     /// Takes the connection out again; the Python object is closed from now on.
     pub fn take_back(&self) -> Option<SqliteConnection> {
-        // `.take()` moves the value out of the `Option` and leaves `None`.
-        self.sqlite.lock().unwrap().take()
+        match &self.sqlite {
+            // `.take()` moves the value out of the `Option` and leaves `None`.
+            Place::Own(sqlite) => sqlite.lock().unwrap().take(),
+            Place::Writer(..) => None,
+        }
     }
 
     /// Runs one statement (already in SQLite's `?` style) with the GIL released.
     pub fn run(&self, py: Python<'_>, sql: &str, parameters: Vec<Value>) -> PyResult<StatementOutput> {
         let autocommit = *self.autocommit.lock().unwrap();
-        self.with_connection(py, |sqlite| {
+        let started = Instant::now();
+        let output = self.with_connection(py, |sqlite| {
             begin_before_a_write_if_needed(sqlite, autocommit, sql)?;
             sqlite.run(sql, &parameters)
-        })
+        });
+        if let Some((writer, _)) = self.writer() {
+            // So that the next run of it knows whether it is quick (`execute_quickly()`).
+            writer.remember_how_long(sql, started.elapsed());
+        }
+        output
+    }
+
+    /// Runs one statement right here if that needs no waiting (see the module
+    /// docs): its output, or `None` if it didn't run (a connection of its own
+    /// never runs one quickly).
+    pub fn run_quickly(&self, py: Python<'_>, sql: &str, parameters: Vec<Value>) -> PyResult<Option<StatementOutput>> {
+        let Some((writer, user)) = self.writer() else {
+            return Ok(None);
+        };
+        if !*self.autocommit.lock().unwrap() {
+            return Ok(None); // a write may need a `BEGIN` first: `run()` knows
+        }
+        // A Python SQL function the statement calls takes the GIL back for its own call.
+        match py.detach(|| writer.run_quickly(user, sql, &parameters)) {
+            QuickOutcome::Ran(Ok(output)) => Ok(Some(output)),
+            QuickOutcome::Ran(Err(error)) => Err(to_python_error(error)),
+            QuickOutcome::GaveUp => Ok(None),
+        }
+    }
+
+    /// The writer connection this connection shares, and its number there,
+    /// if it is one on a writer and still open.
+    fn writer(&self) -> Option<(Arc<SharedWriter>, u64)> {
+        match &self.sqlite {
+            Place::Own(_) => None,
+            // `.clone()` on an `Arc` hands out one more reference to the same writer.
+            Place::Writer(writer, user) => writer.lock().unwrap().clone().map(|writer| (writer, *user)),
+        }
     }
 
     /// Runs one statement once per list of parameters, with the GIL released.
@@ -90,15 +158,36 @@ impl PythonConnection {
         py: Python<'_>,
         action: impl FnOnce(&mut SqliteConnection) -> djox::Result<T> + Send,
     ) -> PyResult<T> {
-        py.detach(|| {
-            let mut guard = self.sqlite.lock().unwrap();
-            // `guard.as_mut()` is the connection inside the `Option`, or `None` if closed.
-            match guard.as_mut() {
-                Some(sqlite) => action(sqlite),
-                None => Err(djox::Error::Closed),
+        py.detach(|| match &self.sqlite {
+            Place::Own(sqlite) => {
+                let mut guard = sqlite.lock().unwrap();
+                // `guard.as_mut()` is the connection inside the `Option`, or `None` if closed.
+                match guard.as_mut() {
+                    Some(sqlite) => action(sqlite),
+                    None => Err(djox::Error::Closed),
+                }
+            }
+            Place::Writer(writer, user) => {
+                let writer = writer.lock().unwrap().clone();
+                match writer {
+                    Some(writer) => writer.with_connection(*user, action),
+                    None => Err(djox::Error::Closed),
+                }
             }
         })
         .map_err(to_python_error)
+    }
+}
+
+/// Dropping a connection on a writer (like `__del__`) rolls back the transaction
+/// it left open: no other statement could run on the writer until it ended.
+impl Drop for PythonConnection {
+    fn drop(&mut self) {
+        if let Place::Writer(writer, user) = &self.sqlite
+            && let Some(writer) = writer.lock().unwrap().take()
+        {
+            writer.roll_back_without_waiting(*user);
+        }
     }
 }
 
@@ -184,18 +273,31 @@ impl PythonConnection {
     }
 
     /// Closes the connection; an open transaction is rolled back. Closing
-    /// twice does nothing.
+    /// twice does nothing. On a writer connection, only this `djox.Connection`
+    /// closes: the writer connection belongs to its database.
     fn close(&self, py: Python<'_>) {
-        // Dropping the connection closes it. That can wait on the disk, so
-        // other Python threads may run meanwhile.
-        py.detach(|| drop(self.take_back()));
+        match &self.sqlite {
+            // Dropping the connection closes it. That can wait on the disk, so
+            // other Python threads may run meanwhile.
+            Place::Own(_) => py.detach(|| drop(self.take_back())),
+            Place::Writer(writer, user) => {
+                let writer = py.detach(|| writer.lock().unwrap().take());
+                if let Some(writer) = writer {
+                    // Never waits: `close()` may run on the event loop's thread.
+                    py.detach(|| writer.roll_back_without_waiting(*user));
+                }
+            }
+        }
     }
 
     /// Whether `close()` was called.
     #[getter]
     fn closed(&self, py: Python<'_>) -> bool {
         // The one locking rule: let go of the GIL before taking the connection.
-        py.detach(|| self.sqlite.lock().unwrap().is_none())
+        py.detach(|| match &self.sqlite {
+            Place::Own(sqlite) => sqlite.lock().unwrap().is_none(),
+            Place::Writer(writer, _) => writer.lock().unwrap().is_none(),
+        })
     }
 
     /// Whether a transaction is open.

@@ -31,7 +31,7 @@ import contextvars
 import threading
 import weakref
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextvars import ContextVar
 from typing import Any, TypeVar
 
@@ -105,8 +105,9 @@ async def run_on_pooled_thread(method: Callable[[], Result]) -> Result:
 
 # ---------------------------------------------------------------- the pool
 
-# The thread of the djox.atomic() block this code runs in, or `None`.
-transaction_thread: ContextVar[ThreadPoolExecutor | None] = ContextVar("djox_transaction_thread", default=None)
+# The thread of the djox.atomic() block this code runs in, or `None` (a
+# `ThreadPoolExecutor` with one thread, or a `djox._writer_transactions.BlockThread`).
+transaction_thread: ContextVar[Executor | None] = ContextVar("djox_transaction_thread", default=None)
 
 # Threads with no work, ready for the next call. Each keeps its own Django
 # connections open. The lock is like `threading.Lock` in any Python code:

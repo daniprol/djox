@@ -21,12 +21,16 @@ pub struct SqliteSettings {
     /// `quick_reads.rs`). A read that takes longer is stopped there and runs
     /// on a reader instead. Zero turns quick reads off.
     pub quick_read_limit: Duration,
+    /// The longest a *quick write* may run on the calling thread (see
+    /// `writer.rs`). Zero turns quick writes off: every write goes to the
+    /// writer thread, and a transaction block's statements to another thread.
+    pub quick_write_limit: Duration,
 }
 
 impl SqliteSettings {
     /// Settings for the file at `path`: a 5 second timeout (Django's default),
     /// one reader per CPU core, at most 4 (more rarely helps SQLite), and
-    /// quick reads of up to 1 ms.
+    /// quick reads and writes of up to 1 ms.
     ///
     /// `impl Into<PathBuf>` accepts anything that can become a path: a
     /// `&str`, a `String`, a `PathBuf`...
@@ -37,6 +41,7 @@ impl SqliteSettings {
             busy_timeout: Duration::from_secs(5),
             reader_count: cores.clamp(1, 4),
             quick_read_limit: Duration::from_millis(1),
+            quick_write_limit: Duration::from_millis(1),
         }
     }
 

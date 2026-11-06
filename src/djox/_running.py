@@ -6,7 +6,10 @@ open sync transaction, or, for sync code, on Django's own connection.
 `fetch_all_now()` and `execute_now()`). Usually the SQL goes to the async `djox.Database` of the
 alias (`djox.connections[alias]`), which never blocks the event loop.
 
-There is one exception. When this code runs inside a sync transaction on the
+Inside a `djox.atomic()` block on SQLite, the SQL runs in the block's
+transaction, on djox's writer connection (`djox._writer_transactions`).
+
+There is one more exception. When this code runs inside a sync transaction on the
 same alias, the SQL must run inside that transaction. A transaction
 only shows its changes to its own connection until it commits, so another
 connection wouldn't see them, and a write from another connection would wait
@@ -27,7 +30,7 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Any
 
 from django.db import connections as django_connections
@@ -39,6 +42,7 @@ from djox.backends.engine import DjoxEngine
 if TYPE_CHECKING:
     # `Row` exists only in the type hints of `djox._core` (`_core.pyi`).
     from djox._core import Row
+    from djox._writer_transactions import WriterTransaction
 
 
 async def fetch_all(alias: str, sql: str, parameters: Sequence[Any], writes: bool = False) -> "list[Row]":
@@ -56,9 +60,15 @@ async def fetch_all(alias: str, sql: str, parameters: Sequence[Any], writes: boo
 async def fetch_all_without_hooks(alias: str, sql: str, parameters: Sequence[Any], writes: bool) -> "list[Row]":
     """`fetch_all()`, once the hooks (`djox.hooks`) have seen the statement."""
     started = time.perf_counter()
-    transaction_wrapper = open_sync_transaction(alias)
-    if transaction_wrapper is not None:
+    block = writer_transaction(alias)
+    transaction_wrapper = open_sync_transaction(alias) if block is None else None
+    if block is not None:
+        wrapper = django_connections[alias]
         # `with` around `await` is fine: the block simply lasts until the await is done.
+        with wrapper.wrap_database_errors:
+            rows = await block.fetch_all(sql, parameters)
+        log_query(wrapper, sql, parameters, started)
+    elif transaction_wrapper is not None:
         with transaction_wrapper.wrap_database_errors:
             rows = await asyncio.to_thread(fetch_all_on, transaction_wrapper.connection, sql, parameters)
         log_query(transaction_wrapper, sql, parameters, started)
@@ -85,7 +95,7 @@ async def stream_rows(alias: str, sql: str, parameters: Sequence[Any], chunk_siz
     chunk arrives: that is when Django's cursor would have run it. If the
     caller stops early, the rest of the rows are never read.
     """
-    if open_sync_transaction(alias) is not None:
+    if writer_transaction(alias) is not None or open_sync_transaction(alias) is not None:
         # Only the transaction's connection sees its writes, and it runs one
         # statement at a time: read every row there, then hand them out.
         rows = await fetch_all(alias, sql, parameters)
@@ -155,8 +165,14 @@ async def execute(alias: str, sql: str, parameters: Sequence[Any]) -> int:
 async def execute_without_hooks(alias: str, sql: str, parameters: Sequence[Any]) -> int:
     """`execute()`, once the hooks (`djox.hooks`) have seen the statement."""
     started = time.perf_counter()
-    transaction_wrapper = open_sync_transaction(alias)
-    if transaction_wrapper is not None:
+    block = writer_transaction(alias)
+    transaction_wrapper = open_sync_transaction(alias) if block is None else None
+    if block is not None:
+        wrapper = django_connections[alias]
+        with wrapper.wrap_database_errors:
+            rows_affected = await block.execute(sql, parameters)
+        log_query(wrapper, sql, parameters, started)
+    elif transaction_wrapper is not None:
         with transaction_wrapper.wrap_database_errors:
             rows_affected = await asyncio.to_thread(execute_on, transaction_wrapper.connection, sql, parameters)
         log_query(transaction_wrapper, sql, parameters, started)
@@ -232,6 +248,10 @@ def mark_for_rollback_on_error(alias: str) -> Iterator[None]:
     try:
         yield
     except Exception as error:
+        block = writer_transaction(alias)
+        if block is not None:
+            block.mark_for_rollback(error)
+            raise
         # `Any`: django-stubs doesn't know `rollback_exc`.
         wrapper: Any = noted_sync_transaction(alias) or django_connections[alias]
         if wrapper.in_atomic_block:
@@ -261,6 +281,25 @@ def note_sync_transaction(alias: str, wrapper: Any, is_open: bool) -> None:
     else:
         transactions.pop(alias, None)
     sync_transactions.set(transactions)
+
+
+# The `djox.atomic()` blocks on djox's writer connection this code runs in, by
+# alias (`djox._writer_transactions.WriterTransaction`s), like `sync_transactions`.
+writer_transactions: ContextVar["dict[str, WriterTransaction]"] = ContextVar("djox_writer_transactions", default={})  # noqa: B039  (never changed in place)
+
+
+def writer_transaction(alias: str) -> "WriterTransaction | None":
+    """The `djox.atomic()` block on djox's writer connection that this code
+    runs in, for `alias` (a `djox._writer_transactions.WriterTransaction`), or `None`."""
+    return writer_transactions.get().get(alias)
+
+
+def note_writer_transaction(alias: str, block: "WriterTransaction") -> "Token[dict[str, WriterTransaction]]":
+    """Note that this code runs in `block`, a `WriterTransaction`, until the
+    returned token is handed to `writer_transactions.reset()`."""
+    blocks = dict(writer_transactions.get())
+    blocks[alias] = block
+    return writer_transactions.set(blocks)
 
 
 def fetch_all_on(connection: Any, sql: str, parameters: Sequence[Any]) -> "list[Row]":

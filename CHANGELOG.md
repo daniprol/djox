@@ -22,6 +22,13 @@ break comes with a migration note.
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
+- **Quick SQLite writes**: a small async write (`aupdate()` of one row, `acreate()`, a fast `adelete()`) runs
+  right on the calling thread, on djox's writer connection, when the writer is free. It never waits for a
+  lock, and is stopped after `quick_write_limit` (a new option, 1 ms) and sent to the writer thread then.
+- **`djox.atomic()` on SQLite runs on djox's writer connection**: `BEGIN`, the block's statements and `COMMIT`
+  run on the event loop's thread when they are quick, with no thread round trip. Django joins the block only
+  when code inside needs Django's sync connection (`aget_or_create()`, a nested block, `djox.on_commit()`,
+  `sync_to_async()`). `Database.writer_connection()` and `Cursor.execute_quickly()` are what it runs on.
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
   `OPTIONS` (`sslmode` from `disable` to `verify-full`, `sslrootcert`, `sslcert`, `sslkey`), also as arguments
   of `djox.Database.postgres()`. Built on rustls: nothing to install.
