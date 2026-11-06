@@ -10,11 +10,19 @@ async with djox.atomic():
 ```
 
 How it works. A transaction belongs to one connection: every statement of the
-transaction must run on it, and nothing else may run on it meanwhile. Django
-keeps one connection per thread, so a sync `atomic()` block is simply "this
-thread's connection, between `BEGIN` and `COMMIT`".
+transaction must run on it, and nothing else may run on it meanwhile.
 
-`djox.atomic()` gives the async code that one thread:
+On SQLite (with djox's `ENGINE` and the default `transaction_mode`,
+`IMMEDIATE`), the outermost block runs its transaction on djox's own writer
+connection, mostly right on the event loop's thread: see
+`djox._writer_transactions`. Django joins in only if code inside the block
+needs it.
+
+Elsewhere (Postgres, or SQLite with `DEFERRED` transactions), the block
+runs Django's own transaction on a thread of its own. Django keeps one
+connection per thread, so a sync `atomic()` block is simply "this thread's
+connection, between `BEGIN` and `COMMIT`". `djox.atomic()` gives the async
+code that one thread:
 
 1. The outermost block takes a thread of its own from a small pool (a pooled
    thread keeps its Django connection open, so the next block doesn't pay
@@ -33,9 +41,9 @@ thread's connection, between `BEGIN` and `COMMIT`".
 So everything inside the block sees the block's writes, and its writes are
 committed or rolled back together.
 
-SQLite lets one connection write at a time, so a block waits in asyncio
-until it has the file's write turn to itself: no other block, and no plain
-write on its way to djox's writer thread (see `djox._write_turns`).
+On SQLite, either way, a block waits in asyncio until it has the file's
+write turn to itself: no other block, and no plain write on its way to
+djox's writer (see `djox._write_turns`).
 
 Inside a sync transaction already (Django's `TestCase`, which runs each async
 test with `async_to_sync()` inside `atomic()`), `djox.atomic()` joins it, as
@@ -59,7 +67,7 @@ from asgiref.sync import ThreadSensitiveContext, sync_to_async
 from django.db import DEFAULT_DB_ALIAS, transaction
 from django.db import connections as django_connections
 
-from djox import _running, _write_turns
+from djox import _running, _write_turns, _writer_transactions
 from djox._threads import (
     give_back_idle_thread,
     slots_of_this_loop,
@@ -104,6 +112,8 @@ class Atomic:
         # undo when it ends. An `AsyncExitStack` is a stack of `async with`
         # blocks that can be entered in one method and left in another.
         self.outermost_block = AsyncExitStack()
+        # The outermost block's transaction on djox's writer connection, if it runs there.
+        self.writer_transaction: _writer_transactions.WriterTransaction | None = None
         # The async `on_commit()` callbacks of the outermost block (`None` in a nested one).
         self.callbacks_after_commit: list[AsyncCallback] | None = None
 
@@ -128,6 +138,16 @@ class Atomic:
                 tidy_connections()  # a pooled thread: Django's connection upkeep first
             self.django_atomic.__enter__()
 
+        if is_outermost and _writer_transactions.runs_on_the_writer(alias):
+            try:
+                await self.start_on_the_writer(alias)
+            except BaseException:
+                self.django_atomic = None
+                self.writer_transaction = None
+                await self.end_outermost_block()
+                raise
+            return
+
         try:
             if is_outermost:
                 await self.start_outermost_block(alias)
@@ -148,14 +168,49 @@ class Atomic:
         """Commit, or roll back if the block raised. Like Django, the exception isn't swallowed."""
         django_atomic = self.django_atomic
         self.django_atomic = None
+        writer_transaction = self.writer_transaction
+        self.writer_transaction = None
         try:
-            await sync_to_async(django_atomic.__exit__, thread_sensitive=True)(exception_type, exception, traceback)
+            if writer_transaction is not None:
+                await writer_transaction.end(exception_type, exception, traceback)
+            else:
+                await sync_to_async(django_atomic.__exit__, thread_sensitive=True)(exception_type, exception, traceback)
         finally:
             await self.end_outermost_block()
         # After the block's thread and write turn are given back: a callback
         # that writes would otherwise wait for a turn this block still holds.
         if self.callbacks_after_commit is not None:
             await run_async_callbacks(self.callbacks_after_commit)
+
+    async def start_on_the_writer(self, alias: str) -> None:
+        """Start the outermost block on djox's writer connection (see
+        `djox._writer_transactions`): wait for the write turn, send this
+        task's thread-sensitive work to the block's thread, and `BEGIN`.
+
+        Each step goes on `outermost_block`, which undoes them in reverse order.
+        """
+        steps = self.outermost_block
+        await steps.enter_async_context(_write_turns.transaction_alone(alias))
+        writer_transaction = _writer_transactions.WriterTransaction(alias, self.savepoint, self.durable)
+        # Closing a connection on the writer rolls back what is still open
+        # (the block failed before its end), and lets the writer go on.
+        steps.callback(writer_transaction.connection.close)
+        thread = _writer_transactions.BlockThread(writer_transaction)
+        steps.callback(thread.give_back)
+        await steps.enter_async_context(ThreadSensitiveContext(executor=thread))
+        thread_token = transaction_thread.set(thread)
+        steps.callback(transaction_thread.reset, thread_token)
+        block_token = _running.note_writer_transaction(alias, writer_transaction)
+        steps.callback(_running.writer_transactions.reset, block_token)
+        self.collect_async_callbacks()
+        await writer_transaction.begin()
+        self.writer_transaction = writer_transaction
+
+    def collect_async_callbacks(self) -> None:
+        """Start the list of async `on_commit()` callbacks the block's tasks add to."""
+        self.callbacks_after_commit = []
+        token = async_callbacks.set(self.callbacks_after_commit)
+        self.outermost_block.callback(async_callbacks.reset, token)
 
     async def start_outermost_block(self, alias: str) -> None:
         """Wait for the write turn, then give the block a pooled thread of its
@@ -171,9 +226,7 @@ class Atomic:
         await steps.enter_async_context(ThreadSensitiveContext(executor=thread))
         token = transaction_thread.set(thread)
         steps.callback(transaction_thread.reset, token)
-        self.callbacks_after_commit = []
-        callbacks_token = async_callbacks.set(self.callbacks_after_commit)
-        steps.callback(async_callbacks.reset, callbacks_token)
+        self.collect_async_callbacks()
 
     async def end_outermost_block(self) -> None:
         """Undo `start_outermost_block()` (nothing, for a nested block)."""

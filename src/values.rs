@@ -16,6 +16,8 @@
 //! | psycopg's `Json` and `Jsonb`      | text, the JSON they hold              |
 //! | psycopg's `Binary`                | blob, the bytes it holds              |
 //! | `list`, `tuple`                   | text, a Postgres array: `{"a","b"}`   |
+//! | psycopg's `Range`                 | text, a Postgres range: `[1,5)`       |
+//! | `dict`                            | text, an `hstore`: `"a"=>"1"`         |
 //!
 //! Postgres reads the text it gets as its column's type (`2024-05-01` into a
 //! `date` column), so these rules work for both backends. The last two rows
@@ -26,13 +28,14 @@
 //! without `detect_types`. On SQLite, Django's field converters do the rest
 //! (text to `datetime`, `1` to `True`...). Postgres returns typed values,
 //! which become `bool`, `Decimal`, `date`, `time`, `datetime`, `timedelta`
-//! and `uuid.UUID`, like psycopg returns them.
+//! and `uuid.UUID`, like psycopg returns them. An array is a `list`, a range
+//! is psycopg's `Range` (what Django's range fields hold), an `hstore` is a `dict`.
 
-use djox::{Rows, Value};
+use djox::{RangeValue, Rows, Value};
 use pyo3::exceptions::{PyOverflowError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBool, PyBytes, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 /// `decimal.Decimal`, looked up once (a module-level cache).
 static DECIMAL_CLASS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -131,6 +134,10 @@ fn rarer_value_from_python(value: &Bound<'_, PyAny>) -> PyResult<Value> {
     if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
         return Ok(Value::Text(array_text(value)?));
     }
+    // A dict is an `hstore`: Django's `HStoreField` sends a dict of strings.
+    if let Ok(pairs) = value.cast::<PyDict>() {
+        return Ok(Value::Text(hstore_text(pairs)?));
+    }
     Err(PyTypeError::new_err(format!(
         "djox can't store a value of type {} in the database",
         value.get_type().name()?
@@ -147,6 +154,9 @@ fn psycopg_wrapper_value(value: &Bound<'_, PyAny>) -> PyResult<Option<Value>> {
     let name = class.name()?;
     if module == "psycopg.types.json" && (name == "Json" || name == "Jsonb") {
         return Ok(Some(json_text(value)?));
+    }
+    if module == "psycopg.types.range" && name == "Range" {
+        return Ok(Some(Value::Text(range_text(value)?)));
     }
     if module == "psycopg.dbapi20" && name == "Binary" {
         // `Binary(data)` keeps `data` (bytes, a bytearray or a memoryview) in `.obj`.
@@ -171,18 +181,62 @@ fn array_text(items: &Bound<'_, PyAny>) -> PyResult<String> {
         } else if item.is_instance_of::<PyList>() || item.is_instance_of::<PyTuple>() {
             words.push(array_text(&item)?);
         } else {
-            let text = match value_from_python(&item)? {
-                Value::Text(text) => text,
-                Value::Boolean(boolean) => boolean.to_string(),
-                Value::Integer(number) => number.to_string(),
-                Value::Real(number) => format!("{number:?}"),
-                _ => item.str()?.to_str()?.to_owned(),
-            };
-            let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-            words.push(format!("\"{escaped}\""));
+            words.push(quoted_item_text(&item)?);
         }
     }
     Ok(format!("{{{}}}", words.join(",")))
+}
+
+/// One item of an array, bound of a range or key or value of an `hstore`, as
+/// the text Postgres reads, quoted: `"` and `\` are escaped with `\`.
+fn quoted_item_text(item: &Bound<'_, PyAny>) -> PyResult<String> {
+    let text = match value_from_python(item)? {
+        Value::Text(text) => text,
+        Value::Boolean(boolean) => boolean.to_string(),
+        Value::Integer(number) => number.to_string(),
+        Value::Real(number) => format!("{number:?}"),
+        _ => item.str()?.to_str()?.to_owned(),
+    };
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("\"{escaped}\""))
+}
+
+/// A psycopg `Range` as the text of a Postgres range: `[1,5)`, `(,5]` (no
+/// lower end), or `empty`. The range keeps its ends in `lower` and `upper`
+/// (`None` when it has none) and its brackets in `bounds`.
+fn range_text(range: &Bound<'_, PyAny>) -> PyResult<String> {
+    if range.getattr("isempty")?.is_truthy()? {
+        return Ok("empty".to_string());
+    }
+    let bounds: String = range.getattr("bounds")?.extract()?;
+    let mut ends = Vec::new();
+    for name in ["lower", "upper"] {
+        let end = range.getattr(name)?;
+        // An end that is missing is written as nothing: `[1,)`.
+        ends.push(if end.is_none() {
+            String::new()
+        } else {
+            quoted_item_text(&end)?
+        });
+    }
+    let mut brackets = bounds.chars();
+    let opening = brackets.next().unwrap_or('[');
+    let closing = brackets.next().unwrap_or(')');
+    Ok(format!("{opening}{},{}{closing}", ends[0], ends[1]))
+}
+
+/// A dict as the text of an `hstore`: `"a"=>"1", "b"=>NULL`.
+fn hstore_text(pairs: &Bound<'_, PyDict>) -> PyResult<String> {
+    let mut words = Vec::new();
+    for (key, value) in pairs.iter() {
+        let value_text = if value.is_none() {
+            "NULL".to_string()
+        } else {
+            quoted_item_text(&value)?
+        };
+        words.push(format!("{}=>{value_text}", quoted_item_text(&key)?));
+    }
+    Ok(words.join(","))
 }
 
 /// The JSON text inside psycopg's wrapper: `wrapper.dumps(wrapper.obj)`, or
@@ -216,8 +270,46 @@ pub fn value_to_python<'py>(py: Python<'py>, value: Value) -> PyResult<Bound<'py
         Value::DateTimeUtc(moment) => moment.into_pyobject(py)?.into_any(),
         Value::Duration(length) => length.into_pyobject(py)?.into_any(),
         Value::Uuid(uuid) => uuid.into_pyobject(py)?.into_any(),
+        Value::List(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(value_to_python(py, item)?)?;
+            }
+            list.into_any()
+        }
+        Value::Range(range) => range_to_python(py, *range)?,
+        Value::Hstore(pairs) => {
+            let dict = PyDict::new(py);
+            for (key, value) in pairs {
+                dict.set_item(key, value)?;
+            }
+            dict.into_any()
+        }
     };
     Ok(object)
+}
+
+/// A range as psycopg's `Range(lower, upper, bounds)`, the class Django's range
+/// fields use (`django.db.backends.postgresql.psycopg_any`). It needs psycopg
+/// installed, which Django's Postgres backend needs anyway.
+fn range_to_python<'py>(py: Python<'py>, range: RangeValue) -> PyResult<Bound<'py, PyAny>> {
+    let range_class = py.import("psycopg.types.range")?.getattr("Range")?;
+    if range.is_empty {
+        let keywords = PyDict::new(py);
+        keywords.set_item("empty", true)?;
+        return range_class.call((), Some(&keywords));
+    }
+    let lower = match range.lower {
+        Some(value) => value_to_python(py, value)?,
+        None => py.None().into_bound(py),
+    };
+    let upper = match range.upper {
+        Some(value) => value_to_python(py, value)?,
+        None => py.None().into_bound(py),
+    };
+    let opening = if range.lower_is_included { "[" } else { "(" };
+    let closing = if range.upper_is_included { "]" } else { ")" };
+    range_class.call1((lower, upper, format!("{opening}{closing}")))
 }
 
 /// One row as a Python tuple.
@@ -227,6 +319,14 @@ pub fn row_to_python<'py>(py: Python<'py>, row: Vec<Value>) -> PyResult<Bound<'p
         items.push(value_to_python(py, value)?);
     }
     PyTuple::new(py, items)
+}
+
+/// `(columns, rows)`: the column names as a list of strings, then all rows (see `rows_to_python()`).
+pub fn columns_and_rows_to_python(py: Python<'_>, rows: Rows) -> PyResult<Bound<'_, PyTuple>> {
+    // The names are copied first, because `rows_to_python()` takes `rows` whole.
+    let columns = PyList::new(py, &rows.columns)?;
+    let rows = rows_to_python(py, rows)?;
+    PyTuple::new(py, [columns.into_any(), rows.into_any()])
 }
 
 /// All rows as a Python list of tuples, like `cursor.fetchall()`.

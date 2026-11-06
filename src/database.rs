@@ -8,10 +8,10 @@
 //! Each method sends its statement to the backend right away and returns an
 //! `asyncio.Future` that the backend finishes when the answer arrives (see
 //! `answers.rs`), so Python's event loop is never blocked. The one exception
-//! is a *quick read* (`fetch_all` and `fetch_one` on SQLite): a small query
-//! the backend answers right away, within a limit (1 ms by default), because
-//! sending it to another thread would take longer than running it. Its
-//! Future is already finished when it is returned. A Future rather
+//! is a *quick read* or *write* (on SQLite): a small statement the backend
+//! runs right away, within a limit (1 ms by default), because sending it to
+//! another thread would take longer than running it. Its Future is already
+//! finished when it is returned. A Future rather
 //! than a coroutine: the statement is already on its way before anyone awaits
 //! it, so statements reach the database in the order the methods were called.
 
@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use djox::postgres::{PostgresDatabase, PostgresSettings, TlsMode};
-use djox::sqlite::{SqliteConnection, SqliteDatabase, SqliteSettings};
+use djox::sqlite::{SharedWriter, SqliteConnection, SqliteDatabase, SqliteSettings};
 use djox::{Database, Rows, Value};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -28,8 +28,8 @@ use pyo3::types::PyTuple;
 
 use crate::answers::{finished_future, future_for_answer, future_for_stream_answer};
 use crate::connection::PythonConnection;
-use crate::errors::to_python_error;
-use crate::values::{parameters_from_python, row_to_python, rows_to_python};
+use crate::errors::{NotSupportedError, to_python_error};
+use crate::values::{columns_and_rows_to_python, parameters_from_python, row_to_python, rows_to_python};
 
 /// A database used from async code. Make one with a backend's constructor,
 /// like `Database.sqlite("app.sqlite3")` or `Database.postgres("postgresql://localhost/app")`.
@@ -41,6 +41,8 @@ pub struct PythonDatabase {
     /// The backend. `Arc` is a shared pointer (like a Python reference), and
     /// `dyn Database` means "any type that implements the `Database` trait".
     backend: Arc<dyn Database>,
+    /// SQLite's writer connection, for `writer_connection()`; `None` on Postgres.
+    sqlite_writer: Option<Arc<SharedWriter>>,
     /// Where the database is, for `repr()`: a file path, or a server's address and database name.
     location: String,
 }
@@ -57,22 +59,28 @@ impl PythonDatabase {
     /// `quick_read_limit` is the most seconds a read may run right on the
     /// calling thread before it goes to a reader instead (see
     /// `crates/djox/src/sqlite/quick_reads.rs`); 0 turns quick reads off.
+    /// `quick_write_limit` is the same for a write, which otherwise goes to
+    /// the writer thread (see `crates/djox/src/sqlite/writer.rs`).
     ///
     /// `#[staticmethod]` is Python's `@staticmethod`. `#[pyo3(signature = ...)]`
     /// writes the Python signature, defaults and keyword-only `*` included.
     #[staticmethod]
-    #[pyo3(signature = (path, *, readers = None, timeout = 5.0, quick_read_limit = 0.001, prepare = None))]
+    #[pyo3(signature = (
+        path, *, readers = None, timeout = 5.0, quick_read_limit = 0.001, quick_write_limit = 0.001, prepare = None,
+    ))]
     fn sqlite(
         py: Python<'_>,
         path: PathBuf,
         readers: Option<usize>,
         timeout: f64,
         quick_read_limit: f64,
+        quick_write_limit: f64,
         prepare: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut settings = SqliteSettings::new(path.clone());
         settings.busy_timeout = seconds("timeout", timeout)?;
         settings.quick_read_limit = seconds("quick_read_limit", quick_read_limit)?;
+        settings.quick_write_limit = seconds("quick_write_limit", quick_write_limit)?;
         if let Some(reader_count) = readers {
             settings.reader_count = reader_count;
         }
@@ -108,6 +116,7 @@ impl PythonDatabase {
         }
         let backend = opened.map_err(to_python_error)?;
         Ok(PythonDatabase {
+            sqlite_writer: Some(backend.writer()),
             backend: Arc::new(backend),
             location,
         })
@@ -157,6 +166,7 @@ impl PythonDatabase {
             .map_err(to_python_error)?;
         Ok(PythonDatabase {
             backend: Arc::new(backend),
+            sqlite_writer: None,
             location,
         })
     }
@@ -175,6 +185,28 @@ impl PythonDatabase {
         }
         // `|py, rows: Rows| ...` is a closure, Rust's `lambda`.
         let (future, reply) = future_for_answer(py, |py, rows: Rows| Ok(rows_to_python(py, rows)?.into_any()))?;
+        self.backend.fetch_all(sql, parameters, reply);
+        Ok(future)
+    }
+
+    /// Runs a query and returns `(columns, rows)`: the column names, then
+    /// all the rows. Raw queries need the names, to know which column is which field.
+    #[pyo3(signature = (sql, parameters = None))]
+    fn fetch_all_with_columns<'py>(
+        &self,
+        py: Python<'py>,
+        sql: String,
+        parameters: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parameters = parameters_from_python(parameters)?;
+        if let Some(rows) = self.fetch_all_quickly(py, &sql, &parameters) {
+            return finished_future(py, columns_and_rows_to_python(py, rows)?.into_any());
+        }
+        let (future, reply) =
+            future_for_answer(
+                py,
+                |py, rows: Rows| Ok(columns_and_rows_to_python(py, rows)?.into_any()),
+            )?;
         self.backend.fetch_all(sql, parameters, reply);
         Ok(future)
     }
@@ -227,6 +259,10 @@ impl PythonDatabase {
         parameters: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let parameters = parameters_from_python(parameters)?;
+        // A quick write (see the module docs), when the backend can.
+        if let Some(executed) = py.detach(|| self.backend.execute_quickly(&sql, &parameters)) {
+            return finished_future(py, executed_to_python(py, executed)?);
+        }
         let (future, reply) = future_for_answer(py, executed_to_python)?;
         self.backend.execute(sql, parameters, reply);
         Ok(future)
@@ -261,6 +297,27 @@ impl PythonDatabase {
     #[getter]
     fn closed(&self) -> bool {
         self.backend.is_closed()
+    }
+
+    /// A `djox.Connection` on SQLite's writer connection itself, for
+    /// `djox.atomic()`: its transaction runs on the connection the writer
+    /// thread uses, so its small statements can run right on the calling
+    /// thread (`Cursor.execute_quickly()`), and no other statement runs on
+    /// the writer until it ends (see `crates/djox/src/sqlite/writer.rs`).
+    ///
+    /// Closing it rolls back its open transaction, and leaves the writer
+    /// connection open: that belongs to the database. Postgres has no writer
+    /// connection: `NotSupportedError`.
+    fn writer_connection(&self) -> PyResult<PythonConnection> {
+        match &self.sqlite_writer {
+            Some(writer) => Ok(PythonConnection::share_writer(
+                Arc::clone(writer),
+                self.location.clone(),
+            )),
+            None => Err(NotSupportedError::new_err(
+                "only a SQLite database has a writer connection",
+            )),
+        }
     }
 
     /// The backend's short name: `"sqlite"` or `"postgres"`.

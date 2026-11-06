@@ -3,7 +3,7 @@
     cd benchmarks && uv run python run.py
 
 Every contender runs on its own copy of the same SQLite file (10,000 books,
-each with 3 chapters, for `select_related()` and `prefetch_related()`):
+each with 3 chapters and 2 of 20 tags, for `select_related()` and `prefetch_related()`):
 djox and Python's `sqlite3` bundle separate copies of SQLite, which must not
 open the same file in one process. Every contender uses the same SQLite
 settings as djox (WAL mode, `synchronous=NORMAL`), so writes compare fairly.
@@ -72,9 +72,23 @@ django.setup()
 
 from asgiref.sync import sync_to_async  # noqa: E402
 from django.db import connection, models, transaction  # noqa: E402  (needs the settings above)
-from django.db.models import Count, F, Sum  # noqa: E402
+from django.db.models import Count, F, Prefetch, Sum  # noqa: E402
 
 import djox  # noqa: E402
+
+
+class Tag(models.Model):
+    """For `prefetch_related("tags")`."""
+
+    name = models.CharField(max_length=50)
+
+    # The default manager is djox's: djox prefetches a many-to-many field on the fast
+    # lane only for a model whose default manager is a `djox.Manager`.
+    objects = djox.Manager()
+    django_objects = models.Manager()
+
+    class Meta:
+        app_label = "shelf"
 
 
 class Book(models.Model):
@@ -82,6 +96,7 @@ class Book(models.Model):
     pages = models.IntegerField(db_index=True)
     price = models.DecimalField(max_digits=6, decimal_places=2)
     published = models.DateTimeField()
+    tags = models.ManyToManyField(Tag, related_name="books")
 
     objects = models.Manager()
     djox_objects = djox.Manager()
@@ -91,7 +106,7 @@ class Book(models.Model):
 
 
 class Chapter(models.Model):
-    """For `select_related("book")` and `prefetch_related("chapters")`."""
+    """For `select_related("book")`, `prefetch_related("book")` and `prefetch_related("chapters")`."""
 
     book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="chapters")
     number = models.IntegerField()
@@ -105,6 +120,7 @@ class Chapter(models.Model):
 
 
 CHAPTERS_PER_BOOK = 3
+TAG_COUNT = 20  # each book has two
 
 
 # ---------------------------------------------------------------- the database
@@ -115,12 +131,19 @@ def create_database() -> None:
     with connection.cursor() as cursor:
         cursor.execute("PRAGMA journal_mode = WAL")  # stored in the file, so every copy has it
     with connection.schema_editor() as editor:
-        editor.create_model(Book)
+        editor.create_model(Tag)
+        editor.create_model(Book)  # and the table that links it to its tags
         editor.create_model(Chapter)
     published = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
     Book.objects.bulk_create(
         Book(title=f"Book {number}", pages=number % 1000, price=decimal.Decimal("9.99"), published=published)
         for number in range(BOOK_COUNT)
+    )
+    Tag.objects.bulk_create(Tag(name=f"Tag {number}") for number in range(TAG_COUNT))
+    Book.tags.through.objects.bulk_create(
+        Book.tags.through(book_id=book_id, tag_id=tag_id)
+        for book_id in range(1, BOOK_COUNT + 1)
+        for tag_id in {book_id % TAG_COUNT + 1, (book_id + 7) % TAG_COUNT + 1}
     )
     Chapter.objects.bulk_create(
         Chapter(book_id=book_id, number=number, title=f"Chapter {number}")
@@ -173,14 +196,29 @@ def two_inserts_in_a_transaction(alias: str) -> None:
         Book.objects.using(alias).create(**new_book())
 
 
-def related_querysets(books: models.Manager, chapters: models.Manager) -> dict[str, Callable[[], models.QuerySet]]:
+def related_querysets(
+    books: models.Manager, chapters: models.Manager, tags: models.Manager
+) -> dict[str, Callable[[], models.QuerySet]]:
     """The `select_related()` and `prefetch_related()` scenarios, as querysets
     of the given managers (the same for every ORM contender)."""
     return {
         "20 chapters with their book": lambda: chapters.select_related("book").filter(number=2).order_by("id")[:20],
         "1,000 chapters with their book": lambda: chapters.select_related("book").order_by("id")[:1000],
+        # The chapters' queryset comes from the contender's manager: `Chapter`'s default
+        # manager is Django's, so a plain `"chapters"` would always be prefetched by Django.
         "20 books with their chapters": lambda: (
-            books.filter(pages__gt=500).order_by("-pages", "id").prefetch_related("chapters")[:20]
+            books.filter(pages__gt=500)
+            .order_by("-pages", "id")
+            .prefetch_related(Prefetch("chapters", queryset=chapters.all()))[:20]
+        ),
+        # A foreign key forwards, then a many-to-many field, prefetched the same way.
+        "20 chapters with their book (prefetched)": lambda: (
+            chapters.filter(number=2).order_by("id").prefetch_related(Prefetch("book", queryset=books.all()))[:20]
+        ),
+        "20 books with their tags": lambda: (
+            books.filter(pages__gt=500)
+            .order_by("-pages", "id")
+            .prefetch_related(Prefetch("tags", queryset=tags.all()))[:20]
         ),
     }
 
@@ -216,7 +254,7 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("default"),
         "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
-        **listed(related_querysets(Book.objects, Chapter.objects)),
+        **listed(related_querysets(Book.objects, Chapter.objects, Tag.django_objects)),
         **listed(expression_querysets(Book.objects)),
         "sum of pages": lambda: sum_of_pages(Book.objects),
         "update with F()": lambda: add_a_page(Book.objects),
@@ -257,7 +295,7 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
             sync_to_async(lambda: two_inserts_in_a_transaction("default")),
         ),
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
-        **fetched(related_querysets(Book.objects, Chapter.objects)),
+        **fetched(related_querysets(Book.objects, Chapter.objects, Tag.django_objects)),
         **fetched(expression_querysets(Book.objects)),
         "sum of pages": lambda: Book.objects.filter(pages__gt=500).aaggregate(total=Sum("pages")),
         "update with F()": lambda: Book.objects.filter(id=7).aupdate(pages=F("pages") + 1),
@@ -297,7 +335,9 @@ def make_djox() -> dict[str, Callable[[], Awaitable[object]]]:
     }
 
 
-def make_djox_sync(manager: models.Manager, chapter_manager: models.Manager) -> dict[str, Callable[[], object]]:
+def make_djox_sync(
+    manager: models.Manager, chapter_manager: models.Manager, tag_manager: models.Manager
+) -> dict[str, Callable[[], object]]:
     books = manager.db_manager("djox")
     return {
         "get one book by id": lambda: books.get(id=7),
@@ -310,7 +350,7 @@ def make_djox_sync(manager: models.Manager, chapter_manager: models.Manager) -> 
         ),
         "two inserts in a transaction": lambda: two_inserts_in_a_transaction("djox"),
         "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
-        **listed(related_querysets(books, chapter_manager.db_manager("djox"))),
+        **listed(related_querysets(books, chapter_manager.db_manager("djox"), tag_manager.db_manager("djox"))),
         **listed(expression_querysets(books)),
         "sum of pages": lambda: sum_of_pages(books),
         "update with F()": lambda: add_a_page(books),
@@ -340,7 +380,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "two inserts in a transaction": two_inserts,
         "one insert, or two in a transaction": alternating(lambda: books.acreate(**new_book()), two_inserts),
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
-        **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"))),
+        **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"), Tag.objects.db_manager("djox"))),
         **fetched(expression_querysets(books)),
         "sum of pages": lambda: books.filter(pages__gt=500).aaggregate(total=Sum("pages")),
         "update with F()": lambda: books.filter(id=7).aupdate(pages=F("pages") + 1),
@@ -398,6 +438,8 @@ REPEATS = {
     "20 chapters with their book": 1000,
     "1,000 chapters with their book": 30,
     "20 books with their chapters": 500,
+    "20 chapters with their book (prefetched)": 500,
+    "20 books with their tags": 500,
     "10 books with a chapter count": 500,
     "10 books by chapter title": 500,
     "sum of pages": 300,
@@ -419,8 +461,8 @@ def main() -> None:
     # Sync code must run outside the event loop (Django refuses sync queries inside it).
     for name, operations in [
         ("django sync", make_django_sync()),
-        ("djox sync", make_djox_sync(Book.objects, Chapter.objects)),
-        ("djox.Manager sync", make_djox_sync(Book.djox_objects, Chapter.djox_objects)),
+        ("djox sync", make_djox_sync(Book.objects, Chapter.objects, Tag.django_objects)),
+        ("djox.Manager sync", make_djox_sync(Book.djox_objects, Chapter.djox_objects, Tag.objects)),
         ("sqlite3", make_sqlite3()),
     ]:
         results[name] = {

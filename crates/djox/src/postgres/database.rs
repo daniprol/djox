@@ -15,7 +15,7 @@ use super::errors::to_djox_error;
 use super::placeholders::to_numbered_placeholders;
 use super::settings::PostgresSettings;
 use super::stream::start_stream;
-use super::values::{Column, Parameter};
+use super::values::{Column, Parameter, integer_types, is_missing_operator};
 
 /// How many statements a connection keeps prepared. Past that the cache
 /// starts over, so a program that writes new SQL all the time (an `IN`
@@ -212,7 +212,7 @@ impl Drop for PostgresDatabase {
 async fn fetch_all(pool: &Pool, sql: &str, parameters: &[Value]) -> Result<Rows> {
     // `.await` waits without blocking the thread, like in Python. `?` returns the error now.
     let connection = pool.get().await.map_err(pool_error)?;
-    let statement = prepare(&connection, sql).await?;
+    let statement = prepare(&connection, sql, parameters).await?;
     let wrapped = wrap_parameters(parameters);
     let rows = connection
         .query(&statement, &parameter_references(&wrapped))
@@ -224,7 +224,7 @@ async fn fetch_all(pool: &Pool, sql: &str, parameters: &[Value]) -> Result<Rows>
 /// Runs a statement that changes data on a pooled connection.
 async fn execute(pool: &Pool, sql: &str, parameters: &[Value]) -> Result<Executed> {
     let connection = pool.get().await.map_err(pool_error)?;
-    let statement = prepare(&connection, sql).await?;
+    let statement = prepare(&connection, sql, parameters).await?;
     let wrapped = wrap_parameters(parameters);
     let rows_affected = connection
         .execute(&statement, &parameter_references(&wrapped))
@@ -269,14 +269,28 @@ async fn execute_many(pool: &Pool, sql: &str, parameter_lists: &[Vec<Value>]) ->
 /// Preparing sends the SQL to Postgres once; it answers with the types of
 /// the parameters and columns. Later runs send only the parameters: one
 /// round trip instead of two.
-async fn prepare(connection: &deadpool_postgres::Client, sql: &str) -> Result<Statement> {
+///
+/// If Postgres can't find an operator for the parameters it inferred
+/// (Django's `XOR` filters), the statement is prepared again with the
+/// integers declared as `bigint` (see `integer_types`).
+async fn prepare(connection: &deadpool_postgres::Client, sql: &str, parameters: &[Value]) -> Result<Statement> {
     if connection.statement_cache.size() >= MOST_PREPARED_STATEMENTS {
         connection.statement_cache.clear();
     }
-    connection
-        .prepare_cached(&to_numbered_placeholders(sql))
-        .await
-        .map_err(to_djox_error)
+    let numbered_sql = to_numbered_placeholders(sql);
+    let error = match connection.prepare_cached(&numbered_sql).await {
+        Ok(statement) => return Ok(statement),
+        Err(error) => error,
+    };
+    if is_missing_operator(&error)
+        && let Some(types) = integer_types(parameters)
+    {
+        return connection
+            .prepare_typed_cached(&numbered_sql, &types)
+            .await
+            .map_err(to_djox_error);
+    }
+    Err(to_djox_error(error))
 }
 
 /// Each value wrapped as a [`Parameter`] the driver can send.

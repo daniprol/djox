@@ -1,0 +1,64 @@
+{
+  "machine": "Linux x86_64, 4 CPUs",
+  "python": "3.13.18",
+  "django": "6.1.2",
+  "django_bolt": "0.13.0",
+  "processes": 1,
+  "connections": 32,
+  "rounds": 3,
+  "seconds_per_endpoint": 5.0,
+  "results": {
+    "django": {
+      "get one book": {
+        "requests_per_second": 1207.7832763891638,
+        "p50_ms": 26.027883000000003,
+        "p99_ms": 48.851704000000005,
+        "failed": 0
+      },
+      "list a page, with authors": {
+        "requests_per_second": 529.7623054011929,
+        "p50_ms": 60.990120000000005,
+        "p99_ms": 93.825854,
+        "failed": 0
+      },
+      "read a book, in a transaction": {
+        "requests_per_second": 567.9336623976156,
+        "p50_ms": 54.897573,
+        "p99_ms": 85.855719,
+        "failed": 0
+      },
+      "create a book": {
+        "requests_per_second": 1318.8984075078715,
+        "p50_ms": 22.842473,
+        "p99_ms": 45.552583,
+        "failed": 0
+      }
+    },
+    "djox": {
+      "get one book": {
+        "requests_per_second": 2466.4682610466543,
+        "p50_ms": 12.177261999999999,
+        "p99_ms": 23.648228,
+        "failed": 0
+      },
+      "list a page, with authors": {
+        "requests_per_second": 1362.9387691657882,
+        "p50_ms": 21.899969,
+        "p99_ms": 48.383559999999996,
+        "failed": 0
+      },
+      "read a book, in a transaction": {
+        "requests_per_second": 916.3642092548257,
+        "p50_ms": 33.07549,
+        "p99_ms": 69.094606,
+        "failed": 0
+      },
+      "create a book": {
+        "requests_per_second": 1755.5740411259067,
+        "p50_ms": 17.752178,
+        "p99_ms": 33.40376199999999,
+        "failed": 0
+      }
+    }
+  }
+}

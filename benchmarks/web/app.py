@@ -18,7 +18,8 @@ The same endpoints three times, and the same code on both stacks:
 `ENGINE`, and `"djox"` in `INSTALLED_APPS`, which switches every model to djox
 (`DJOX_MODELS`). `DATABASE` is `sqlite` or `postgres` (`DJOX_POSTGRES_URL`).
 `SERVER` (`wsgi` or `asgi`) picks how connections are kept between requests.
-Under ASGI, djox serves with its own handler (`djox.asgi`), as its docs advise.
+Under ASGI, djox serves with its own handler (`djox.asgi`), as its docs advise
+(`HANDLER=django` or `djox` picks one by hand).
 
 `python app.py setup` creates the tables and fills them: 100 authors, 10,000 books.
 """
@@ -37,6 +38,7 @@ from django.conf import settings
 STACK = os.environ.get("STACK", "django")  # "django" or "djox"
 SERVER = os.environ.get("SERVER", "wsgi")  # "wsgi" or "asgi"
 DATABASE = os.environ.get("DATABASE", "sqlite")  # "sqlite" or "postgres"
+HANDLER = os.environ.get("HANDLER", STACK)  # the ASGI handler: "django" or "djox" (`djox.asgi`)
 SQLITE_FILE = Path(os.environ.get("SQLITE_FILE", "/tmp/djox-web-benchmark.sqlite3"))
 POSTGRES_URL = os.environ.get("DJOX_POSTGRES_URL", "postgresql://postgres:postgres@localhost/postgres")
 PAGE_SIZE = 20
@@ -53,9 +55,10 @@ def database_settings() -> dict[str, object]:
             "NAME": SQLITE_FILE,
             # Both stacks use WAL mode (stored in the file at setup) and synchronous=NORMAL, like djox.
             "OPTIONS": {"init_command": "PRAGMA synchronous = NORMAL"},
-            # Keep the connection between requests, as in production. Not under ASGI: there each
-            # request gets connections of its own, and Django's docs say to turn this off.
-            "CONN_MAX_AGE": None if SERVER == "wsgi" else 0,
+            # Keep the connection between requests, as in production. Not under Django's ASGI handler:
+            # there each request gets a new thread, so new connections, and Django's docs say to turn
+            # this off. djox's handler runs sync code on pooled threads, which keep theirs.
+            "CONN_MAX_AGE": None if SERVER == "wsgi" or HANDLER == "djox" else 0,
         }
     url = urlparse(POSTGRES_URL)
     return {
@@ -99,7 +102,7 @@ from django.db.models import Avg, Count, F, Max, Sum  # noqa: E402
 from django.http import HttpRequest, JsonResponse  # noqa: E402
 from django.urls import include, path  # noqa: E402
 from rest_framework import decorators, response, routers, serializers, viewsets  # noqa: E402
-from shop.models import Author, Book  # noqa: E402
+from shop.models import Author, Book, Read  # noqa: E402
 
 
 def book_as_dict(book: Book) -> dict[str, object]:
@@ -288,7 +291,7 @@ urlpatterns = [
 ]
 
 wsgi_app = get_wsgi_application()
-if STACK == "djox":
+if HANDLER == "djox":
     from djox.asgi import get_asgi_application as get_djox_asgi_application
 
     asgi_app = get_djox_asgi_application()
@@ -308,10 +311,11 @@ def setup() -> None:
             cursor.execute("PRAGMA journal_mode = WAL")  # stored in the file
     else:
         with connection.cursor() as cursor:
-            cursor.execute("DROP TABLE IF EXISTS shop_book, shop_author")
+            cursor.execute("DROP TABLE IF EXISTS shop_read, shop_book, shop_author")
     with connection.schema_editor() as editor:
         editor.create_model(Author)
         editor.create_model(Book)
+        editor.create_model(Read)
     authors = Author.objects.bulk_create(Author(name=f"Author {number}") for number in range(AUTHOR_COUNT))
     published = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
     Book.objects.bulk_create(

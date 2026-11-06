@@ -120,6 +120,10 @@ them, and it should teach them both along the way.
   Django's single sync thread. Each pooled thread runs Django's
   `close_old_connections()` once per request, so `CONN_MAX_AGE` works.
   Related managers (`author.books.aadd()`) run there too (`related.py`).
+- **The ASGI handler** (`src/djox/asgi.py`): Django's `ASGIHandler`, sending
+  the request signals on the event loop when they can't block
+  (`_request_signals.py`), and running each request's sync code on a pooled
+  thread (`_request_threads.py`) instead of a new thread per request.
 - **Write turns** (`src/djox/_write_turns.py`): SQLite has one writer, so
   djox's plain writes (its writer thread) and transactions (a Django
   connection each) take turns in asyncio, like a readers-writer lock, instead

@@ -1,9 +1,11 @@
 # Serve with ASGI
 
-Django's ASGI handler hops to a worker thread twice per request, for its
-`request_started` and `request_finished` signals: about 1 ms on a small
+Django's ASGI handler starts a new thread for every request: for its
+`request_started` and `request_finished` signals, and for the request's sync
+code (a sync view, sync middleware). That costs about 1 ms on a small
 machine, often more than the view. djox's handler sends the same signals
-right on the event loop when that can't block it.
+right on the event loop when that can't block it, and runs sync code on a
+small pool of threads it keeps.
 
 ```python
 # asgi.py
@@ -30,13 +32,24 @@ Nothing you can see, but speed:
 - **On a thread, like Django, otherwise**: a sync view or sync middleware
   (its connections must be closed on its thread), a receiver of your own, a
   cache that closes connections (memcached, Redis), a file response.
+- **One thread per request for sync code, like Django**, but a pooled one:
+  taken when the request first runs sync code, given back when it ends.
+- **`CONN_MAX_AGE` works under ASGI.** Django's docs say to turn persistent
+  connections off under ASGI, since each request's new thread opens new
+  connections. A pooled thread keeps its connections between requests, and
+  checks them when a request starts and finishes, like under WSGI.
 
-An async view on djox, on the cloud VM djox is tested on:
+On the cloud VM djox is tested on, the same djox app and views, only the
+handler changes (µs per request, one at a time, in the process;
+[benchmarks](https://github.com/daniprol/djox/blob/main/benchmarks/README.md#asgi-handlers)):
 
 | Request | Django's handler | djox's handler |
 |---------|------------------|----------------|
-| An empty async view | 1,300 µs | 160 µs |
-| An async view reading one book | 1,700 µs | 470 µs |
+| An async view reading one book | 1,524 µs | 266 µs |
+| A sync view reading one book | 2,719 µs | 797 µs |
+
+Sync views are still faster under WSGI: under ASGI, each one hops to a
+thread for the view and again to close its connections.
 
 ## Good to know
 

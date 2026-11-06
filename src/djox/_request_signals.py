@@ -36,6 +36,7 @@ from django.db import close_old_connections, reset_queries
 from django.dispatch import Signal
 from django.http import HttpRequest, HttpResponseBase
 
+from djox._request_threads import RequestThread
 from djox._threads import note_request
 
 
@@ -107,18 +108,25 @@ def always() -> bool:
 
 
 def ran_no_sync_code() -> bool:
-    """Whether this request never started its own thread for sync code.
+    """Whether this request never ran sync code on a thread of its own.
 
     Django's handler gives each request a `ThreadSensitiveContext`: the first
     `sync_to_async()` call of the request starts a thread for it, and every
-    later one runs there. That thread holds the request's sync database
-    connections, which `close_old_connections()` must close on it.
+    later one runs there. djox's handler gives it a `RequestContext`, whose
+    thread is taken from djox's pool on its first use. That thread holds the
+    request's sync database connections, which `close_old_connections()`
+    must close on it.
     """
-    # asgiref's: the request's context, and the threads started for contexts.
+    # asgiref's: the request's context, and the threads given to contexts.
     request_context = SyncToAsync.thread_sensitive_context.get(None)
     if request_context is None:
         return False  # outside a request's context: sync code went to a shared thread
-    return request_context not in SyncToAsync.context_to_thread_executor
+    request_thread = SyncToAsync.context_to_thread_executor.get(request_context)
+    if request_thread is None:
+        return True  # Django's handler: no thread started yet
+    if isinstance(request_thread, RequestThread):
+        return not request_thread.started  # djox's handler: the pooled thread not taken yet
+    return False
 
 
 def no_cache_to_close() -> bool:

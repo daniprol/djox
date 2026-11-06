@@ -6,13 +6,17 @@ break comes with a migration note.
 
 ## [Unreleased]
 
-- **Async `on_commit()` callbacks**: `await djox.on_commit(send_email)` accepts an `async def`, awaited after the commit.
-
 ### Added
 
+- **Async `on_commit()` callbacks**: `await djox.on_commit(send_email)` accepts an `async def`, awaited after the commit.
+- **`Manager.araw()`**: Django's `raw()` for async code. `await Book.objects.araw(sql, params)` gives the
+  instances, and `async for` works too. djox runs the SQL and Django builds the instances (columns matched to
+  fields, `translations`, extra columns as attributes). `djox.Database.fetch_all_with_columns()` gives the
+  column names it needs.
 - **`djox.asgi`**: Django's ASGI handler, sending `request_started` and `request_finished` on the event loop
   when that can't block it, instead of hopping to a thread twice per request (an empty async view: 1.3 ms to
-  0.16 ms).
+  0.16 ms). A request's sync code (a sync view, sync middleware) runs on one of djox's pooled threads instead
+  of a new thread per request, so `CONN_MAX_AGE` keeps connections under ASGI too.
 - **Quick SQLite reads**: a small async read runs right on the calling thread, stopped after
   `quick_read_limit` (a new option, 1 ms) and sent to a reader then (`aget()`: 174 µs to 52 µs).
 - **The fast lane takes more**: `Q()` objects, `exclude()`, and names through foreign keys and one-to-one
@@ -22,11 +26,28 @@ break comes with a migration note.
   (`aggregate()` and `aaggregate()` too), `update()` with `F()`, `distinct()`, `values()` with expressions,
   and filters through reverse and many-to-many relations take the fast lane (a `Count()` annotation: 670 µs
   to 148 µs; `aaggregate()`: 465 µs to 173 µs; `aupdate(pages=F("pages") + 1)`: 495 µs to 169 µs).
+- **Prefetching on the fast lane**: the query `prefetch_related()` runs for a reverse foreign key (an
+  author's books) reuses Django's SQL for its shape and Rust builds the objects (20 books with their
+  chapters: 1,260 µs to 840 µs sync). It does the same for a foreign key forwards (the author of each book:
+  874 µs to 325 µs sync) and a many-to-many field (the tags of each book: 1,112 µs to 742 µs sync). A
+  many-to-many field needs a djox default manager on the related model and a queryset with no calls.
 - **New objects on the fast lane**: `create()`, `acreate()` and `djox.Model.asave()` of a new object reuse the
   `INSERT` Django wrote for the model's first one (`acreate()`: 502 µs to 269 µs).
+- **Quick SQLite writes**: a small async write (`aupdate()` of one row, `acreate()`, a fast `adelete()`) runs
+  right on the calling thread, on djox's writer connection, when the writer is free. It never waits for a
+  lock, and is stopped after `quick_write_limit` (a new option, 1 ms) and sent to the writer thread then.
+- **`djox.atomic()` on SQLite runs on djox's writer connection**: `BEGIN`, the block's statements and `COMMIT`
+  run on the event loop's thread when they are quick, with no thread round trip. Django joins the block only
+  when code inside needs Django's sync connection (`aget_or_create()`, a nested block, `djox.on_commit()`,
+  `sync_to_async()`). `Database.writer_connection()` and `Cursor.execute_quickly()` are what it runs on.
 - **TLS on Postgres**: djox's async connections are encrypted and checked like libpq's, with the same
   `OPTIONS` (`sslmode` from `disable` to `verify-full`, `sslrootcert`, `sslcert`, `sslkey`), also as arguments
   of `djox.Database.postgres()`. Built on rustls: nothing to install.
+- **Arrays, ranges and `hstore` from async Postgres code**: they come back as a `list`, psycopg's `Range` and
+  a `dict`, and lists, ranges and dicts work as parameters, so Django's `ArrayField`, range fields and
+  `HStoreField` filter in async code.
+- **Tests of async code in a sync transaction** that `TestCase` didn't open (pytest-django's `django_db`,
+  `async_to_sync()` inside `atomic()`).
 
 ### Changed
 
@@ -36,6 +57,8 @@ break comes with a migration note.
 
 ### Fixed
 
+- **`XOR` filters on Postgres**: Django's `XOR` sums `CASE` results whose numbers djox sent as text, so
+  Postgres refused them ("operator does not exist: text + text").
 - `acreate()` now calls a model's own `save()`.
 - An `INSERT ... RETURNING` sent to `fetch_all()` goes straight to SQLite's writer thread, not through a
   reader.

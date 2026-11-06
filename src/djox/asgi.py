@@ -1,4 +1,4 @@
-"""`djox.asgi`: Django's ASGI handler, without thread hops for its request signals.
+"""`djox.asgi`: Django's ASGI handler, without a new thread per request.
 
 ```python
 # asgi.py
@@ -24,6 +24,11 @@ An async view that uses djox (or no database) is in that case. A sync
 view, sync middleware or a receiver of your own makes the handler hop to a
 thread, exactly like Django's.
 
+The sync code of a request (a sync view, sync middleware) runs on one
+thread, like in Django, but on one of djox's pooled threads instead of a new
+thread per request (`djox._request_threads`). The thread keeps its database
+connections between requests, so `CONN_MAX_AGE` works under ASGI too.
+
 Everything else is Django's `ASGIHandler`: reading the body, middleware,
 views, sending the response, a client that disconnects early.
 """
@@ -38,6 +43,7 @@ from django.core.handlers import asgi
 from django.urls import set_script_prefix
 
 from djox import _request_signals
+from djox._request_threads import RequestContext
 
 
 def get_asgi_application() -> "ASGIHandler":
@@ -51,8 +57,17 @@ class ResponseSent(Exception):  # noqa: N818  (a signal between two lines of cod
 
 
 class ASGIHandler(asgi.ASGIHandler):
-    """Django's `ASGIHandler`, sending the request signals without thread hops
-    when it can (see the module docs)."""
+    """Django's `ASGIHandler`, with a pooled thread for each request's sync
+    code, and the request signals sent without thread hops when they can be
+    (see the module docs)."""
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        """Serve one ASGI connection: Django's entry point, with djox's `RequestContext`."""
+        if scope["type"] != "http":
+            raise ValueError(f"Django can only handle ASGI/HTTP connections, not {scope['type']}.")
+        # Django uses asgiref's `ThreadSensitiveContext()` here, which starts a new thread.
+        async with RequestContext():
+            await self.handle(scope, receive, send)
 
     async def handle(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         """Handle one HTTP request: Django's steps, in Django's order."""

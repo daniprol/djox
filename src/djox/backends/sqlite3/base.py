@@ -46,6 +46,9 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
         self.execute_wrappers.append(hooks.execute_with_hooks)
         # The `OPTIONS` last read, and what they gave (see `options()`).
         self.options_read: tuple[dict[str, Any], SqliteOptions] | None = None
+        # Set while Django's `atomic()` joins a transaction a `djox.atomic()`
+        # block already began on djox's writer connection (see `djox._writer_transactions`).
+        self.joins_open_transaction = False
 
     def get_connection_params(self) -> dict[str, Any]:
         """Read and check the settings. Django calls this before each new connection."""
@@ -75,6 +78,13 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
         assert self.connection is not None, "Django opens the connection before changing autocommit"
         with self.wrap_database_errors:
             self.connection.autocommit = autocommit
+
+    def _start_transaction_under_autocommit(self) -> None:
+        """Django's `BEGIN` when the outermost `atomic()` starts, unless it
+        joins a transaction that is open already (see `joins_open_transaction`)."""
+        if self.joins_open_transaction:
+            return
+        super()._start_transaction_under_autocommit()  # type: ignore[misc]  # not in django-stubs
 
     def set_autocommit(self, autocommit: bool, force_begin_transaction_with_broken_autocommit: bool = False) -> None:
         """Django's `set_autocommit()`, which `atomic()` calls when the
@@ -113,6 +123,7 @@ class DatabaseWrapper(DjoxEngine, base.DatabaseWrapper):
             readers=options.readers,
             timeout=options.timeout,
             quick_read_limit=options.quick_read_limit,
+            quick_write_limit=options.quick_write_limit,
             prepare=prepare,
         )
 

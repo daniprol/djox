@@ -7,6 +7,9 @@
 //! `djox.Connection` (used by Django's sync ORM) calls these methods on the
 //! caller's thread, after letting other Python threads run.
 
+use std::os::raw::c_int;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::Timelike; // `.nanosecond()` on times and datetimes
@@ -33,11 +36,27 @@ pub enum Access {
     Reader,
 }
 
+/// How many pages SQLite's write-ahead log may grow to before it is copied
+/// back into the database file (a *checkpoint*). It is SQLite's own default.
+const PAGES_BEFORE_A_CHECKPOINT: c_int = 1000;
+
 /// One open SQLite connection.
 pub struct SqliteConnection {
     /// `pub(super)` means "visible to the other files of the `sqlite` folder"
     /// (`functions.rs` registers SQL functions on it), but not outside it.
     pub(super) connection: rusqlite::Connection,
+    /// How long the connection waits for a lock held by another connection.
+    busy_timeout: Duration,
+}
+
+/// What a statement run with [`SqliteConnection::run_without_waiting`] came to.
+pub enum QuickOutcome {
+    /// It ran: here is its output, or the error it failed with.
+    Ran(Result<StatementOutput>),
+    /// It didn't run to the end: it would have had to wait for a lock, or it
+    /// ran out of time and SQLite stopped it. Nothing was changed; run it
+    /// again the usual way.
+    GaveUp,
 }
 
 /// What a statement run with [`SqliteConnection::run`] gave back.
@@ -95,7 +114,10 @@ impl SqliteConnection {
                 .execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")
                 .map_err(to_djox_error)?;
         }
-        Ok(SqliteConnection { connection })
+        Ok(SqliteConnection {
+            connection,
+            busy_timeout: settings.busy_timeout,
+        })
     }
 
     /// Runs any one statement and returns what it gave back: rows, the number
@@ -165,19 +187,27 @@ impl SqliteConnection {
 
     /// Runs a statement in SQLite's `?` style and collects its rows.
     fn rows_of(&mut self, sql: &str, parameters: &[Value]) -> Result<Rows> {
+        self.sqlite_rows_of(sql, parameters).map_err(to_djox_error)
+    }
+
+    /// Like [`SqliteConnection::rows_of`], with SQLite's own error, which
+    /// tells why a statement stopped ([`SqliteConnection::run_without_waiting`] needs that).
+    fn sqlite_rows_of(&mut self, sql: &str, parameters: &[Value]) -> rusqlite::Result<Rows> {
         // `prepare_cached` compiles the SQL the first time and reuses it after.
         // Compiling is often slower than running a small query.
-        let mut statement = self.connection.prepare_cached(sql).map_err(to_djox_error)?;
+        let mut statement = self.connection.prepare_cached(sql)?;
         let columns: Vec<String> = statement.column_names().map(String::from).collect();
         let column_count = columns.len();
 
         let mut rows = Vec::new();
-        let mut cursor = statement
-            .query(params_from_iter(parameters.iter().map(to_sqlite)))
-            .map_err(to_djox_error)?;
+        let mut cursor = statement.query(params_from_iter(parameters.iter().map(to_sqlite)))?;
         // `while let Some(row) = ...` loops until `next()` returns `None`: no more rows.
-        while let Some(row) = cursor.next().map_err(to_djox_error)? {
-            rows.push(values_of(row, column_count)?);
+        while let Some(row) = cursor.next()? {
+            let mut values = Vec::with_capacity(column_count);
+            for index in 0..column_count {
+                values.push(from_sqlite(row.get_ref(index)?));
+            }
+            rows.push(values);
         }
         Ok(Rows { columns, rows })
     }
@@ -294,6 +324,91 @@ impl SqliteConnection {
         self.connection.busy_timeout(Duration::ZERO).map_err(to_djox_error)
     }
 
+    /// Whether a statement in SQLite's `?` style changes the database (like
+    /// [`SqliteConnection::statement_writes`], for SQL whose `%` are not placeholders).
+    pub fn statement_as_written_writes(&mut self, sql: &str) -> Result<bool> {
+        let statement = self.connection.prepare_cached(sql).map_err(to_djox_error)?;
+        Ok(!statement.readonly())
+    }
+
+    /// Whether a statement in SQLite's `?` style returns rows (`SELECT`, `... RETURNING`).
+    pub fn statement_as_written_returns_rows(&mut self, sql: &str) -> Result<bool> {
+        let statement = self.connection.prepare_cached(sql).map_err(to_djox_error)?;
+        Ok(statement.column_count() > 0)
+    }
+
+    /// Runs any one statement in SQLite's `?` style (like [`SqliteConnection::run`])
+    /// without ever waiting for a lock, and, with a `time_limit`, stops it
+    /// once it has run that long: for statements run right on the caller's
+    /// thread, which must not hold it up.
+    ///
+    /// A stopped write is rolled back by SQLite. Outside a transaction that
+    /// is just this statement, but inside one it is the *whole* transaction,
+    /// so the caller gives no time limit for a write inside a transaction.
+    pub fn run_without_waiting(
+        &mut self,
+        sql: &str,
+        parameters: &[Value],
+        time_limit: Option<Duration>,
+    ) -> QuickOutcome {
+        if self.connection.busy_timeout(Duration::ZERO).is_err() {
+            return QuickOutcome::GaveUp;
+        }
+        if let Some(time_limit) = time_limit {
+            let deadline = Instant::now() + time_limit;
+            // SQLite calls this function every `STEPS_BETWEEN_CLOCK_CHECKS`
+            // steps of the statement; answering `true` stops the statement.
+            let stop_after_deadline = move || Instant::now() >= deadline;
+            let _ = self
+                .connection
+                .progress_handler(STEPS_BETWEEN_CLOCK_CHECKS, Some(stop_after_deadline));
+        }
+        let rows = self.sqlite_rows_of(sql, parameters);
+        if time_limit.is_some() {
+            let _ = self.connection.progress_handler(0, None::<fn() -> bool>);
+        }
+        let _ = self.connection.busy_timeout(self.busy_timeout);
+        match rows {
+            Ok(rows) => QuickOutcome::Ran(Ok(StatementOutput {
+                rows,
+                rows_affected: self.rows_affected_by(sql),
+                last_insert_id: self.connection.last_insert_rowid(),
+            })),
+            Err(error) => match error.sqlite_error_code() {
+                // "Busy" and "locked": another connection holds the lock it
+                // needs. "Interrupted": it ran out of time.
+                Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked | ErrorCode::OperationInterrupted) => {
+                    QuickOutcome::GaveUp
+                }
+                _ => QuickOutcome::Ran(Err(to_djox_error(error))),
+            },
+        }
+    }
+
+    /// Stops SQLite from copying the write-ahead log back into the database
+    /// file (a *checkpoint*) at the end of the commit that makes the log long
+    /// enough. It sets `checkpoint_wanted` instead, so that a thread made for
+    /// waiting runs [`SqliteConnection::checkpoint`]: a checkpoint waits for
+    /// the disk, and a commit may run on the event loop's thread (see `writer.rs`).
+    pub fn checkpoint_elsewhere(&mut self, checkpoint_wanted: Arc<AtomicBool>) -> Result<()> {
+        // SQLite calls this after each commit with the log's length in pages.
+        // (Registering it replaces SQLite's own automatic checkpoints.)
+        let note_log_length = move |_log: &mut rusqlite::hooks::Wal, pages: c_int| {
+            if pages >= PAGES_BEFORE_A_CHECKPOINT {
+                // An `AtomicBool` is a `bool` that threads can share without a lock.
+                checkpoint_wanted.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        };
+        self.connection.wal_hook(Some(note_log_length)).map_err(to_djox_error)
+    }
+
+    /// Copies what it can of the write-ahead log back into the database file,
+    /// without waiting for readers (`PASSIVE`), like SQLite's automatic checkpoints.
+    pub fn checkpoint(&mut self) -> Result<()> {
+        self.rows_of("PRAGMA wal_checkpoint(PASSIVE)", &[]).map(|_| ())
+    }
+
     /// Runs a statement that changes data, written with Django's `%s` placeholders.
     pub fn execute(&mut self, sql: &str, parameters: &[Value]) -> Result<Executed> {
         let sql = to_question_marks(sql);
@@ -352,13 +467,25 @@ fn values_of(row: &rusqlite::Row<'_>, column_count: usize) -> Result<Vec<Value>>
 /// statements that change rows. Python's `sqlite3` uses the same test (the
 /// first word) to decide when to report a row count.
 pub fn is_data_change(sql: &str) -> bool {
+    let first_word = first_word_of(sql);
+    first_word == "INSERT" || first_word == "UPDATE" || first_word == "DELETE" || first_word == "REPLACE"
+}
+
+/// Whether `sql` begins or ends a transaction or a savepoint: `BEGIN`,
+/// `COMMIT` (or `END`), `ROLLBACK`, `SAVEPOINT` or `RELEASE`.
+pub fn is_transaction_control(sql: &str) -> bool {
+    let first_word = first_word_of(sql);
+    ["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE"].contains(&first_word.as_str())
+}
+
+/// The first word of `sql`, in capitals.
+fn first_word_of(sql: &str) -> String {
     let first_word: String = sql
         .trim_start()
         .chars()
         .take_while(|character| character.is_ascii_alphabetic())
         .collect();
-    let first_word = first_word.to_ascii_uppercase();
-    first_word == "INSERT" || first_word == "UPDATE" || first_word == "DELETE" || first_word == "REPLACE"
+    first_word.to_ascii_uppercase()
 }
 
 /// A SQLite limit category from its number (the `SQLITE_LIMIT_...` constants
@@ -430,6 +557,9 @@ pub(super) fn typed_to_sqlite(value: &Value) -> rusqlite::types::Value {
         )),
         Value::Duration(length) => Stored::Integer(length.num_microseconds().unwrap_or(i64::MAX)),
         Value::Uuid(uuid) => Stored::Text(uuid.hyphenated().to_string()),
+        // Arrays, ranges and hstores are read from Postgres only: Python's lists
+        // and dicts reach the database as text, so none of these is ever sent here.
+        Value::List(_) | Value::Range(_) | Value::Hstore(_) => Stored::Null,
     }
 }
 

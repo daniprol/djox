@@ -174,6 +174,26 @@ impl Cursor {
         Ok(this)
     }
 
+    /// Runs a statement right away if that needs no waiting, and returns
+    /// `True`; then fetch its rows as after `execute()`. Returns `False` if it
+    /// didn't run: run it with `execute()`, on a thread that may wait.
+    ///
+    /// Only a connection on a database's writer (`Database.writer_connection()`)
+    /// runs statements quickly; for any other one this returns `False`.
+    /// `djox.atomic()` uses it from the event loop, which must never wait.
+    #[pyo3(signature = (sql, parameters = None))]
+    fn execute_quickly(&mut self, py: Python<'_>, sql: &str, parameters: Option<&Bound<'_, PyAny>>) -> PyResult<bool> {
+        self.check_open()?;
+        let (sql, values) = sql_and_values(sql, parameters)?;
+        match self.connection.get().run_quickly(py, &sql, values)? {
+            Some(output) => {
+                self.keep(py, output)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     /// Runs a statement once per item of `parameter_lists` (an `INSERT`,
     /// `UPDATE`, `DELETE` or `REPLACE`). `rowcount` is the total.
     fn executemany<'py>(
