@@ -33,7 +33,8 @@ A query made of these calls, in any order Django accepts:
   `reverse()`, `distinct()`, and slices (`[10:20]`);
 - **`values()` and `values_list()`**, with names or expressions
   (`flat=True` and `named=True` included);
-- **`select_related()`**, and any `prefetch_related()`;
+- **`select_related()`**, and any `prefetch_related()` (the prefetching query of a reverse foreign key
+  takes the fast lane too);
 - then read or written with one of these methods:
 
 | Kind | Async | Sync |

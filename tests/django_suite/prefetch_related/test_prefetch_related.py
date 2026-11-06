@@ -390,6 +390,7 @@ class PrefetchRelatedTests(TestDataMixin, TestCase):
         sql = queries[-1]["sql"]
         self.assertWhereContains(sql, self.author1.id)
 
+    @pytest.mark.django_adapted("djox keeps a reverse m2o prefetch's filter in its recipe: Django's add_q isn't called")
     def test_filter_deferred(self):
         """
         Related filtering of prefetched querysets is deferred on m2m and
@@ -405,7 +406,8 @@ class PrefetchRelatedTests(TestDataMixin, TestCase):
                     side_effect=lambda self, q, reuse_all: add_q(self, q),
                 ) as add_q_mock:
                     list(Book.objects.prefetch_related(relation))
-                    self.assertEqual(add_q_mock.call_count, 1)
+                    # djox: a reverse m2o (the second relation) is filtered by djox's recipe, not by add_q
+                    self.assertEqual(add_q_mock.call_count, 1 if relation == "authors" else 0)
 
     def test_named_values_list(self):
         qs = Author.objects.prefetch_related("books")

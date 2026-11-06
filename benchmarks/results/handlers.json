@@ -1,0 +1,43 @@
+{
+  "machine": "Linux x86_64, 4 CPUs",
+  "python": "3.13.18",
+  "django": "6.1.2",
+  "results": {
+    "Django's handler": {
+      "a sync view: get one book": {
+        "one at a time": 2718.9848010000333,
+        "32 at once": 2666.8562474797577
+      },
+      "an async view: get one book": {
+        "one at a time": 1524.2319420000285,
+        "32 at once": 1309.9460231854994
+      },
+      "a sync view: list a page, with authors": {
+        "one at a time": 2878.2289644999537,
+        "32 at once": 3173.546302923385
+      },
+      "an async view: list a page, with authors": {
+        "one at a time": 1859.5914774999756,
+        "32 at once": 1571.7638079636695
+      }
+    },
+    "djox's handler": {
+      "a sync view: get one book": {
+        "one at a time": 797.048347499981,
+        "32 at once": 1666.1265625000597
+      },
+      "an async view: get one book": {
+        "one at a time": 266.48703149999164,
+        "32 at once": 226.47267187499017
+      },
+      "a sync view: list a page, with authors": {
+        "one at a time": 1292.3320295000167,
+        "32 at once": 2116.0866365927595
+      },
+      "an async view: list a page, with authors": {
+        "one at a time": 507.4990719999733,
+        "32 at once": 449.98389264109517
+      }
+    }
+  }
+}
