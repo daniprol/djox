@@ -373,6 +373,11 @@ class QuerySet(models.QuerySet[ModelType]):
         if prepared is not None:
             self._result_cache = prepared.results(await prepared.fetch_rows(), self)
             return
+        if self.query.select_for_update:
+            # Django checks that the connection is in a transaction while it
+            # writes the SQL, so that runs on the transaction's thread.
+            await self._run_django_method(self._fetch_all, writes=False)
+            return
         self._result_cache = await self._results_from_djox()
 
     async def _results_from_djox(self) -> list[Any]:
