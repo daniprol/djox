@@ -5,7 +5,6 @@ Stock Django against djox, on the same machine and the same data.
 | Benchmark | Measures | Script |
 |---|---|---|
 | [Web app](#web-app-requests-per-second) | Requests per second of a Django + DRF app | `web/load_test.py` |
-| [django-bolt](#django-bolt-requests-per-second) | Requests per second of a django-bolt app, on Django's async ORM and on djox | `bolt/load_test.py` |
 | [ORM calls on SQLite](#orm-calls-on-sqlite) | Microseconds per ORM call | `run.py` |
 | [ORM calls on Postgres](#orm-calls-on-postgres) | Microseconds per ORM call | `postgres.py` |
 
@@ -18,7 +17,6 @@ uv run python run.py                 # ORM calls, SQLite (~2 min)
 uv run python postgres.py            # ORM calls, Postgres (needs DJOX_POSTGRES_URL)
 cargo install oha                    # the HTTP load tool, once
 uv run python web/load_test.py       # web app, SQLite and Postgres (~30 min)
-(cd bolt && uv run python load_test.py)   # django-bolt app, SQLite (~2 min)
 ```
 
 - Postgres scripts use `DJOX_POSTGRES_URL` (default `postgresql://postgres:postgres@localhost/postgres`) and
@@ -95,25 +93,6 @@ Annotations, aggregates and `F()` on SQLite, measured after the tables above, wi
   run (5 rounds, on a faster moment of this VM than the other columns): compare them with each other.
 - **Postgres moves more between rounds** (every query is a network round trip on the same 4 cores). Differences
   under about 10% are noise.
-
-## django-bolt: requests per second
-
-[django-bolt](https://github.com/FarhanAliRaza/django-bolt) is a Rust HTTP server (Actix Web) for Django. Its
-async handlers call the ORM like any async Django code, so `bolt/bolt_shop/api.py` runs unchanged on two stacks:
-Django's async ORM, and djox (`"djox"` in `INSTALLED_APPS` and djox's `ENGINE`).
-
-- **Endpoints**: get one book (random id), list a page of 20 books with their authors (`select_related()`).
-- **Setup**: the web benchmark's shop data on SQLite, one `runbolt` process, oha with 32 connections,
-  median of rounds, stacks taking turns. Needs `oha` (`cargo install oha`).
-
-| | django-bolt + Django | django-bolt + djox |
-|---|---:|---:|
-| get one book | 1,529 | 3,252 (2.1x) |
-| list a page, with authors | 748 | 1,679 (2.2x) |
-
-- Same VM as below, 2 rounds of 4 s: a quick run, so the numbers are rough. Both stacks served every request.
-- Django's async ORM runs each query on a thread, which djox's Rust engine avoids; the fast lane does the rest.
-- django-bolt runs its own threads for sync handlers. This benchmark only uses `async def` handlers.
 
 ## ORM calls on SQLite
 

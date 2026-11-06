@@ -33,8 +33,6 @@ break comes with a migration note.
   `HStoreField` filter in async code.
 - **Tests of async code in a sync transaction** that `TestCase` didn't open (pytest-django's `django_db`,
   `async_to_sync()` inside `atomic()`).
-- **A django-bolt benchmark** (`benchmarks/bolt`): the same django-bolt app on Django's async ORM and on
-  djox (about 2x the requests per second on SQLite).
 
 ### Changed
 
