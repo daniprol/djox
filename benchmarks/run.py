@@ -72,7 +72,7 @@ django.setup()
 
 from asgiref.sync import sync_to_async  # noqa: E402
 from django.db import connection, models, transaction  # noqa: E402  (needs the settings above)
-from django.db.models import Count, F, Prefetch, Sum  # noqa: E402
+from django.db.models import Count, Exists, F, OuterRef, Prefetch, Subquery, Sum  # noqa: E402
 
 import djox  # noqa: E402
 
@@ -200,6 +200,26 @@ def expression_querysets(books: models.Manager) -> dict[str, Callable[[], models
     }
 
 
+def subquery_querysets(books: models.Manager, chapters: models.Manager) -> dict[str, Callable[[], models.QuerySet]]:
+    """Queries with subqueries (`Exists()`, `Subquery()` with `OuterRef()`,
+    `pk__in=queryset`), as querysets of the given managers."""
+    return {
+        "10 books with a chapter 2 (Exists)": lambda: (
+            books.filter(pages=600).filter(Exists(chapters.filter(book=OuterRef("pk"), number=2))).order_by("id")
+        ),
+        "10 books with their last chapter (Subquery)": lambda: (
+            books.filter(pages=600)
+            .annotate(
+                last_chapter=Subquery(chapters.filter(book=OuterRef("pk")).order_by("-number").values("title")[:1])
+            )
+            .order_by("id")
+        ),
+        "10 books in a subquery (pk__in)": lambda: books.filter(
+            pk__in=chapters.filter(book__pages=600, number=2).values("book")
+        ).order_by("id"),
+    }
+
+
 def sum_of_pages(books: models.Manager) -> object:
     return books.filter(pages__gt=500).aggregate(total=Sum("pages"))
 
@@ -222,6 +242,7 @@ def make_django_sync() -> dict[str, Callable[[], object]]:
         "get or create (exists)": lambda: Book.objects.get_or_create(id=7, defaults=new_book()),
         **listed(related_querysets(Book.objects, Chapter.objects)),
         **listed(expression_querysets(Book.objects)),
+        **listed(subquery_querysets(Book.objects, Chapter.objects)),
         "sum of pages": lambda: sum_of_pages(Book.objects),
         "update with F()": lambda: add_a_page(Book.objects),
     }
@@ -263,6 +284,7 @@ def make_django_async() -> dict[str, Callable[[], Awaitable[object]]]:
         "get or create (exists)": lambda: Book.objects.aget_or_create(id=7, defaults=new_book()),
         **fetched(related_querysets(Book.objects, Chapter.objects)),
         **fetched(expression_querysets(Book.objects)),
+        **fetched(subquery_querysets(Book.objects, Chapter.objects)),
         "sum of pages": lambda: Book.objects.filter(pages__gt=500).aaggregate(total=Sum("pages")),
         "update with F()": lambda: Book.objects.filter(id=7).aupdate(pages=F("pages") + 1),
     }
@@ -316,6 +338,7 @@ def make_djox_sync(manager: models.Manager, chapter_manager: models.Manager) -> 
         "get or create (exists)": lambda: books.get_or_create(id=7, defaults=new_book()),
         **listed(related_querysets(books, chapter_manager.db_manager("djox"))),
         **listed(expression_querysets(books)),
+        **listed(subquery_querysets(books, chapter_manager.db_manager("djox"))),
         "sum of pages": lambda: sum_of_pages(books),
         "update with F()": lambda: add_a_page(books),
     }
@@ -346,6 +369,7 @@ def make_djox_manager() -> dict[str, Callable[[], Awaitable[object]]]:
         "get or create (exists)": lambda: books.aget_or_create(id=7, defaults=new_book()),
         **fetched(related_querysets(books, Chapter.djox_objects.db_manager("djox"))),
         **fetched(expression_querysets(books)),
+        **fetched(subquery_querysets(books, Chapter.djox_objects.db_manager("djox"))),
         "sum of pages": lambda: books.filter(pages__gt=500).aaggregate(total=Sum("pages")),
         "update with F()": lambda: books.filter(id=7).aupdate(pages=F("pages") + 1),
     }
@@ -404,6 +428,9 @@ REPEATS = {
     "20 books with their chapters": 500,
     "10 books with a chapter count": 500,
     "10 books by chapter title": 500,
+    "10 books with a chapter 2 (Exists)": 500,
+    "10 books with their last chapter (Subquery)": 500,
+    "10 books in a subquery (pk__in)": 500,
     "sum of pages": 300,
     "update with F()": 500,
 }
